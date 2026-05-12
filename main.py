@@ -15,6 +15,7 @@ from typing import List, Dict, Any, Optional
 from threading import Lock
 import httpx
 from PIL import Image
+from io import BytesIO
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, UploadFile, File, Header, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, Response, StreamingResponse
@@ -420,6 +421,7 @@ class MsGenerateRequest(BaseModel):
     image_urls: List[str] = []
     width: int = 0
     height: int = 0
+    size: str = ""
     loras: Optional[Any] = None
     client_id: Optional[str] = None
 
@@ -864,10 +866,28 @@ def convert_output_to_jpg(url, quality=88):
         print(f"转换 JPG 失败: {e}")
         return url
 
-def reference_to_data_url(ref):
+def reference_to_data_url(ref, max_size=None):
+    """把本地输出文件转为 data URL（base64）。max_size 限制最长边像素，避免 payload 过大。"""
     path = output_file_from_url(ref.get("url", ""))
     if not path:
         return ref.get("url", "")
+    if max_size:
+        try:
+            with Image.open(path) as img:
+                img.load()
+                w, h = img.size
+                if max(w, h) > max_size:
+                    img.thumbnail((max_size, max_size), Image.LANCZOS)
+                if img.mode not in ("RGB", "RGBA"):
+                    img = img.convert("RGB")
+                buf = BytesIO()
+                fmt = "PNG" if img.mode == "RGBA" else "JPEG"
+                img.save(buf, format=fmt, quality=88 if fmt == "JPEG" else None)
+                encoded = base64.b64encode(buf.getvalue()).decode("ascii")
+                mime = "image/png" if fmt == "PNG" else "image/jpeg"
+                return f"data:{mime};base64,{encoded}"
+        except Exception as e:
+            print(f"reference resize failed, fallback to raw: {e}")
     with open(path, "rb") as f:
         encoded = base64.b64encode(f.read()).decode("ascii")
     return f"data:{content_type_for_path(path)};base64,{encoded}"
@@ -915,7 +935,8 @@ async def generate_modelscope_provider_image(prompt, size, model, reference_imag
     for ref in (reference_images or [])[:4]:
         if not ref.get("url"):
             continue
-        refs.append(reference_to_data_url(ref))
+        # 把参考图压到 1024px 长边以内，避免 base64 payload 过大导致 MS 内部任务失败
+        refs.append(reference_to_data_url(ref, max_size=1024))
     headers = {
         "Authorization": f"Bearer {clean_token}",
         "Content-Type": "application/json",
@@ -978,9 +999,13 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
     edit_url = f"{base_url}/images/edits" if base_url.endswith("/v1") else f"{base_url}/v1/images/edits"
     refs = [ref for ref in (reference_images or []) if ref.get("url")]
     async with httpx.AsyncClient(timeout=AI_REQUEST_TIMEOUT) as client:
+        response = None
         if refs:
+            # 1) 先用 multipart 提交到 /images/edits（OpenAI / Comfly 风格）
             files = []
             opened = []
+            edit_failed_status = None
+            edit_failed_text = ""
             try:
                 for ref in refs[:4]:
                     path = output_file_from_url(ref.get("url", ""))
@@ -990,10 +1015,29 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
                     opened.append(fh)
                     files.append(("image", (os.path.basename(path), fh, content_type_for_path(path))))
                 data = {"model": model, "prompt": prompt, "size": size, "quality": quality, "response_format": "url", "n": "1"}
-                response = await client.post(edit_url, headers=api_headers(json_body=False, provider=provider), data=data, files=files)
+                try:
+                    response = await client.post(edit_url, headers=api_headers(json_body=False, provider=provider), data=data, files=files)
+                    if response.status_code >= 400:
+                        edit_failed_status = response.status_code
+                        edit_failed_text = response.text[:500]
+                        response = None
+                except httpx.HTTPError as e:
+                    edit_failed_status = -1
+                    edit_failed_text = str(e)
+                    response = None
             finally:
                 for fh in opened:
                     fh.close()
+            # 2) edits 失败 → 回退到 /images/generations + JSON image:[urls/base64]（grsai 风格）
+            if response is None:
+                print(f"/images/edits failed ({edit_failed_status}): {edit_failed_text[:200]} → 回退到 /images/generations + image:[] JSON")
+                image_payload = [reference_to_data_url(ref, max_size=1536) for ref in refs[:4]]
+                body = {
+                    "model": model, "prompt": prompt, "size": size,
+                    "quality": quality, "response_format": "url", "n": 1,
+                    "image": image_payload,
+                }
+                response = await client.post(gen_url, headers=api_headers(provider=provider), json=body)
         else:
             response = await client.post(
                 gen_url,
@@ -1838,6 +1882,9 @@ async def ms_generate(req: MsGenerateRequest):
     if req.width and req.height:
         payload["width"] = req.width
         payload["height"] = req.height
+        payload["size"] = req.size or f"{req.width}x{req.height}"
+    elif req.size:
+        payload["size"] = req.size
     if req.image_urls:
         payload["image_url"] = req.image_urls
     if req.loras is not None:
@@ -2075,6 +2122,183 @@ def generate(req: GenerateRequest):
             with QUEUE_LOCK:
                 if current_task in QUEUE:
                     QUEUE.remove(current_task)
+
+# --- ComfyUI 工作流管理 ---
+
+BUILTIN_WORKFLOWS = {"Z-Image.json", "Z-Image-Enhance.json", "2511.json", "klein-enhance.json", "Flux2-Klein.json", "upscale.json"}
+CUSTOM_WORKFLOW_FOLDER = "custom"
+LEGACY_CUSTOM_WORKFLOW_FOLDER = "自定义"
+WORKFLOW_NAME_RE = re.compile(rf"^(?:(?:{CUSTOM_WORKFLOW_FOLDER}|{LEGACY_CUSTOM_WORKFLOW_FOLDER})/)?[a-zA-Z0-9_一-龥\.\-]+\.json$")
+
+class WorkflowField(BaseModel):
+    id: str
+    node: str = ""
+    input: str = ""
+    name: str = ""
+    type: str = "text"
+    default: Any = None
+    min: Optional[float] = None
+    max: Optional[float] = None
+    step: Optional[float] = None
+    options: List[str] = []
+
+class WorkflowConfig(BaseModel):
+    title: str = ""
+    fields: List[WorkflowField] = []
+    mini_cards: Dict[str, Any] = {}
+
+class WorkflowUploadRequest(BaseModel):
+    name: str
+    workflow: Dict[str, Any]
+
+class WorkflowRunRequest(BaseModel):
+    fields: Dict[str, Any] = {}
+    config: WorkflowConfig
+    client_id: str = ""
+
+def workflow_path_from_name(name: str) -> str:
+    if not WORKFLOW_NAME_RE.match(name):
+        raise HTTPException(status_code=400, detail="Invalid workflow name")
+    path = os.path.abspath(os.path.join(WORKFLOW_DIR, *name.split("/")))
+    workflow_root = os.path.abspath(WORKFLOW_DIR)
+    if os.path.commonpath([workflow_root, path]) != workflow_root:
+        raise HTTPException(status_code=400, detail="Invalid workflow name")
+    return path
+
+def workflow_config_path(name: str) -> str:
+    return workflow_path_from_name(name).replace(".json", ".config.json")
+
+def is_builtin_workflow(name: str) -> bool:
+    return "/" not in name and os.path.basename(name) in BUILTIN_WORKFLOWS
+
+@app.get("/api/workflows")
+def list_workflows():
+    if not os.path.isdir(WORKFLOW_DIR):
+        return {"workflows": []}
+    items = []
+    for root, dirs, files in os.walk(WORKFLOW_DIR):
+        if os.path.abspath(root) == os.path.abspath(WORKFLOW_DIR):
+            dirs[:] = [d for d in dirs if d in {CUSTOM_WORKFLOW_FOLDER, LEGACY_CUSTOM_WORKFLOW_FOLDER}]
+        for fn in sorted(files):
+            if not fn.endswith(".json") or fn.endswith(".config.json"):
+                continue
+            rel = os.path.relpath(os.path.join(root, fn), WORKFLOW_DIR).replace("\\", "/")
+            if is_builtin_workflow(rel):
+                continue
+            cfg = {}
+            cfg_path = workflow_config_path(rel)
+            if os.path.exists(cfg_path):
+                try:
+                    with open(cfg_path, "r", encoding="utf-8") as f:
+                        cfg = json.load(f) or {}
+                except Exception:
+                    cfg = {}
+            items.append({
+                "name": rel,
+                "title": cfg.get("title") or fn.replace(".json", ""),
+                "builtin": False,
+                "field_count": len(cfg.get("fields") or []),
+            })
+    items.sort(key=lambda item: (0 if item["name"].startswith(f"{CUSTOM_WORKFLOW_FOLDER}/") else 1, item["title"]))
+    return {"workflows": items}
+
+@app.get("/api/workflows/{name:path}")
+def get_workflow(name: str):
+    if not WORKFLOW_NAME_RE.match(name):
+        raise HTTPException(status_code=400, detail="Invalid workflow name")
+    workflow_path = workflow_path_from_name(name)
+    if not os.path.exists(workflow_path):
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    with open(workflow_path, "r", encoding="utf-8") as f:
+        workflow = json.load(f)
+    cfg = {"title": name.replace(".json", ""), "fields": []}
+    cfg_path = workflow_config_path(name)
+    if os.path.exists(cfg_path):
+        try:
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                cfg = json.load(f) or cfg
+        except Exception:
+            pass
+    return {"name": name, "workflow": workflow, "config": cfg, "builtin": is_builtin_workflow(name)}
+
+@app.post("/api/workflows")
+def upload_workflow(payload: WorkflowUploadRequest):
+    name = os.path.basename(payload.name.strip())
+    if not name.endswith(".json"):
+        name = name + ".json"
+    if not WORKFLOW_NAME_RE.match(name):
+        raise HTTPException(status_code=400, detail="工作流名称不合法，请使用中文/英文/数字/_-.")
+    if not isinstance(payload.workflow, dict) or not payload.workflow:
+        raise HTTPException(status_code=400, detail="工作流 JSON 为空")
+    # 简单校验：是 API 格式（节点 id 为 key，含 class_type）
+    sample = next(iter(payload.workflow.values()), None)
+    if not isinstance(sample, dict) or "class_type" not in sample:
+        raise HTTPException(status_code=400, detail="不是有效的 ComfyUI API 工作流 JSON（需包含 class_type）")
+    custom_dir = os.path.join(WORKFLOW_DIR, CUSTOM_WORKFLOW_FOLDER)
+    os.makedirs(custom_dir, exist_ok=True)
+    stored_name = f"{CUSTOM_WORKFLOW_FOLDER}/{name}"
+    path = workflow_path_from_name(stored_name)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload.workflow, f, ensure_ascii=False, indent=2)
+    return {"name": stored_name}
+
+@app.put("/api/workflows/{name:path}/config")
+def save_workflow_config(name: str, payload: WorkflowConfig):
+    if not WORKFLOW_NAME_RE.match(name):
+        raise HTTPException(status_code=400, detail="Invalid workflow name")
+    workflow_path = workflow_path_from_name(name)
+    if not os.path.exists(workflow_path):
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    cfg_path = workflow_config_path(name)
+    with open(cfg_path, "w", encoding="utf-8") as f:
+        json.dump(payload.dict(), f, ensure_ascii=False, indent=2)
+    return {"config": payload.dict()}
+
+@app.delete("/api/workflows/{name:path}")
+def delete_workflow(name: str):
+    if not WORKFLOW_NAME_RE.match(name):
+        raise HTTPException(status_code=400, detail="Invalid workflow name")
+    if is_builtin_workflow(name):
+        raise HTTPException(status_code=400, detail="内置工作流不可删除")
+    workflow_path = workflow_path_from_name(name)
+    cfg_path = workflow_config_path(name)
+    if not os.path.exists(workflow_path):
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    os.remove(workflow_path)
+    if os.path.exists(cfg_path):
+        os.remove(cfg_path)
+    return {"ok": True}
+
+@app.post("/api/workflows/{name:path}/run")
+def run_workflow(name: str, payload: WorkflowRunRequest):
+    if not WORKFLOW_NAME_RE.match(name):
+        raise HTTPException(status_code=400, detail="Invalid workflow name")
+    if not os.path.exists(workflow_path_from_name(name)):
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    # 根据 config 的字段把值映射成 params 节点覆盖
+    params: Dict[str, Dict[str, Any]] = {}
+    for field in payload.config.fields:
+        if not field.node or not field.input:
+            continue
+        if field.id in payload.fields:
+            value = payload.fields[field.id]
+            # 类型转换
+            if field.type in ("number", "slider"):
+                try:
+                    value = float(value) if (field.step and field.step < 1) else int(float(value))
+                except Exception:
+                    pass
+            elif field.type == "boolean":
+                value = bool(value)
+            params.setdefault(field.node, {})[field.input] = value
+    req = GenerateRequest(
+        prompt="",
+        workflow_json=name,
+        params=params,
+        type="workflow-test",
+        client_id=payload.client_id or str(uuid.uuid4()),
+    )
+    return generate(req)
 
 if __name__ == "__main__":
     import uvicorn

@@ -14,91 +14,21 @@ https://apimart.ai/register?aff=1uyAbb
 【A version file has been added. I update the version number with each update. If you download the version file, the GitHub button in the navigation bar will indicate the new version after opening the project. If you don't want to see update notifications, delete the version file.】
 
 ----
-5/13日更新：
-1. 修复了安装依赖的报错
-2. 增加了更便捷的API设置方式，现在可以全程在网页中设置，并且可以拉取模型一键添加
-3. LLM节点支持图片输入反推，可以使用modelscope的VL模型测试
-4. 增加了中英文切换
-5. 增加了自定义comfyui工作流的功能，可以自己设置需要的输入和要调整的参数，可以在无限画布的comfyui节点中调用。
-6. 增加了视频生成功能
-7. 修复了2k/4k生成报错问题
-8. 新增了生成节点可以通过output前后连接一键生成
+5/21日更新：
+1. 最新做了智能画布，排除一切节点干扰，画面舒适。
+2. 增加了资产库管理
+3. 增加了@图片的功能
 
-5/14日更新：
-1. 修复mac的一些bug
-2. modelscope支持lora调用
-3. 支持OpenAI协议和异步协议（生成失败不扣费）
+May 21st Update:
 
-5/15日更新：
-1. 增加了循环组件和计数功能，可以将节点循环/并发运行N次，同时有提示词计数功能，可以设置提示词为：运行第二张卖点图。
-用法可以是：使用Gemini生成产品10个卖点提示词。用循环节点，增加提示词：运行第X张卖点图，输入给API节点，调用GPT生成，就可以一次性并发生成10个卖点图。
-2. 增加协议的验证按键，可以方便的验证自己的API平台是什么协议
-3. 修复了LLM节点的一些bug
-4. 上传了精简版的python，运行“安装依赖.bat”，完成之后，运行"run.bat"
+1. Added a smart canvas to eliminate all node interference for a more comfortable viewing experience.
 
-5/18日更新：
-1. 修复了视频生成bug
-2. 增加了画笔编辑
-3. 修复了ccomfyui的并发bug
-   
------
+2. Added asset library management.
 
-Detailed tutorial: [https://youtu.be/1y9ShTvgC_w](https://youtu.be/r_y_9ALr7fg)
+3. Added the @image functionality.
 
-Due to the recent shutdown of many API websites, I found a stable one:
-
-https://apimart.ai/register?aff=1uyAbb
-
-[Discount code (daxiong): 10% off your first top-up, invoice available.]
-
-
-May 13th Update:
-
-1. Fixed dependency installation errors.
-
-2. Added a more convenient API setup method; settings can now be configured entirely through the webpage, and models can be added with a single click.
-
-3. LLM nodes support image input for reverse engineering; VL models from ModelScope can be used for testing.
-
-4. Added Chinese/English switching functionality.
-
-5. Added the ability to customize ComfyUI workflows; users can set their own inputs and adjust parameters, and these workflows can be invoked within ComfyUI nodes on an infinite canvas.
-
-6. Added video generation functionality.
-
-7. Fixed 2K/4K generation error issues.
-
-8. Added the ability to generate videos with a single click by connecting output nodes before and after.
-
-May 14th Update:
-
-1. Fixed some bugs on Mac.
-
-2. ModelScope supports LoRa calls.
-
-3. Supports OpenAI protocol and asynchronous protocol (no charge for generation failures).
-
-May 15th Update:
-
-1. Added a loop component and counting function, allowing nodes to run concurrently N times. It also includes a prompt word counting function, where the prompt word can be set to: "Run the second selling point image."
-
-Usage: Use Gemini to generate 10 selling point prompt words for a product. Use the loop node, add the prompt word: "Run the Xth selling point image," input it to the API node, call GPT to generate, and you can generate 10 selling point images concurrently at once.
-
-2. Added a protocol verification button for easy verification of your API platform's protocol.
-
-3. Fixed some bugs in the LLM node.
-
-4. Uploaded a simplified version of Python. Run "安装依赖.bat", and then run "run.bat".
-   
-
-May 18th Update:
-
-1. Fixed a video generation bug.
-
-2. Added brush editing.
-
-3. Fixed a concurrency bug in ccomfyui.
-
+<img width="1990" height="910" alt="image" src="https://github.com/user-attachments/assets/d2e3a7cb-7f54-4961-842b-b21aa195796a" />
+<img width="1865" height="1503" alt="image" src="https://github.com/user-attachments/assets/f4030201-67c6-4845-b08b-b6fdf304afaa" />
 
 
 <img width="1696" height="1350" alt="b68e144c5b04a322bfd035da4d89aba3" src="https://github.com/user-attachments/assets/0a6090fb-a8dd-4c3d-adee-b1f9233a2d91" />

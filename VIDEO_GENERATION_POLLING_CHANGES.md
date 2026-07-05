@@ -1,0 +1,1219 @@
+# 视频生成接口与轮询逻辑改动详解
+
+本文档记录当前项目中“视频生成接口选择、视频任务提交、轮询查询、失败终止、刷新/重启恢复、补丁脚本重放”相关改动。目标是方便后续同步上游项目、增加新的视频生成中转站、排查“上游接口错误/余额不足/任务不结束”等问题。
+
+## 1. 背景与目标
+
+原先视频生成路径主要存在两个问题：
+
+1. 前端直接请求 `/api/canvas-video`，这是一个长请求。视频生成耗时较长时，刷新页面、后端重启、网络断开都会导致前端丢失任务状态。
+2. 某些上游会在轮询阶段返回明确的终态错误，例如余额不足、额度不足、支付/账单问题。如果仍把这类错误当作“可稍后查询”的任务，就会出现前端一直 pending，无法正确终止。
+
+本次改动后的目标：
+
+- 保留同步兼容接口 `/api/canvas-video`，但普通画布和智能画布的主流程改走任务化接口。
+- 新增本地任务接口：
+  - 提交：`POST /api/canvas-video-tasks`
+  - 查询：`GET /api/canvas-video-tasks/{task_id}`
+- 前端先保存本地 pending 状态，再轮询本地任务接口；刷新页面或后端重启后，能尽量恢复查询。
+- 视频轮询间隔从 5 秒开始，避免轮询过快导致上游失败或拒绝。
+- 识别余额不足等终态错误，直接失败并清理 pending，不再无限等待。
+- 通过补丁脚本 `tools/patches/video_request_mode_patch.py` 保留改动，便于原项目更新后重新打补丁。
+
+## 2. 文件总览
+
+| 文件 | 作用 |
+| --- | --- |
+| `main.py` | 后端视频接口模式、上游提交/查询 URL、视频任务持久化、启动恢复、轮询、错误识别。 |
+| `static/js/canvas.js` | 普通画布视频节点提交本地任务、保存 pending、5 秒轮询、失败/完成处理、手动查询。 |
+| `static/js/smart-canvas.js` | 智能画布视频生成改为任务化，支持 pending 恢复、手动查询、终态错误终止。 |
+| `static/api-settings.html` | API 设置页增加视频接口原生下拉。 |
+| `static/js/api-settings.js` | 保存/读取 `video_request_mode`，展示 `videos` / `video` 接口模式。 |
+| `tools/patches/video_request_mode_patch.py` | 可重放补丁脚本，更新上游项目后可再次应用。 |
+| `重放视频接口补丁.bat` | Windows 下运行补丁脚本的入口。 |
+
+## 3. 对外接口
+
+### 3.1 保留的同步接口
+
+```http
+POST /api/canvas-video
+Content-Type: application/json
+```
+
+用途：
+
+- 兼容旧调用。
+- 后端内部仍通过 `build_canvas_video_result(payload)` 完整执行提交和等待。
+- 不适合作为前端主流程，因为它是一个长请求。
+
+### 3.2 新增任务化提交接口
+
+```http
+POST /api/canvas-video-tasks
+Content-Type: application/json
+```
+
+请求体复用 `CanvasVideoRequest`：
+
+```json
+{
+  "prompt": "一段视频提示词",
+  "provider_id": "comfly",
+  "model": "veo3-fast",
+  "duration": 5,
+  "aspect_ratio": "16:9",
+  "resolution": "",
+  "images": [],
+  "videos": [],
+  "audios": [],
+  "enhance_prompt": false,
+  "enable_upsample": false,
+  "watermark": false,
+  "camerafixed": false,
+  "generate_audio": false,
+  "multimodal": false,
+  "trusted_asset": false
+}
+```
+
+成功响应：
+
+```json
+{
+  "task_id": "canvas_video_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+  "status": "queued"
+}
+```
+
+特点：
+
+- 接口立即返回本地任务 ID。
+- 后端通过 `asyncio.create_task(run_canvas_video_task(task_id, payload))` 在后台继续执行。
+- 前端保存本地 pending 以后再轮询，避免刷新页面后任务状态完全丢失。
+
+### 3.3 新增任务查询接口
+
+```http
+GET /api/canvas-video-tasks/{task_id}
+```
+
+可能响应：
+
+```json
+{
+  "id": "canvas_video_xxx",
+  "type": "online-video",
+  "status": "polling",
+  "created_at": 1760000000.0,
+  "updated_at": 1760000005.0,
+  "result": null,
+  "videos": [],
+  "error": "",
+  "provider_id": "comfly",
+  "model": "veo3-fast",
+  "request": {
+    "prompt": "...",
+    "provider_id": "comfly",
+    "model": "veo3-fast",
+    "duration": 5,
+    "aspect_ratio": "16:9",
+    "resolution": "",
+    "image_count": 1,
+    "video_count": 0,
+    "audio_count": 0
+  },
+  "upstream_task_id": "task_xxx",
+  "submit_url": "https://example.com/v1/videos/generations",
+  "retry_after": null,
+  "next_poll_at": null,
+  "raw_submit": {},
+  "raw_last": {}
+}
+```
+
+终态成功：
+
+```json
+{
+  "status": "succeeded",
+  "result": {
+    "videos": ["/output/video-xxx.mp4"],
+    "task_id": "upstream_task_id",
+    "raw": {}
+  },
+  "videos": ["/output/video-xxx.mp4"],
+  "error": ""
+}
+```
+
+终态失败：
+
+```json
+{
+  "status": "failed",
+  "error": "视频生成任务失败：Insufficient credits...",
+  "status_code": 402,
+  "retry_after": null,
+  "next_poll_at": null
+}
+```
+
+## 4. API 设置页的视频接口选择
+
+API 设置页保留原生 `<select>`，对应文件：
+
+- `static/api-settings.html`
+- `static/js/api-settings.js`
+- `main.py`
+
+下拉选项：
+
+```html
+<select id="videoRequestModeInput" title="视频接口">
+  <option value="openai-videos-generations">视频：videos</option>
+  <option value="openai-video-generations">视频：video</option>
+</select>
+```
+
+### 4.1 两种模式的含义
+
+| UI 显示 | 保存值 | 提交接口 | 查询接口 |
+| --- | --- | --- | --- |
+| 视频：videos | `openai-videos-generations` | `/v1/videos/generations` | `/v1/videos/generations/{task_id}`，并兼容 `/v1/tasks/{task_id}`、`/v2/videos/generations/{task_id}` |
+| 视频：video | `openai-video-generations` | `/v1/video/generations` | `/v1/video/generations/{task_id}` |
+
+用户当前提到的中转站接口：
+
+```text
+提交接口：/v1/video/generations
+查询接口：/v1/video/generations/{task_id}
+```
+
+应选择：
+
+```text
+视频：video
+```
+
+也就是保存值：
+
+```json
+{
+  "video_request_mode": "openai-video-generations"
+}
+```
+
+### 4.2 默认值与兼容别名
+
+前端 `normalizeVideoRequestMode(value)` 与后端 `normalize_video_request_mode(value)` 都做了兼容：
+
+- `openai-video`
+- `single-video`
+- `video-generations`
+
+都会归一为：
+
+```text
+openai-video-generations
+```
+
+以下值：
+
+- `openai-videos`
+- `videos-generations`
+
+都会归一为：
+
+```text
+openai-videos-generations
+```
+
+默认值为：
+
+```text
+openai-videos-generations
+```
+
+## 5. 后端视频任务模型
+
+### 5.1 本地任务 ID 与上游任务 ID
+
+本地任务 ID：
+
+```text
+canvas_video_{uuid}
+```
+
+用于前端查询本项目后端：
+
+```http
+GET /api/canvas-video-tasks/canvas_video_xxx
+```
+
+上游任务 ID：
+
+```text
+upstream_task_id / task_id / submit_id / video_id
+```
+
+用于后端向中转站或上游平台查询真实生成进度。
+
+二者不要混淆：
+
+- 前端普通轮询应拿本地 `canvas_video_xxx` 查询 `/api/canvas-video-tasks/{task_id}`。
+- 后端内部拿 `upstream_task_id` 查询上游。
+- 手动恢复时，如果是本地视频任务，优先用本地任务 ID；不要直接把上游 ID 当成本地接口 ID。
+
+### 5.2 任务字段
+
+`POST /api/canvas-video-tasks` 创建任务时，后端写入类似结构：
+
+```python
+task = {
+    "id": task_id,
+    "type": "online-video",
+    "status": "queued",
+    "created_at": time.time(),
+    "updated_at": time.time(),
+    "result": None,
+    "videos": [],
+    "error": "",
+    "provider_id": payload.provider_id,
+    "model": payload.model,
+    "request": video_task_request_meta(payload),
+    "upstream_task_id": "",
+    "submit_url": "",
+    "retry_after": None,
+    "next_poll_at": None
+}
+```
+
+重要字段说明：
+
+| 字段 | 含义 |
+| --- | --- |
+| `id` | 本地任务 ID，前端轮询使用。 |
+| `type` | 固定为 `online-video`，用于区分普通图片任务。 |
+| `status` | `queued`、`submitting`、`polling`、`succeeded`、`failed` 等。 |
+| `result` | 成功后的完整结果。 |
+| `videos` | 提取出来的本地视频 URL 列表。 |
+| `error` | 失败原因。 |
+| `provider_id` | 使用的视频平台。 |
+| `model` | 使用的视频模型。 |
+| `request` | 简化后的请求元信息，用于日志/恢复/排查。 |
+| `upstream_task_id` | 上游平台返回的任务 ID。 |
+| `submit_url` | 实际命中的上游提交接口。 |
+| `retry_after` | 上游要求下次查询等待的秒数。 |
+| `next_poll_at` | 后端预计下一次查询时间戳。 |
+| `raw_submit` | 上游提交阶段原始响应。 |
+| `raw_last` | 最近一次上游查询原始响应。 |
+
+### 5.3 状态流转
+
+```mermaid
+flowchart TD
+    A["前端 POST /api/canvas-video-tasks"] --> B["queued"]
+    B --> C["submitting"]
+    C --> D{"上游是否返回任务 ID 或直接返回视频"}
+    D -->|"直接返回视频"| E["succeeded"]
+    D -->|"返回上游任务 ID"| F["polling"]
+    D -->|"提交失败"| G["failed"]
+    F --> H{"轮询上游"}
+    H -->|"生成完成"| E
+    H -->|"明确失败/余额不足"| G
+    H -->|"仍在生成"| F
+    H -->|"retry_after"| I["记录 retry_after / next_poll_at"]
+    I --> F
+```
+
+## 6. 后端上游接口选择逻辑
+
+### 6.1 Base URL 归一
+
+`video_api_root(provider)` 会先处理 Base URL：
+
+- 如果是火山方舟，保留方舟路径逻辑。
+- 如果 Base URL 以 `/v1` 或 `/v2` 结尾，会去掉最后一级，后续统一拼接。
+
+例如：
+
+```text
+https://api.example.com/v1
+```
+
+归一为：
+
+```text
+https://api.example.com
+```
+
+然后再拼接：
+
+```text
+https://api.example.com/v1/video/generations
+```
+
+### 6.2 提交 URL 候选
+
+`video_submit_url_candidates(provider, base_url)` 根据平台和 `video_request_mode` 返回提交 URL。
+
+普通 OpenAI 兼容中转：
+
+```python
+if video_request_mode == "openai-video-generations":
+    return [f"{base_url}/v1/video/generations"]
+return [f"{base_url}/v1/videos/generations", f"{base_url}/v2/videos/generations"]
+```
+
+特殊平台有自己的路径：
+
+| 平台 | 提交接口 |
+| --- | --- |
+| Agnes | `/v1/videos` |
+| APIMart | `/v1/videos/generations` 或 `/videos/generations` |
+| 火山方舟 | `/api/v3/contents/generations/tasks` |
+| 玉玉 API 原生 | `/v1/video/create` |
+| RunningHub / 即梦 | 平台自己的生成逻辑 |
+
+### 6.3 查询 URL 候选
+
+`video_task_url_candidates(provider, base_url, task_id, submit_url)` 根据平台和提交 URL 返回查询 URL。
+
+对用户当前这种中转站：
+
+```python
+if video_request_mode == "openai-video-generations":
+    return [f"{base_url}/v1/video/generations/{quoted_id}"]
+```
+
+对默认 `videos` 模式：
+
+```python
+v1_task = f"{base_url}/v1/videos/generations/{quoted_id}"
+v1_generic_task = f"{base_url}/v1/tasks/{quoted_id}"
+v2_task = f"{base_url}/v2/videos/generations/{quoted_id}"
+```
+
+如果提交阶段命中 `/v2/videos/generations`，查询时会优先尝试 `/v2/videos/generations/{id}`。
+
+## 7. 后端轮询逻辑
+
+### 7.1 全局超时
+
+后端视频轮询超时由环境变量控制：
+
+```python
+VIDEO_POLL_TIMEOUT = float(os.getenv("VIDEO_POLL_TIMEOUT", "1800"))
+```
+
+默认：
+
+```text
+1800 秒，也就是 30 分钟
+```
+
+### 7.2 起始轮询间隔
+
+通用视频轮询：
+
+```python
+delay = max(5.0, IMAGE_POLL_INTERVAL)
+```
+
+Agnes 视频轮询：
+
+```python
+delay = 5.0
+```
+
+前端普通画布视频轮询：
+
+```javascript
+await sleep(5000);
+```
+
+前端智能画布视频轮询：
+
+```javascript
+await sleep(5000);
+```
+
+结论：
+
+```text
+视频轮询统一从 5 秒开始。
+```
+
+### 7.3 后端动态退避
+
+通用视频任务在没有 `retry_after` 时，轮询间隔会逐步增长：
+
+```python
+delay = min(delay * 1.6, 12)
+```
+
+Agnes 视频任务：
+
+```python
+delay = min(delay * 1.35, 12)
+```
+
+也就是说，后端轮询不会一直高频请求，最终最多约 12 秒一次。
+
+### 7.4 retry_after 支持
+
+`video_retry_after_seconds(source)` 会从多个地方识别等待时间：
+
+- HTTP 响应头：
+  - `Retry-After`
+- JSON 字段：
+  - `retry_after`
+  - `retryAfter`
+  - `wait_seconds`
+  - `waitSeconds`
+  - `seconds`
+  - `delay`
+- 文本提示：
+  - `retry_after: 10`
+  - `请等待 10 秒`
+  - `10 秒后再试`
+  - `retry after 10 seconds`
+
+识别到以后，后端会更新本地任务：
+
+```json
+{
+  "status": "polling",
+  "retry_after": 10,
+  "next_poll_at": 1760000010.0,
+  "raw_last": {}
+}
+```
+
+注意：
+
+- `retry_after` 是上游节流/排队提示，不等于失败。
+- 但如果响应同时是余额不足等终态错误，终态错误优先，不会因为 `retry_after` 继续轮询。
+
+## 8. 终态错误识别
+
+### 8.1 解决的问题
+
+用户遇到过类似错误：
+
+```json
+{
+  "error": {
+    "message": "Insufficient credits. Need ~20, remaining 13.00",
+    "type": "insufficient_quota",
+    "estimated_cost": 20,
+    "credits_remaining": 13
+  }
+}
+```
+
+这类错误不是“任务还在生成”，而是明确失败。如果前端仍保留 pending，就会造成任务不终止。
+
+### 8.2 后端识别规则
+
+`is_video_terminal_error(source)` 会递归扫描 JSON、异常、响应文本，命中以下关键词即认为是终态错误：
+
+```text
+insufficient_quota
+insufficient credits
+credits_remaining
+not enough credits
+quota exceeded
+payment required
+billing
+余额不足
+额度不足
+```
+
+### 8.3 后端处理位置
+
+在 `wait_for_video_task()` 中：
+
+1. 如果 HTTP 状态码是 4xx/5xx，并且响应内容命中终态错误，立即抛出 `HTTPException`。
+2. 如果捕获到异常，并且异常内容命中终态错误，立即抛出。
+3. 如果轮询返回 JSON 内容命中终态错误，立即失败。
+
+Agnes 的 `wait_for_agnes_video_task()` 同样有这套逻辑。
+
+### 8.4 前端智能画布终态错误
+
+智能画布里还有一层前端判断：
+
+```javascript
+function isSmartTerminalTaskError(message){
+    const text = String(message || '').toLowerCase();
+    return /(insufficient[_\s-]*quota|insufficient\s+credits?|credits[_\s-]*remaining|not\s+enough\s+credits?|quota\s+exceeded|payment\s+required|billing|余额不足|额度不足)/i.test(text);
+}
+```
+
+用途：
+
+- 如果失败是余额不足等终态错误，就直接失败。
+- 如果失败里带有上游任务 ID，但不是终态错误，则保留可恢复查询状态。
+
+## 9. 普通画布视频流程
+
+对应文件：
+
+```text
+static/js/canvas.js
+```
+
+### 9.1 提交流程
+
+视频节点运行时，`runVideoNode()` 构造 payload：
+
+```javascript
+const payload = {
+    prompt,
+    provider_id: resolveVideoProviderId(node.apiProvider || 'comfly'),
+    model: node.model || 'veo3-fast',
+    duration: Number(node.duration || 5),
+    aspect_ratio: node.aspectRatio || '16:9',
+    resolution: node.resolution || '',
+    images: refs,
+    videos: manualVideoUrl ? [manualVideoUrl] : videoRefs.map(...),
+    audios: audioRefs.map(ref => ref.url).filter(Boolean),
+    enhance_prompt: Boolean(node.enhancePrompt),
+    enable_upsample: Boolean(node.enableUpsample),
+    watermark: Boolean(node.watermark),
+    camerafixed: Boolean(node.cameraFixed),
+    generate_audio: Boolean(node.generateAudio),
+    multimodal: Boolean(node.multimodal)
+}
+```
+
+然后调用：
+
+```javascript
+taskInfo = await createCanvasVideoTask(payload, {cascadeTargetId});
+```
+
+`createCanvasVideoTask()` 请求：
+
+```javascript
+POST /api/canvas-video-tasks
+```
+
+### 9.2 pending 保存
+
+创建任务成功后，普通画布会把 pending 写入输出节点：
+
+```javascript
+makePendingForRun(pendingId, run, node, {refs, cascadeTargetId}, {
+    canvasTaskId: taskInfo.task_id,
+    canvasTaskType: 'online-video',
+    providerId: payload.provider_id,
+    model: payload.model,
+    appendGenerated: Boolean(opts.cascade)
+})
+```
+
+然后立即保存画布：
+
+```javascript
+scheduleSave();
+await saveCanvas();
+```
+
+这一步很关键：
+
+- 只要本地任务 ID 保存进画布，刷新页面后仍然能看到 pending。
+- 后端重启后，如果持久化任务里有上游任务 ID，也能恢复查询。
+
+### 9.3 轮询流程
+
+普通画布轮询函数：
+
+```javascript
+pollCanvasVideoTask(taskId, options={})
+```
+
+行为：
+
+1. 防重复：如果 `activeCanvasTaskPolls` 里已有同一个 taskId，直接返回 `running`。
+2. 找 pending：`findPendingTask(taskId)`。
+3. 请求本地查询接口：
+
+```javascript
+GET /api/canvas-video-tasks/{taskId}
+```
+
+4. 更新 pending 元信息：
+
+```javascript
+found.pending.canvasTaskStatus = data.status || 'polling';
+found.pending.recoverTaskId = data.upstream_task_id || data.task_id || data.submit_id || found.pending.recoverTaskId || '';
+found.pending.retryAfter = data.retry_after || null;
+found.pending.nextPollAt = data.next_poll_at || null;
+```
+
+5. 成功时调用：
+
+```javascript
+completeCanvasVideoTask(taskId, data.result || data);
+```
+
+6. 失败时调用：
+
+```javascript
+failCanvasVideoTask(taskId, data.error || tr('canvas.videoFailed'), data);
+```
+
+7. 非终态继续等待：
+
+```javascript
+await sleep(5000);
+```
+
+### 9.4 完成处理
+
+`completeCanvasVideoTask(taskId, result)`：
+
+- 从 result 中提取视频 URL。
+- 移除 pending。
+- 把视频作为 `kind: 'video'` 添加到输出节点。
+- 合并到生成节点输出。
+- 写入生成日志。
+- 调用 `scheduleSave()` 保存。
+
+### 9.5 手动查询
+
+普通画布里的“可恢复任务”手动查询函数：
+
+```javascript
+queryRecoverPendingOutput(pendingId)
+```
+
+视频任务分支会优先用本地任务 ID：
+
+```javascript
+const taskId = pending.canvasTaskType === 'online-video'
+    ? (pending.canvasTaskId || pending.recoverTaskId || '')
+    : ...
+```
+
+然后请求：
+
+```javascript
+GET /api/canvas-video-tasks/{taskId}
+```
+
+如果仍在生成：
+
+- 清除 failed 标记。
+- 更新状态。
+- 重新启动 `pollCanvasVideoTask()`。
+
+## 10. 智能画布视频流程
+
+对应文件：
+
+```text
+static/js/smart-canvas.js
+```
+
+### 10.1 任务提交
+
+新增函数：
+
+```javascript
+async function createSmartCanvasVideoTask(payload){
+    const res = await fetch('/api/canvas-video-tasks', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify(payload)
+    });
+    if(!res.ok) throw new Error(await smartResponseErrorMessage(res, tr('smart.errRunFailed')));
+    return res.json();
+}
+```
+
+`runApiVideoGeneration()` 不再直接请求旧的长请求接口 `/api/canvas-video`，而是：
+
+```javascript
+const task = await createSmartCanvasVideoTask(payload);
+const taskId = task?.task_id || task?.id || '';
+if(!taskId) throw new Error(tr('smart.errRunFailed'));
+return {
+    taskIds: [taskId],
+    count: 1,
+    providerId: payload.provider_id,
+    model: payload.model,
+    kind: 'video'
+};
+```
+
+### 10.2 主按钮运行流程
+
+智能画布的 `runGeneration()` 已经把 API-like 视频纳入图片任务同款 pending 流程：
+
+```javascript
+const taskKind = outImages.kind || 'image';
+pendingNode.pendingTasks = taskIds.map(taskId => ({
+    taskId,
+    kind: taskKind,
+    providerId: outImages.providerId,
+    model: outImages.model
+}));
+```
+
+视频情况下：
+
+```javascript
+taskKind === 'video'
+```
+
+并且 expected count 固定为 1：
+
+```javascript
+isApiLikeEngine(settings.engine) && settings.apiKind === 'video' ? 1 : ...
+```
+
+### 10.3 智能画布视频轮询
+
+新增函数：
+
+```javascript
+async function pollSmartCanvasVideoTask(taskId)
+```
+
+核心行为：
+
+1. 防重复：复用 `activeSmartTaskPolls`。
+2. 最多循环 900 次。
+3. 每次等待 5 秒：
+
+```javascript
+await sleep(5000);
+```
+
+4. 请求本地查询接口：
+
+```javascript
+GET /api/canvas-video-tasks/{taskId}
+```
+
+5. 成功：
+
+```javascript
+if(task.status === 'succeeded') return task.result || task;
+```
+
+6. 失败：
+
+```javascript
+if(task.status === 'failed'){
+    const recoverTaskId = task.upstream_task_id || task.submit_id || '';
+    if(recoverTaskId && !isSmartTerminalTaskError(task.error)){
+        throw new ImageTaskRecoverSignal({
+            taskId,
+            recoverTaskId,
+            providerId: task.provider_id,
+            kind: 'video',
+            message: task.error || tr('smart.errRunFailed')
+        });
+    }
+    throw new Error(task.error || tr('smart.errRunFailed'));
+}
+```
+
+也就是说：
+
+- 普通可恢复错误：保留任务 ID，可稍后查询。
+- 余额不足等终态错误：直接失败，不保留可恢复 pending。
+
+### 10.4 智能画布恢复 pending
+
+`resumeSmartPendingNode(node, logContext={})` 会按任务类型选择轮询函数：
+
+```javascript
+const taskKind = task.kind || 'image';
+const result = taskKind === 'video'
+    ? await pollSmartCanvasVideoTask(task.taskId)
+    : await pollSmartCanvasTask(task.taskId);
+```
+
+视频结果提取：
+
+```javascript
+const media = taskKind === 'video'
+    ? (result?.videos?.length ? result.videos : (result?.result || result))
+    : ...
+```
+
+然后统一调用：
+
+```javascript
+finalizeSmartPendingTask(node, task.taskId, resultMediaUrls(media), taskKind);
+```
+
+### 10.5 智能画布手动查询
+
+函数：
+
+```javascript
+querySmartImageTaskNow(nodeId, localTaskId)
+```
+
+虽然函数名仍包含 Image，但现在已支持视频分支：
+
+```javascript
+if(task.kind === 'video'){
+    const res = await fetch(`/api/canvas-video-tasks/${encodeURIComponent(task.taskId || localTaskId)}`);
+    ...
+}
+```
+
+要点：
+
+- 视频手动查询使用本地任务 ID。
+- 成功后调用 `finalizeSmartPendingTask(..., 'video')`。
+- 仍在生成时重新启动 `pollSmartCanvasVideoTask()`。
+- 失败时显示错误并保存状态。
+
+## 11. 后端持久化与重启恢复
+
+### 11.1 持久化文件
+
+视频任务会写入数据目录中的持久化文件。相关函数：
+
+- `canvas_video_task_snapshot_unlocked()`
+- `write_canvas_video_tasks_snapshot(snapshot)`
+- `persist_canvas_video_tasks()`
+- `load_persisted_canvas_video_tasks()`
+- `load_canvas_video_tasks_into_memory()`
+
+每次 `update_canvas_video_task()` 默认都会持久化。
+
+### 11.2 启动恢复
+
+应用启动时调用：
+
+```python
+await resume_canvas_video_tasks_on_startup()
+```
+
+恢复逻辑：
+
+1. 读取持久化任务。
+2. 跳过终态任务：
+   - `succeeded`
+   - `failed`
+   - 其他终态
+3. 只恢复可继续查询的任务。
+4. 如果已有上游任务 ID，则：
+
+```python
+update_canvas_video_task(task_id, {
+    "status": "polling",
+    "message": "服务重启后已恢复视频任务查询"
+})
+asyncio.create_task(run_canvas_video_task(task_id, resume=True))
+```
+
+5. 如果没有上游任务 ID，则不自动重提，直接失败：
+
+```text
+服务重启前尚未拿到上游视频任务 ID，已停止自动恢复以避免重复扣费。
+```
+
+这条规则非常重要：
+没有上游任务 ID 时，无法判断上游是否已经扣费/创建任务，自动重新提交可能导致重复扣费。
+
+## 12. 普通画布与智能画布差异
+
+| 项目 | 普通画布 `canvas.js` | 智能画布 `smart-canvas.js` |
+| --- | --- | --- |
+| 提交函数 | `createCanvasVideoTask()` | `createSmartCanvasVideoTask()` |
+| 查询接口 | `/api/canvas-video-tasks/{taskId}` | `/api/canvas-video-tasks/{taskId}` |
+| pending 存储 | 输出节点 `_pending` | 节点 `pendingTasks` |
+| 视频轮询函数 | `pollCanvasVideoTask()` | `pollSmartCanvasVideoTask()` |
+| 轮询间隔 | 5 秒 | 5 秒 |
+| 防重复轮询 | `activeCanvasTaskPolls` | `activeSmartTaskPolls` |
+| 成功处理 | `completeCanvasVideoTask()` | `finalizeSmartPendingTask(..., 'video')` |
+| 失败处理 | `failCanvasVideoTask()` | 终态错误直接失败；非终态可恢复错误保留 recoverTaskId |
+| 手动查询 | `queryRecoverPendingOutput()` | `querySmartImageTaskNow()` 视频分支 |
+
+## 13. 为什么前端仍然有“长等待”
+
+任务化后，前端不再用一个 HTTP 长请求等待 `/api/canvas-video` 完成，而是：
+
+1. 短请求提交本地任务。
+2. 保存 pending。
+3. 通过多个短请求轮询本地任务。
+
+但在一次运行函数内部，前端仍可能 `await pollCanvasVideoTask()` 或 `await resumeSmartPendingNode()`，这是为了当前交互流程能在结果完成后自动落盘和刷新 UI。
+
+关键区别：
+
+- 刷新前：轮询函数在内存中继续跑。
+- 刷新后：pending 已保存，页面重新加载后可以恢复。
+- 后端重启后：如果本地任务已持久化并拿到上游任务 ID，后端会继续查上游。
+
+## 14. 补丁脚本说明
+
+补丁脚本：
+
+```text
+tools/patches/video_request_mode_patch.py
+```
+
+Windows 入口：
+
+```bat
+重放视频接口补丁.bat
+```
+
+### 14.1 脚本覆盖内容
+
+脚本会尝试同步以下内容：
+
+- API 设置页视频接口下拉。
+- `video_request_mode` 字段保存/读取。
+- 后端 `/v1/videos/generations` 与 `/v1/video/generations` 模式切换。
+- 视频任务本地化接口 `/api/canvas-video-tasks`。
+- 后端任务持久化和启动恢复。
+- 后端 `retry_after` 与终态错误识别。
+- 普通画布视频任务化轮询。
+- 智能画布视频任务化轮询。
+
+### 14.2 推荐使用方式
+
+更新原项目后：
+
+```bat
+重放视频接口补丁.bat
+```
+
+只检查不修改：
+
+```bat
+重放视频接口补丁.bat -DryRun -SkipChecks
+```
+
+如果输出：
+
+```text
+DRY-RUN: would change nothing
+```
+
+说明当前代码已经包含补丁内容。
+
+### 14.3 验证项
+
+当前补丁脚本的 validate 会检查关键特征，例如：
+
+- `def effective_video_request_mode(provider)`
+- `def video_retry_after_seconds(source):`
+- `def is_video_terminal_error(source):`
+- `def update_canvas_video_task`
+- `@app.post("/api/canvas-video-tasks")`
+- `videoRequestModeInput`
+- `.video-request-mode-wrap select`
+- `const videoRequestModeInput`
+- `canvasTaskType:'online-video'`
+- `createSmartCanvasVideoTask`
+- `pollSmartCanvasVideoTask`
+
+## 15. 常见问题排查
+
+### 15.1 上游接口错误：404 或返回 HTML
+
+现象：
+
+```text
+上游视频接口返回了网页 HTML，而不是 JSON
+```
+
+常见原因：
+
+- Base URL 填成了网页后台地址，而不是 API 地址。
+- 当前中转站不支持所选接口路径。
+- 选择了 `videos`，但中转站只支持 `video`。
+
+处理：
+
+1. 检查 API 设置里的 Base URL。
+2. 如果文档写的是：
+
+```text
+POST /v1/video/generations
+GET /v1/video/generations/{task_id}
+```
+
+就把视频接口下拉选成：
+
+```text
+视频：video
+```
+
+3. 如果文档写的是：
+
+```text
+POST /v1/videos/generations
+GET /v1/videos/generations/{task_id}
+```
+
+就选：
+
+```text
+视频：videos
+```
+
+### 15.2 余额不足但前端不终止
+
+当前代码已经识别：
+
+```text
+insufficient_quota
+Insufficient credits
+credits_remaining
+余额不足
+额度不足
+```
+
+如果仍不终止，优先检查：
+
+1. 上游错误是否被包装在奇怪字段里，导致 `is_video_terminal_error()` 未命中。
+2. 后端查询接口 `/api/canvas-video-tasks/{task_id}` 返回的 `status` 是否已经是 `failed`。
+3. 智能画布 pending 里 `task.kind` 是否为 `video`。
+4. 是否运行的是更新前的后端进程。
+
+### 15.3 前端显示任务可查询，但查询不到
+
+检查 ID 类型：
+
+- 本地任务 ID：`canvas_video_xxx`
+- 上游任务 ID：可能是 `task_xxx`、`video_id`、`submit_id`
+
+前端查询 `/api/canvas-video-tasks/{task_id}` 应该使用本地任务 ID。
+
+如果拿上游 ID 查本地接口，会出现：
+
+```text
+视频任务不存在，可能服务已重启或任务已过期
+```
+
+### 15.4 后端重启后任务没有恢复
+
+可能原因：
+
+1. 任务已经是终态，恢复逻辑会跳过。
+2. 任务还没拿到上游任务 ID 后端就重启了。为了避免重复扣费，系统不会自动重提。
+3. 持久化任务文件不存在或读取失败。
+
+### 15.5 轮询太快导致失败
+
+当前视频轮询已经统一为 5 秒起步：
+
+- 后端：`delay = max(5.0, IMAGE_POLL_INTERVAL)`
+- 普通画布：`await sleep(5000)`
+- 智能画布：`await sleep(5000)`
+
+如果某个上游仍嫌频率高，应优先让上游返回 `retry_after`，后端会识别并遵守。
+
+## 16. 添加新视频中转站的建议
+
+如果新中转站仍兼容以下接口：
+
+```text
+POST /v1/video/generations
+GET /v1/video/generations/{task_id}
+```
+
+只需要：
+
+1. 在 API 设置里添加平台。
+2. 填写 Base URL 和 API Key。
+3. 视频接口选择 `视频：video`。
+4. 添加视频模型。
+5. 在普通画布或智能画布选择该平台和模型生成。
+
+如果新中转站兼容：
+
+```text
+POST /v1/videos/generations
+GET /v1/videos/generations/{task_id}
+```
+
+选择：
+
+```text
+视频：videos
+```
+
+如果新中转站的提交/查询路径完全不同，则需要改：
+
+- `video_submit_url_candidates(provider, base_url)`
+- `video_task_url_candidates(provider, base_url, task_id, submit_url)`
+- 必要时新增 provider 判断函数，如 `is_xxx_provider(provider)`
+- 补丁脚本中同步新增对应逻辑
+
+## 17. 建议的手工测试流程
+
+### 17.1 接口模式测试
+
+1. 新增一个测试 API 平台。
+2. 选择 `视频：video`。
+3. 使用支持 `/v1/video/generations` 的模型。
+4. 生成一次视频。
+5. 后端日志或任务 `submit_url` 应包含：
+
+```text
+/v1/video/generations
+```
+
+6. 查询阶段应使用：
+
+```text
+/v1/video/generations/{task_id}
+```
+
+### 17.2 普通画布刷新恢复测试
+
+1. 普通画布创建视频生成节点。
+2. 运行视频生成。
+3. 确认输出节点出现 pending。
+4. 立刻刷新页面。
+5. 确认 pending 仍存在。
+6. 等待任务完成，确认视频自动落到输出节点。
+
+### 17.3 智能画布刷新恢复测试
+
+1. 智能画布选择 API 视频生成。
+2. 点击运行。
+3. 确认节点出现 pending 状态。
+4. 刷新页面。
+5. 确认任务可以继续查询或手动查询。
+
+### 17.4 余额不足测试
+
+1. 使用余额不足的上游 Key。
+2. 发起视频生成。
+3. 后端任务应变成：
+
+```json
+{
+  "status": "failed",
+  "error": "...Insufficient credits..."
+}
+```
+
+4. 前端不应一直 pending。
+
+## 18. 当前改动的关键结论
+
+1. 主流程已经从 `/api/canvas-video` 长请求转成 `/api/canvas-video-tasks` 本地任务。
+2. 前端普通画布和智能画布都使用 5 秒视频轮询。
+3. 后端也使用 5 秒起步轮询，并支持 `retry_after`。
+4. `/v1/video/generations` 与 `/v1/videos/generations` 通过 API 设置页下拉切换。
+5. 余额不足/额度不足是终态错误，会直接失败，不再保留 pending。
+6. 后端任务持久化后，重启可恢复已经拿到上游任务 ID 的任务。
+7. 更新原项目后，可以通过补丁脚本重新应用这些改动。

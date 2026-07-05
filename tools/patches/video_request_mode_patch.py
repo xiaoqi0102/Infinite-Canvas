@@ -9,9 +9,9 @@ from datetime import datetime
 
 
 VIDEO_SELECT_HTML = '''                                <div class="field-frame video-request-mode-wrap">
-                                    <select id="videoRequestModeInput" title="Video API">
-                                        <option value="openai-videos-generations">Video: /v1/videos/generations</option>
-                                        <option value="openai-video-generations">Video: /v1/video/generations</option>
+                                    <select id="videoRequestModeInput" title="视频接口">
+                                        <option value="openai-videos-generations">视频：videos</option>
+                                        <option value="openai-video-generations">视频：video</option>
                                     </select>
                                 </div>
 '''
@@ -333,10 +333,81 @@ def normalize_video_request_mode(value):
 
 
 def patch_html(text):
+    replacements = {
+        'title="Video API"': 'title="视频接口"',
+        "Video: /v1/videos/generations": "视频：videos",
+        "Video: /v1/video/generations": "视频：video",
+        "视频：/v1/videos/generations": "视频：videos",
+        "视频：/v1/video/generations": "视频：video",
+    }
+    for old, new in replacements.items():
+        text = text.replace(old, new)
     if "videoRequestModeInput" in text:
         return text
     pattern = r'([ \t]*<div class="field-frame image-request-mode-wrap">\n.*?<select id="imageRequestModeInput".*?</select>\n[ \t]*</div>\n)'
     return regex_replace(text, pattern, r"\1" + VIDEO_SELECT_HTML, "videoRequestModeInput HTML", required=True)
+
+
+def patch_css(text):
+    hidden_contexts = [
+        "body.show-ms",
+        "body.show-runninghub",
+        "body.show-volcengine-standalone",
+        "body.show-jimeng",
+        "body.show-codex",
+        "body.show-gemini-cli",
+    ]
+    for selector in hidden_contexts:
+        text = replace_once(
+            text,
+            f"{selector} .image-request-mode-wrap,\n{selector} .image-edit-route-wrap",
+            f"{selector} .image-request-mode-wrap,\n{selector} .video-request-mode-wrap,\n{selector} .image-edit-route-wrap",
+            f"{selector} video hidden rule",
+        )
+
+    text = replace_once(
+        text,
+        ".protocol-selector-wrap,\n.image-request-mode-wrap,\n.image-edit-route-wrap",
+        ".protocol-selector-wrap,\n.image-request-mode-wrap,\n.video-request-mode-wrap,\n.image-edit-route-wrap",
+        "video wrapper base style",
+    )
+    text = replace_once(
+        text,
+        "body.studio-theme-dark .image-request-mode-wrap,\nhtml.studio-theme-dark body .image-request-mode-wrap,\nbody.studio-theme-dark .image-edit-route-wrap,",
+        "body.studio-theme-dark .image-request-mode-wrap,\nhtml.studio-theme-dark body .image-request-mode-wrap,\nbody.studio-theme-dark .video-request-mode-wrap,\nhtml.studio-theme-dark body .video-request-mode-wrap,\nbody.studio-theme-dark .image-edit-route-wrap,",
+        "video wrapper dark style",
+    )
+    text = replace_once(
+        text,
+        ".protocol-selector-wrap select,\n.image-request-mode-wrap select,\n.image-edit-route-wrap select",
+        ".protocol-selector-wrap select,\n.image-request-mode-wrap select,\n.video-request-mode-wrap select,\n.image-edit-route-wrap select",
+        "video select base style",
+    )
+    text = replace_once(
+        text,
+        ".protocol-selector-wrap select:disabled,\n.image-request-mode-wrap select:disabled,\n.image-edit-route-wrap select:disabled",
+        ".protocol-selector-wrap select:disabled,\n.image-request-mode-wrap select:disabled,\n.video-request-mode-wrap select:disabled,\n.image-edit-route-wrap select:disabled",
+        "video select disabled style",
+    )
+    text = replace_once(
+        text,
+        ".image-request-mode-wrap select { min-width:150px; }\n.image-edit-route-wrap select { min-width:128px; }",
+        ".image-request-mode-wrap select { min-width:150px; }\n.video-request-mode-wrap select { min-width:118px; }\n.image-edit-route-wrap select { min-width:128px; }",
+        "video select width",
+    )
+    text = replace_once(
+        text,
+        ".protocol-selector-wrap select:hover,\n.image-request-mode-wrap select:hover,\n.image-edit-route-wrap select:hover",
+        ".protocol-selector-wrap select:hover,\n.image-request-mode-wrap select:hover,\n.video-request-mode-wrap select:hover,\n.image-edit-route-wrap select:hover",
+        "video select hover style",
+    )
+    text = replace_once(
+        text,
+        "body.studio-theme-dark .image-request-mode-wrap select:hover,\nhtml.studio-theme-dark body .image-request-mode-wrap select:hover,\nbody.studio-theme-dark .image-edit-route-wrap select:hover,",
+        "body.studio-theme-dark .image-request-mode-wrap select:hover,\nhtml.studio-theme-dark body .image-request-mode-wrap select:hover,\nbody.studio-theme-dark .video-request-mode-wrap select:hover,\nhtml.studio-theme-dark body .video-request-mode-wrap select:hover,\nbody.studio-theme-dark .image-edit-route-wrap select:hover,",
+        "video select dark hover style",
+    )
+    return text
 
 
 def patch_js(text):
@@ -491,6 +562,10 @@ def validate(root):
             "is_single_video_generations = is_openai_video_generations_mode(provider)",
         ],
         "static/api-settings.html": ["videoRequestModeInput"],
+        "static/css/api-settings.css": [
+            ".video-request-mode-wrap select",
+            ".video-request-mode-wrap select { min-width:118px; }",
+        ],
         "static/js/api-settings.js": [
             "const videoRequestModeInput",
             "function normalizeVideoRequestMode",
@@ -524,6 +599,7 @@ def main():
     targets = [
         ("main.py", patch_main),
         ("static/api-settings.html", patch_html),
+        ("static/css/api-settings.css", patch_css),
         ("static/js/api-settings.js", patch_js),
     ]
     if (root / "data/api_providers.json").exists():

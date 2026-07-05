@@ -206,6 +206,12 @@ VIDEO_RETRY_AFTER_PY = r'''def video_retry_after_seconds(source):
             walk(response.json())
         except Exception:
             scan_text(getattr(response, "text", "") or str(source))
+    elif hasattr(source, "headers") and hasattr(source, "json"):
+        add_number(source.headers.get("Retry-After"))
+        try:
+            walk(source.json())
+        except Exception:
+            scan_text(getattr(source, "text", "") or str(source))
     elif isinstance(source, BaseException):
         scan_text(str(source))
     else:
@@ -271,6 +277,510 @@ SINGLE_VIDEO_BODY_PY = r'''                else:
                             body["return_last_frame"] = True
                         if payload.generate_audio:
                             body["generate_audio"] = True
+'''
+
+CANVAS_VIDEO_TASK_HELPERS_PY = r'''CANVAS_VIDEO_TERMINAL_STATUSES = {"succeeded", "failed"}
+CANVAS_VIDEO_RESUMABLE_STATUSES = {"queued", "submitting", "polling", "running", "jimeng_pending"}
+
+def canvas_video_task_snapshot_unlocked():
+    return {
+        task_id: task
+        for task_id, task in CANVAS_TASKS.items()
+        if isinstance(task, dict) and task.get("type") == "online-video"
+    }
+
+def write_canvas_video_tasks_snapshot(snapshot):
+    os.makedirs(DATA_DIR, exist_ok=True)
+    tmp_path = f"{CANVAS_VIDEO_TASKS_FILE}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(snapshot, f, ensure_ascii=False, indent=2)
+    os.replace(tmp_path, CANVAS_VIDEO_TASKS_FILE)
+
+def persist_canvas_video_tasks():
+    with CANVAS_TASK_LOCK:
+        snapshot = canvas_video_task_snapshot_unlocked()
+    write_canvas_video_tasks_snapshot(snapshot)
+
+def load_persisted_canvas_video_tasks():
+    if not os.path.exists(CANVAS_VIDEO_TASKS_FILE):
+        return {}
+    try:
+        with open(CANVAS_VIDEO_TASKS_FILE, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+    except Exception as exc:
+        print(f"读取视频任务状态失败: {exc}")
+        return {}
+    if isinstance(raw, list):
+        items = {str(item.get("id") or ""): item for item in raw if isinstance(item, dict)}
+    elif isinstance(raw, dict):
+        items = {str(key): value for key, value in raw.items() if isinstance(value, dict)}
+    else:
+        return {}
+    return {task_id: task for task_id, task in items.items() if task_id}
+
+def load_canvas_video_tasks_into_memory():
+    restored = load_persisted_canvas_video_tasks()
+    if not restored:
+        return {}
+    with CANVAS_TASK_LOCK:
+        for task_id, task in restored.items():
+            current = CANVAS_TASKS.get(task_id)
+            if isinstance(current, dict) and current.get("status") not in CANVAS_VIDEO_TERMINAL_STATUSES:
+                continue
+            task.setdefault("id", task_id)
+            task.setdefault("type", "online-video")
+            CANVAS_TASKS[task_id] = task
+    return restored
+
+def normalize_canvas_video_task_patch(task_id: str, patch: Dict[str, Any]):
+    data = dict(patch or {})
+    upstream_task_id = str(data.get("task_id") or "").strip()
+    if upstream_task_id and upstream_task_id != task_id and not upstream_task_id.startswith("canvas_video_"):
+        data.setdefault("upstream_task_id", upstream_task_id)
+        data.pop("task_id", None)
+    return data
+
+def update_canvas_video_task(task_id: str, patch: Dict[str, Any], persist=True):
+    now = time.time()
+    patch_data = normalize_canvas_video_task_patch(task_id, patch)
+    with CANVAS_TASK_LOCK:
+        task = CANVAS_TASKS.get(task_id)
+        if not isinstance(task, dict):
+            return {}
+        task.update(patch_data)
+        task["updated_at"] = now
+        snapshot = canvas_video_task_snapshot_unlocked()
+        result = dict(task)
+    if persist:
+        write_canvas_video_tasks_snapshot(snapshot)
+    return result
+
+def video_task_request_meta(payload: "CanvasVideoRequest"):
+    return {
+        "provider_id": payload.provider_id,
+        "model": payload.model,
+        "prompt": str(payload.prompt or "")[:500],
+        "duration": payload.duration,
+        "aspect_ratio": payload.aspect_ratio,
+        "resolution": payload.resolution,
+        "generate_audio": bool(payload.generate_audio),
+        "multimodal": bool(payload.multimodal),
+    }
+
+def report_canvas_video_progress(progress, patch: Dict[str, Any]):
+    if not callable(progress):
+        return
+    try:
+        progress(patch or {})
+    except Exception as exc:
+        print(f"更新视频任务进度失败: {exc}")
+
+def canvas_video_result_urls(result):
+    if not isinstance(result, dict):
+        return []
+    return [url for url in result.get("videos") or [] if url]
+
+def canvas_video_upstream_task_id(task: Dict[str, Any]):
+    for key in ("upstream_task_id", "submit_id", "video_id"):
+        value = str((task or {}).get(key) or "").strip()
+        if value:
+            return value
+    legacy_task_id = str((task or {}).get("task_id") or "").strip()
+    if legacy_task_id and not legacy_task_id.startswith("canvas_video_"):
+        return legacy_task_id
+    return ""
+
+async def resume_canvas_video_task_result(task_id: str):
+    with CANVAS_TASK_LOCK:
+        task = dict(CANVAS_TASKS.get(task_id) or {})
+    if not task:
+        raise HTTPException(status_code=404, detail="视频任务不存在")
+    provider_id = str(task.get("provider_id") or "").strip()
+    try:
+        provider = get_api_provider_exact(provider_id)
+    except HTTPException as exc:
+        raise HTTPException(status_code=409, detail=f"视频任务所用 API 平台已不存在或已禁用：{provider_id or '(empty)'}") from exc
+    model = str(task.get("model") or "").strip()
+    upstream_task_id = canvas_video_upstream_task_id(task)
+    if not upstream_task_id:
+        raise HTTPException(status_code=409, detail="服务重启前尚未拿到上游视频任务 ID，已停止自动恢复以避免重复扣费。")
+
+    progress = lambda patch: update_canvas_video_task(task_id, patch)
+    submit_url = str(task.get("submit_url") or "").strip()
+    if is_jimeng_provider(provider):
+        last_raw = None
+        deadline = time.monotonic() + VIDEO_POLL_TIMEOUT
+        while time.monotonic() < deadline:
+            queried = await jimeng_query_result(upstream_task_id, "video")
+            last_raw = queried
+            report_canvas_video_progress(progress, {"status": "polling", "raw_last": queried})
+            try:
+                urls = await jimeng_store_outputs(queried, "video", allow_query=False)
+                return {"videos": urls, "task_id": upstream_task_id, "raw": queried}
+            except JimengPendingError:
+                await asyncio.sleep(min(60.0, max(0.0, deadline - time.monotonic())))
+        raise HTTPException(status_code=504, detail=f"即梦视频任务恢复超时：{last_raw or upstream_task_id}")
+
+    timeout = httpx.Timeout(connect=20.0, read=VIDEO_POLL_TIMEOUT, write=120.0, pool=20.0)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        if is_runninghub_provider(provider):
+            result = await wait_for_runninghub_openapi_task(client, provider, upstream_task_id, "video", progress)
+            urls = video_output_urls(result)
+            if not urls:
+                outputs = runninghub_extract_outputs(result.get("data") if isinstance(result, dict) else result)
+                urls = [url for url in outputs if str(url).startswith(("http://", "https://", "/output/", "/assets/"))]
+            if not urls:
+                raise HTTPException(status_code=502, detail=f"RunningHub 视频生成成功但没有返回视频：{result}")
+            local_urls = [await save_remote_video_to_output(url, prefix="rh_video_") for url in urls]
+            return {"videos": local_urls, "task_id": upstream_task_id, "raw": result}
+        if is_agnes_provider(provider, model):
+            result = await wait_for_agnes_video_task(client, provider, upstream_task_id, model or "agnes-video-v2.0", progress)
+        else:
+            result = await wait_for_video_task(client, provider, upstream_task_id, submit_url, progress)
+        urls = video_output_urls(result)
+        if not urls:
+            raise HTTPException(status_code=502, detail=f"视频生成成功但没有返回视频：{result}")
+        local_urls = [await save_remote_video_to_output(url) for url in urls]
+        return {"videos": local_urls, "task_id": upstream_task_id, "raw": result}
+
+async def run_canvas_video_task(task_id: str, payload: Optional["CanvasVideoRequest"] = None, resume=False):
+    update_canvas_video_task(task_id, {"status": "polling" if resume else "submitting", "error": ""})
+    try:
+        if resume:
+            result = await resume_canvas_video_task_result(task_id)
+        else:
+            if payload is None:
+                raise HTTPException(status_code=400, detail="缺少视频任务请求")
+            progress = lambda patch: update_canvas_video_task(task_id, patch)
+            result = await build_canvas_video_result(payload, progress)
+    except JimengPendingError as exc:
+        info = jimeng_pending_payload(exc)
+        update_canvas_video_task(task_id, {
+            "status": "polling",
+            "jimeng_pending": True,
+            "upstream_task_id": exc.submit_id,
+            "submit_id": exc.submit_id,
+            "kind": exc.kind,
+            "queue_info": exc.queue_info,
+            "message": info["message"],
+            "error": "",
+            "raw_last": exc.raw,
+        })
+        try:
+            result = await resume_canvas_video_task_result(task_id)
+        except Exception as resume_exc:
+            detail = getattr(resume_exc, "detail", None) or str(resume_exc)
+            status_code = getattr(resume_exc, "status_code", 500)
+            update_canvas_video_task(task_id, {"status": "failed", "error": str(detail), "status_code": status_code, "retry_after": None, "next_poll_at": None, "message": "", "jimeng_pending": False})
+            return
+    except Exception as exc:
+        detail = getattr(exc, "detail", None) or str(exc)
+        status_code = getattr(exc, "status_code", 500)
+        update_canvas_video_task(task_id, {"status": "failed", "error": str(detail), "status_code": status_code, "retry_after": None, "next_poll_at": None, "message": "", "jimeng_pending": False})
+        return
+    update_canvas_video_task(task_id, {"status": "succeeded", "result": result, "videos": canvas_video_result_urls(result), "error": "", "retry_after": None, "next_poll_at": None, "message": "", "jimeng_pending": False, "status_code": None, "raw_last": result.get("raw") if isinstance(result, dict) else result})
+
+async def resume_canvas_video_tasks_on_startup():
+    restored = load_canvas_video_tasks_into_memory()
+    if not restored:
+        return
+    for task_id, task in restored.items():
+        status = str(task.get("status") or "").strip().lower()
+        if status in CANVAS_VIDEO_TERMINAL_STATUSES or status not in CANVAS_VIDEO_RESUMABLE_STATUSES:
+            continue
+        if canvas_video_upstream_task_id(task):
+            update_canvas_video_task(task_id, {"status": "polling", "message": "服务重启后已恢复视频任务查询"})
+            asyncio.create_task(run_canvas_video_task(task_id, resume=True))
+        else:
+            update_canvas_video_task(task_id, {"status": "failed", "error": "服务重启前尚未拿到上游视频任务 ID，已停止自动恢复以避免重复扣费。", "retry_after": None, "next_poll_at": None, "message": "", "jimeng_pending": False})
+'''
+
+CANVAS_VIDEO_TASK_ENDPOINTS_PY = r'''@app.post("/api/canvas-video")
+async def canvas_video(payload: CanvasVideoRequest):
+    return await build_canvas_video_result(payload)
+
+@app.post("/api/canvas-video-tasks")
+async def create_canvas_video_task(payload: CanvasVideoRequest):
+    task_id = f"canvas_video_{uuid.uuid4().hex}"
+    task = {
+        "id": task_id,
+        "type": "online-video",
+        "status": "queued",
+        "created_at": time.time(),
+        "updated_at": time.time(),
+        "result": None,
+        "videos": [],
+        "error": "",
+        "provider_id": payload.provider_id,
+        "model": payload.model,
+        "request": video_task_request_meta(payload),
+        "upstream_task_id": "",
+        "submit_url": "",
+        "retry_after": None,
+        "next_poll_at": None,
+    }
+    with CANVAS_TASK_LOCK:
+        CANVAS_TASKS[task_id] = task
+    persist_canvas_video_tasks()
+    asyncio.create_task(run_canvas_video_task(task_id, payload))
+    return {"task_id": task_id, "status": "queued"}
+
+@app.get("/api/canvas-video-tasks/{task_id}")
+async def get_canvas_video_task(task_id: str):
+    with CANVAS_TASK_LOCK:
+        task = dict(CANVAS_TASKS.get(task_id) or {})
+    if not task:
+        load_canvas_video_tasks_into_memory()
+        with CANVAS_TASK_LOCK:
+            task = dict(CANVAS_TASKS.get(task_id) or {})
+    if not task:
+        raise HTTPException(status_code=404, detail="视频任务不存在，可能服务已重启或任务已过期")
+    return task
+'''
+
+CREATE_CANVAS_VIDEO_TASK_JS = r'''async function createCanvasVideoTask(payload, options={}){
+    const res = await cascadeFetch('/api/canvas-video-tasks', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify(payload)
+    }, options);
+    if(!res.ok) throw new Error(await responseErrorMessage(res, tr('canvas.videoFailed')));
+    return res.json();
+}
+'''
+
+CANVAS_VIDEO_TASK_HELPERS_JS = r'''function canvasVideoOutputItems(result){
+    return resultMediaUrls(result).map(item => {
+        const url = outputUrlValue(item);
+        return item && typeof item === 'object' ? {...item, url, kind:item.kind || 'video'} : {url, kind:'video'};
+    }).filter(item => item.url);
+}
+async function pollCanvasVideoTask(taskId, options={}){
+    if(!taskId) return 'failed';
+    if(activeCanvasTaskPolls.has(taskId)) return 'running';
+    activeCanvasTaskPolls.add(taskId);
+    try {
+        while(true){
+            const found = findPendingTask(taskId);
+            if(!found) return 'missing';
+            const cascadeTargetId = String(options?.cascadeTargetId || found?.pending?.cascadeTargetId || '');
+            if(cascadeTargetId) ensureCascadeActive(cascadeTargetId);
+            const res = await cascadeFetch(`/api/canvas-video-tasks/${encodeURIComponent(taskId)}`, {}, {cascadeTargetId});
+            if(!res.ok){
+                if(res.status === 404) throw new Error(cascadeBackendRestartMessage());
+                throw new Error(await responseErrorMessage(res, tr('canvas.videoFailed')));
+            }
+            const data = await res.json();
+            found.pending.canvasTaskStatus = data.status || 'polling';
+            found.pending.recoverTaskId = data.upstream_task_id || data.task_id || data.submit_id || found.pending.recoverTaskId || '';
+            found.pending.retryAfter = data.retry_after || null;
+            found.pending.nextPollAt = data.next_poll_at || null;
+            if(data.status === 'succeeded'){
+                completeCanvasVideoTask(taskId, data.result || data);
+                return 'succeeded';
+            }
+            if(data.status === 'failed'){
+                failCanvasVideoTask(taskId, data.error || tr('canvas.videoFailed'), data);
+                return 'failed';
+            }
+            refreshNodes([found.out.id]);
+            await sleep(5000);
+        }
+    } catch(err) {
+        const message = normalizeCanvasTaskError(err, tr('canvas.videoFailed'));
+        if(isCascadeAbortError(err)) return 'aborted';
+        failCanvasVideoTask(taskId, message);
+        return 'failed';
+    } finally {
+        activeCanvasTaskPolls.delete(taskId);
+    }
+}
+async function waitCanvasVideoTaskResult(taskId, options={}){
+    if(!taskId) throw new Error(tr('canvas.videoFailed'));
+    while(true){
+        const cascadeTargetId = cascadeTargetIdFromOptions(options);
+        if(cascadeTargetId) ensureCascadeActive(cascadeTargetId);
+        const res = await cascadeFetch(`/api/canvas-video-tasks/${encodeURIComponent(taskId)}`, {}, {cascadeTargetId});
+        if(!res.ok){
+            if(res.status === 404) throw new Error(cascadeBackendRestartMessage());
+            throw new Error(await responseErrorMessage(res, tr('canvas.videoFailed')));
+        }
+        const data = await res.json();
+        if(data.status === 'succeeded') return data.result || data;
+        if(data.status === 'failed') throw new Error(data.error || tr('canvas.videoFailed'));
+        await sleep(5000);
+    }
+}
+function completeCanvasVideoTask(taskId, result){
+    const found = findPendingTask(taskId);
+    if(!found) return;
+    const {out, pending} = found;
+    const meta = {
+        runMs: nowMs() - Number(pending.startedAt || nowMs()),
+        run: pending.run || {},
+        kind: 'video',
+    };
+    meta.run.request = requestMetaFromResult(result);
+    const outputUrls = canvasVideoOutputItems(result);
+    if(!outputUrls.length){
+        failCanvasVideoTask(taskId, tr('canvas.videoFailed'));
+        return;
+    }
+    out._pending = (out._pending || []).filter(p => p.id !== pending.id);
+    appendOutputImages(out, outputUrls, meta.run?.refs?.[0], [meta]);
+    const gen = nodes.find(n => n.id === meta.run?.node?.id);
+    if(gen){
+        mergeGeneratedOutputs(gen, outputUrls, Boolean(pending.appendGenerated));
+        gen.runStatus = 'done';
+        gen.runError = '';
+        gen.running = false;
+    }
+    addGenerationLog({run:meta.run, outputs:outputUrls, runMs:meta.runMs || 0});
+    refreshRunNodes(gen, out);
+    scheduleSave();
+}
+function failCanvasVideoTask(taskId, message, taskData={}){
+    const found = findPendingTask(taskId);
+    if(!found) return;
+    const {out, pending} = found;
+    const run = pending.run || {};
+    const runMs = nowMs() - Number(pending.startedAt || nowMs());
+    const recoverTaskId = taskData?.upstream_task_id || taskData?.task_id || taskData?.submit_id || pending.canvasTaskId || extractUpstreamTaskId(message);
+    const gen = nodes.find(n => n.id === run?.node?.id);
+    if(recoverTaskId){
+        pending.failed = true;
+        pending.querying = false;
+        pending.error = message || tr('canvas.videoFailed');
+        pending.recoverTaskId = recoverTaskId;
+        pending.providerId = taskData?.provider_id || pending.providerId || providerIdForPending(pending);
+        pending.canvasTaskStatus = 'failed';
+        if(gen){
+            gen.runStatus = 'failed';
+            gen.runError = pending.error;
+            if(pending?.cascadeTargetId) gen._cascadeFailed = true;
+            gen.running = false;
+        }
+        addGenerationLog({run, outputs:[], runMs, error:pending.error});
+        refreshRunNodes(gen, out);
+        scheduleSave();
+        return;
+    }
+    out._pending = (out._pending || []).filter(p => p.id !== pending.id);
+    if(gen){
+        gen.runStatus = 'failed';
+        gen.runError = message || tr('canvas.videoFailed');
+        if(pending?.cascadeTargetId) gen._cascadeFailed = true;
+        gen.running = false;
+    }
+    addGenerationLog({run, outputs:[], runMs, error:message || tr('canvas.videoFailed')});
+    refreshRunNodes(gen, out);
+    scheduleSave();
+}
+'''
+
+RUN_VIDEO_NODE_TASK_JS = r'''async function runVideoNode(nodeId, opts={}){
+    const node = nodes.find(n => n.id === nodeId);
+    if(!node || (node.running && !opts.cascade)) return;
+    const cascadeTargetId = cascadeTargetIdFromOptions(opts);
+    const sources = orderedSources(node, generatorSources(node));
+    const prompt = sources.map(s => s.prompt).filter(Boolean).join('\n\n');
+    const allRefs = sources.flatMap(s => s.refs || []);
+    const mediaRefs = applyUploadedUrlToRefs((allRefs || []).filter(ref => ['image','video','audio'].includes(mediaKindForRef(ref))), node);
+    const refs = imageRefsOnly(mediaRefs);
+    const videoRefs = videoRefsOnly(mediaRefs);
+    const audioRefs = audioRefsOnly(mediaRefs);
+    if(node.useFrameRoles && refs[0]) refs[0] = {...refs[0], role:'first_frame'};
+    if(node.useFrameRoles && refs[1]) refs[1] = {...refs[1], role:'last_frame'};
+    if(!prompt){ alert(tr('canvas.videoNeedsPrompt')); return; }
+    let out = outputForNode(node, 460);
+    const pendingId = uid('p');
+    const run = runSnapshot(node, prompt, refs);
+    const manualVideoUrl = manualVideoUrlForNode(node);
+    const payload = {
+        prompt,
+        provider_id:resolveVideoProviderId(node.apiProvider || 'comfly'),
+        model:node.model || 'veo3-fast',
+        duration:Number(node.duration || 5),
+        aspect_ratio:node.aspectRatio || '16:9',
+        resolution:node.resolution || '',
+        images:refs,
+        videos:manualVideoUrl ? [manualVideoUrl] : videoRefs.map(ref => tempShUploadedUrlForNode(node, ref.url)),
+        audios:audioRefs.map(ref => ref.url).filter(Boolean),
+        enhance_prompt:Boolean(node.enhancePrompt),
+        enable_upsample:Boolean(node.enableUpsample),
+        watermark:Boolean(node.watermark),
+        camerafixed:Boolean(node.cameraFixed),
+        generate_audio:Boolean(node.generateAudio),
+        multimodal:Boolean(node.multimodal)
+    };
+    const startedAt = nowMs();
+    let taskInfo = null;
+    if(!opts.cascade){
+        node.running = true;
+        refreshRunNodes(node, out);
+        setTimeout(() => { node.running = false; refreshRunNodes(node, out); }, 2000);
+    }
+    else refreshRunNodes(node, out);
+    try {
+        taskInfo = await createCanvasVideoTask(payload, {cascadeTargetId});
+        if(!out){
+            const result = await waitCanvasVideoTaskResult(taskInfo.task_id, {cascadeTargetId});
+            const outputUrls = canvasVideoOutputItems(result);
+            if(!outputUrls.length) throw new Error(tr('canvas.videoFailed'));
+            run.request = requestMetaFromResult(result);
+            mergeGeneratedOutputs(node, outputUrls, Boolean(opts.cascade));
+            addGenerationLog({run, outputs:outputUrls, runMs:nowMs() - startedAt});
+            node.runStatus = 'done';
+            node.runError = '';
+            node.running = false;
+            refreshRunNodes(node, out);
+            scheduleSave();
+            return;
+        }
+        out._pending = [
+            ...(out._pending || []),
+            makePendingForRun(pendingId, run, node, {refs, cascadeTargetId}, {
+                canvasTaskId:taskInfo.task_id,
+                canvasTaskType:'online-video',
+                providerId:payload.provider_id,
+                model:payload.model,
+                appendGenerated:Boolean(opts.cascade)
+            })
+        ];
+        refreshRunNodes(node, out);
+        scheduleSave();
+        await saveCanvas();
+        const status = await pollCanvasVideoTask(taskInfo.task_id, {cascadeTargetId});
+        if(status === 'aborted') throw cascadeAbortError(cascadeStopMessage());
+        if(status === 'failed') throw new Error(node.runError || tr('canvas.videoFailed'));
+    } catch(err) {
+        const pending = pendingById(out, pendingId);
+        if(pending && !(pending.failed && pending.recoverTaskId)){
+            const meta = collectRunMeta(out, pendingId);
+            addGenerationLog({run, outputs:[], runMs:meta.runMs || 0, error:err.message || String(err)});
+            if(out) out._pending = (out._pending || []).filter(p => p.id !== pendingId);
+        } else if(!pending && !taskInfo) {
+            addGenerationLog({run, outputs:[], runMs:nowMs() - startedAt, error:err.message || String(err)});
+        }
+        if(isCascadeAbortError(err)){
+            if(opts.cascade) throw err;
+            return;
+        }
+        node.runStatus = 'failed'; node.runError = err.message || String(err);
+        if(pending?.failed && pending.recoverTaskId){
+            refreshRunNodes(node, out);
+            scheduleSave();
+            return;
+        }
+        refreshRunNodes(node, out);
+        scheduleSave();
+        if(opts.cascade) throw err;
+        showErrorModal(err.message || tr('canvas.videoFailed'), tr('canvas.apiFailed'));
+    } finally {
+        node.running = false;
+        refreshRunNodes(node, out);
+    }
+}
 '''
 
 
@@ -384,6 +894,13 @@ def normalize_video_request_mode(value):
         if not match:
             raise PatchError("anchor not found: video retry_after helper")
         text = text[:match.end()] + VIDEO_RETRY_AFTER_PY + "\n\n" + text[match.end():]
+    elif 'elif hasattr(source, "headers") and hasattr(source, "json"):' not in text:
+        text = replace_once(
+            text,
+            '    elif isinstance(source, BaseException):\n        scan_text(str(source))\n',
+            '    elif hasattr(source, "headers") and hasattr(source, "json"):\n        add_number(source.headers.get("Retry-After"))\n        try:\n            walk(source.json())\n        except Exception:\n            scan_text(getattr(source, "text", "") or str(source))\n    elif isinstance(source, BaseException):\n        scan_text(str(source))\n',
+            "video_retry_after raw response support",
+        )
 
     text = replace_once(
         text,
@@ -425,6 +942,120 @@ def normalize_video_request_mode(value):
             r"                else:\n                    image_payload = \[\]\n.*?                        if payload\.generate_audio:\n                            body\[\"generate_audio\"\] = True\n",
             SINGLE_VIDEO_BODY_PY,
             "canvas_video single video body",
+            required=True,
+        )
+
+    if "CANVAS_VIDEO_TASKS_FILE" not in text:
+        text = replace_once(
+            text,
+            'RUNNINGHUB_WORKFLOW_STORE_FILE = os.path.join(DATA_DIR, "runninghub_workflows.json")\n',
+            'RUNNINGHUB_WORKFLOW_STORE_FILE = os.path.join(DATA_DIR, "runninghub_workflows.json")\nCANVAS_VIDEO_TASKS_FILE = os.path.join(DATA_DIR, "canvas_video_tasks.json")\n',
+            "canvas video tasks file",
+            required=True,
+        )
+
+    if "resume_canvas_video_tasks_on_startup()" not in text:
+        text = replace_once(
+            text,
+            '    except Exception as exc:\n        print(f"纠正图片扩展名失败: {exc}")\n\n@app.websocket("/ws/stats")\n',
+            '    except Exception as exc:\n        print(f"纠正图片扩展名失败: {exc}")\n    try:\n        await resume_canvas_video_tasks_on_startup()\n    except Exception as exc:\n        print(f"恢复视频任务失败: {exc}")\n\n@app.websocket("/ws/stats")\n',
+            "resume canvas video tasks startup",
+            required=True,
+        )
+
+    if "CANVAS_VIDEO_TERMINAL_STATUSES" not in text:
+        text = replace_once(
+            text,
+            "CANVAS_TASKS: Dict[str, Dict[str, Any]] = {}\nCANVAS_TASK_LOCK = Lock()\n",
+            "CANVAS_TASKS: Dict[str, Dict[str, Any]] = {}\nCANVAS_TASK_LOCK = Lock()\n" + CANVAS_VIDEO_TASK_HELPERS_PY + "\n\n",
+            "canvas video task helpers",
+            required=True,
+        )
+
+    text = text.replace(
+        "async def generate_jimeng_video(payload: CanvasVideoRequest, provider):",
+        "async def generate_jimeng_video(payload: CanvasVideoRequest, provider, progress=None):",
+    )
+    text = text.replace(
+        "        raw = await run_jimeng_cli(args, timeout=jimeng_poll_seconds() + 180)\n        urls = await jimeng_store_outputs(raw, \"video\")\n        return {\"videos\": urls, \"task_id\": jimeng_submit_id(raw) or None, \"raw\": raw}\n",
+        "        raw = await run_jimeng_cli(args, timeout=jimeng_poll_seconds() + 180)\n        submit_id = jimeng_submit_id(raw)\n        if submit_id:\n            report_canvas_video_progress(progress, {\"status\": \"polling\", \"upstream_task_id\": submit_id, \"task_id\": submit_id, \"submit_id\": submit_id, \"raw_submit\": raw})\n        urls = await jimeng_store_outputs(raw, \"video\")\n        return {\"videos\": urls, \"task_id\": submit_id or None, \"raw\": raw}\n",
+    )
+
+    text = text.replace(
+        "async def wait_for_video_task(client, provider, task_id, submit_url=\"\"):",
+        "async def wait_for_video_task(client, provider, task_id, submit_url=\"\", on_progress=None):",
+    )
+    text = text.replace(
+        "async def wait_for_agnes_video_task(client, provider, video_id, model):",
+        "async def wait_for_agnes_video_task(client, provider, video_id, model, on_progress=None):",
+    )
+    text = text.replace(
+        "async def generate_agnes_video(client, payload, provider, base_url, requested_model):",
+        "async def generate_agnes_video(client, payload, provider, base_url, requested_model, progress=None):",
+    )
+    text = text.replace(
+        "async def generate_runninghub_video(payload, provider):",
+        "async def generate_runninghub_video(payload, provider, progress=None):",
+    )
+    text = text.replace(
+        "async def generate_yuli_openai_video(client, payload, provider, base_url, requested_model):",
+        "async def generate_yuli_openai_video(client, payload, provider, base_url, requested_model, progress=None):",
+    )
+    text = text.replace(
+        "result = await wait_for_video_task(client, provider, task_id, submit_url)",
+        "result = await wait_for_video_task(client, provider, task_id, submit_url, progress)",
+    )
+    text = text.replace(
+        "result = await wait_for_agnes_video_task(client, provider, video_id, model)",
+        "result = await wait_for_agnes_video_task(client, provider, video_id, model, progress)",
+    )
+    text = text.replace(
+        "return await generate_runninghub_video(payload, provider)",
+        "return await generate_runninghub_video(payload, provider, progress)",
+    )
+    text = text.replace(
+        "return await generate_jimeng_video(payload, provider)",
+        "return await generate_jimeng_video(payload, provider, progress)",
+    )
+    text = text.replace(
+        "return await generate_agnes_video(agnes_client, payload, provider, base_url, requested_model)",
+        "return await generate_agnes_video(agnes_client, payload, provider, base_url, requested_model, progress)",
+    )
+    text = text.replace(
+        "return await generate_yuli_openai_video(yuli_client, payload, provider, base_url, requested_model)",
+        "return await generate_yuli_openai_video(yuli_client, payload, provider, base_url, requested_model, progress)",
+    )
+    text = text.replace(
+        "        task_id = runninghub_extract_task_id(raw)\n        result = raw\n",
+        "        task_id = runninghub_extract_task_id(raw)\n        if task_id:\n            report_canvas_video_progress(progress, {\"status\": \"polling\", \"upstream_task_id\": task_id, \"task_id\": task_id, \"submit_url\": endpoint, \"raw_submit\": raw})\n        result = raw\n",
+    )
+    text = text.replace(
+        "    task_id = str(raw.get(\"task_id\") or raw.get(\"id\") or \"\").strip()\n    result = raw\n",
+        "    task_id = str(raw.get(\"task_id\") or raw.get(\"id\") or \"\").strip()\n    if video_id or task_id:\n        report_canvas_video_progress(progress, {\"status\": \"polling\", \"upstream_task_id\": video_id or task_id, \"task_id\": video_id or task_id, \"submit_url\": submit_url, \"raw_submit\": raw})\n    result = raw\n",
+    )
+    text = text.replace(
+        "    task_id = raw.get(\"id\") or extract_task_id(raw) or raw.get(\"task_id\")\n    result = raw\n",
+        "    task_id = raw.get(\"id\") or extract_task_id(raw) or raw.get(\"task_id\")\n    if task_id:\n        report_canvas_video_progress(progress, {\"status\": \"polling\", \"upstream_task_id\": task_id, \"task_id\": task_id, \"submit_url\": submit_url, \"raw_submit\": raw})\n    result = raw\n",
+    )
+    text = text.replace(
+        "            task_id = extract_task_id(raw) or raw.get(\"task_id\") or raw.get(\"id\")\n            result = raw\n",
+        "            task_id = extract_task_id(raw) or raw.get(\"task_id\") or raw.get(\"id\")\n            if task_id:\n                report_canvas_video_progress(progress, {\"status\": \"polling\", \"upstream_task_id\": task_id, \"task_id\": task_id, \"submit_url\": submit_url, \"raw_submit\": raw})\n            result = raw\n",
+    )
+
+    if "async def build_canvas_video_result(payload: CanvasVideoRequest, progress=None):" not in text:
+        text = replace_once(
+            text,
+            '@app.post("/api/canvas-video")\nasync def canvas_video(payload: CanvasVideoRequest):\n',
+            "async def build_canvas_video_result(payload: CanvasVideoRequest, progress=None):\n",
+            "extract canvas video builder",
+            required=True,
+        )
+    if '@app.post("/api/canvas-video-tasks")' not in text:
+        text = replace_once(
+            text,
+            "\n# --- Canvas LLM ---\n",
+            "\n" + CANVAS_VIDEO_TASK_ENDPOINTS_PY + "\n# --- Canvas LLM ---\n",
+            "canvas video task endpoints",
             required=True,
         )
 
@@ -615,6 +1246,46 @@ def patch_js(text):
     return text
 
 
+def patch_canvas_js(text):
+    if "async function createCanvasVideoTask" not in text:
+        text = regex_replace(
+            text,
+            r"(async function createCanvasImageTask\(payload, options=\{\}\)\{\n.*?    return res\.json\(\);\n\}\n)",
+            r"\1" + CREATE_CANVAS_VIDEO_TASK_JS,
+            "createCanvasVideoTask",
+            required=True,
+        )
+
+    if "function canvasVideoOutputItems" not in text:
+        text = regex_replace(
+            text,
+            r"(async function waitCanvasImageTaskResult\(taskId, options=\{\}\)\{\n.*?        await sleep\(1800\);\n    \}\n\}\n)",
+            r"\1" + CANVAS_VIDEO_TASK_HELPERS_JS,
+            "canvas video task frontend helpers",
+            required=True,
+        )
+
+    if "canvasTaskType:'online-video'" not in text:
+        text = regex_replace(
+            text,
+            r"async function runVideoNode\(nodeId, opts=\{\}\)\{\n.*?\n\}\nasync function uploadCanvasUrlToComfy",
+            RUN_VIDEO_NODE_TASK_JS + "\nasync function uploadCanvasUrlToComfy",
+            "runVideoNode task mode",
+            required=True,
+        )
+
+    if "pollCanvasVideoTask(p.canvasTaskId" not in text:
+        text = replace_once(
+            text,
+            "            if(p.canvasTaskType === 'online-image' && p.canvasTaskId && !p.failed) pollCanvasImageTask(p.canvasTaskId, {cascadeTargetId:p.cascadeTargetId || ''});\n",
+            "            if(p.canvasTaskType === 'online-image' && p.canvasTaskId && !p.failed) pollCanvasImageTask(p.canvasTaskId, {cascadeTargetId:p.cascadeTargetId || ''});\n            if(p.canvasTaskType === 'online-video' && p.canvasTaskId && !p.failed) pollCanvasVideoTask(p.canvasTaskId, {cascadeTargetId:p.cascadeTargetId || ''});\n",
+            "resume canvas video tasks",
+            required=True,
+        )
+
+    return text
+
+
 def patch_config(text):
     try:
         data = json.loads(text)
@@ -661,6 +1332,9 @@ def validate(root):
             "is_single_video_generations = is_openai_video_generations_mode(provider)",
             "def video_retry_after_seconds(source):",
             "delay = max(5.0, IMAGE_POLL_INTERVAL)",
+            "CANVAS_VIDEO_TASKS_FILE",
+            "def update_canvas_video_task",
+            '@app.post("/api/canvas-video-tasks")',
         ],
         "static/api-settings.html": ["videoRequestModeInput"],
         "static/css/api-settings.css": [
@@ -671,6 +1345,12 @@ def validate(root):
             "const videoRequestModeInput",
             "function normalizeVideoRequestMode",
             "video_request_mode:item.video_request_mode || 'openai-videos-generations'",
+        ],
+        "static/js/canvas.js": [
+            "async function createCanvasVideoTask",
+            "async function pollCanvasVideoTask",
+            "canvasTaskType:'online-video'",
+            "pollCanvasVideoTask(p.canvasTaskId",
         ],
     }
     missing = []
@@ -702,6 +1382,7 @@ def main():
         ("static/api-settings.html", patch_html),
         ("static/css/api-settings.css", patch_css),
         ("static/js/api-settings.js", patch_js),
+        ("static/js/canvas.js", patch_canvas_js),
     ]
     if (root / "data/api_providers.json").exists():
         targets.append(("data/api_providers.json", patch_config))

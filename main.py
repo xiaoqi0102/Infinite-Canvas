@@ -197,6 +197,10 @@ async def startup_event():
         await asyncio.to_thread(migrate_mislabeled_image_extensions)
     except Exception as exc:
         print(f"纠正图片扩展名失败: {exc}")
+    try:
+        await resume_canvas_video_tasks_on_startup()
+    except Exception as exc:
+        print(f"恢复视频任务失败: {exc}")
 
 @app.websocket("/ws/stats")
 async def websocket_endpoint(websocket: WebSocket, client_id: str = None):
@@ -239,6 +243,7 @@ ASSET_LIBRARY_PATH = os.path.join(DATA_DIR, "asset_library.json")
 PROMPT_LIBRARY_PATH = os.path.join(DATA_DIR, "prompt_libraries.json")
 API_PROVIDERS_FILE = os.path.join(DATA_DIR, "api_providers.json")
 RUNNINGHUB_WORKFLOW_STORE_FILE = os.path.join(DATA_DIR, "runninghub_workflows.json")
+CANVAS_VIDEO_TASKS_FILE = os.path.join(DATA_DIR, "canvas_video_tasks.json")
 SHARED_FOLDERS_FILE = os.path.join(DATA_DIR, "shared_folders.json")
 GLOBAL_CONFIG_FILE = os.path.join(BASE_DIR, "global_config.json")
 CANVAS_TRASH_RETENTION_MS = 30 * 24 * 60 * 60 * 1000
@@ -2429,6 +2434,258 @@ class ImageTaskQueryRequest(BaseModel):
 
 CANVAS_TASKS: Dict[str, Dict[str, Any]] = {}
 CANVAS_TASK_LOCK = Lock()
+CANVAS_VIDEO_TERMINAL_STATUSES = {"succeeded", "failed"}
+CANVAS_VIDEO_RESUMABLE_STATUSES = {"queued", "submitting", "polling", "running", "jimeng_pending"}
+
+def canvas_video_task_snapshot_unlocked():
+    return {
+        task_id: task
+        for task_id, task in CANVAS_TASKS.items()
+        if isinstance(task, dict) and task.get("type") == "online-video"
+    }
+
+def write_canvas_video_tasks_snapshot(snapshot):
+    os.makedirs(DATA_DIR, exist_ok=True)
+    tmp_path = f"{CANVAS_VIDEO_TASKS_FILE}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(snapshot, f, ensure_ascii=False, indent=2)
+    os.replace(tmp_path, CANVAS_VIDEO_TASKS_FILE)
+
+def persist_canvas_video_tasks():
+    with CANVAS_TASK_LOCK:
+        snapshot = canvas_video_task_snapshot_unlocked()
+    write_canvas_video_tasks_snapshot(snapshot)
+
+def load_persisted_canvas_video_tasks():
+    if not os.path.exists(CANVAS_VIDEO_TASKS_FILE):
+        return {}
+    try:
+        with open(CANVAS_VIDEO_TASKS_FILE, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+    except Exception as exc:
+        print(f"读取视频任务状态失败: {exc}")
+        return {}
+    if isinstance(raw, list):
+        items = {str(item.get("id") or ""): item for item in raw if isinstance(item, dict)}
+    elif isinstance(raw, dict):
+        items = {str(key): value for key, value in raw.items() if isinstance(value, dict)}
+    else:
+        return {}
+    return {task_id: task for task_id, task in items.items() if task_id}
+
+def load_canvas_video_tasks_into_memory():
+    restored = load_persisted_canvas_video_tasks()
+    if not restored:
+        return {}
+    with CANVAS_TASK_LOCK:
+        for task_id, task in restored.items():
+            current = CANVAS_TASKS.get(task_id)
+            if isinstance(current, dict) and current.get("status") not in CANVAS_VIDEO_TERMINAL_STATUSES:
+                continue
+            task.setdefault("id", task_id)
+            task.setdefault("type", "online-video")
+            CANVAS_TASKS[task_id] = task
+    return restored
+
+def normalize_canvas_video_task_patch(task_id: str, patch: Dict[str, Any]):
+    data = dict(patch or {})
+    upstream_task_id = str(data.get("task_id") or "").strip()
+    if upstream_task_id and upstream_task_id != task_id and not upstream_task_id.startswith("canvas_video_"):
+        data.setdefault("upstream_task_id", upstream_task_id)
+        data.pop("task_id", None)
+    return data
+
+def update_canvas_video_task(task_id: str, patch: Dict[str, Any], persist=True):
+    now = time.time()
+    patch_data = normalize_canvas_video_task_patch(task_id, patch)
+    with CANVAS_TASK_LOCK:
+        task = CANVAS_TASKS.get(task_id)
+        if not isinstance(task, dict):
+            return {}
+        task.update(patch_data)
+        task["updated_at"] = now
+        snapshot = canvas_video_task_snapshot_unlocked()
+        result = dict(task)
+    if persist:
+        write_canvas_video_tasks_snapshot(snapshot)
+    return result
+
+def video_task_request_meta(payload: "CanvasVideoRequest"):
+    return {
+        "provider_id": payload.provider_id,
+        "model": payload.model,
+        "prompt": str(payload.prompt or "")[:500],
+        "duration": payload.duration,
+        "aspect_ratio": payload.aspect_ratio,
+        "resolution": payload.resolution,
+        "generate_audio": bool(payload.generate_audio),
+        "multimodal": bool(payload.multimodal),
+    }
+
+def report_canvas_video_progress(progress, patch: Dict[str, Any]):
+    if not callable(progress):
+        return
+    try:
+        progress(patch or {})
+    except Exception as exc:
+        print(f"更新视频任务进度失败: {exc}")
+
+def canvas_video_result_urls(result):
+    if not isinstance(result, dict):
+        return []
+    return [url for url in result.get("videos") or [] if url]
+
+def canvas_video_upstream_task_id(task: Dict[str, Any]):
+    for key in ("upstream_task_id", "submit_id", "video_id"):
+        value = str((task or {}).get(key) or "").strip()
+        if value:
+            return value
+    legacy_task_id = str((task or {}).get("task_id") or "").strip()
+    if legacy_task_id and not legacy_task_id.startswith("canvas_video_"):
+        return legacy_task_id
+    return ""
+
+async def resume_canvas_video_task_result(task_id: str):
+    with CANVAS_TASK_LOCK:
+        task = dict(CANVAS_TASKS.get(task_id) or {})
+    if not task:
+        raise HTTPException(status_code=404, detail="视频任务不存在")
+    provider_id = str(task.get("provider_id") or "").strip()
+    try:
+        provider = get_api_provider_exact(provider_id)
+    except HTTPException as exc:
+        raise HTTPException(status_code=409, detail=f"视频任务所用 API 平台已不存在或已禁用：{provider_id or '(empty)'}") from exc
+    model = str(task.get("model") or "").strip()
+    upstream_task_id = canvas_video_upstream_task_id(task)
+    if not upstream_task_id:
+        raise HTTPException(status_code=409, detail="服务重启前尚未拿到上游视频任务 ID，已停止自动恢复以避免重复扣费。")
+
+    progress = lambda patch: update_canvas_video_task(task_id, patch)
+    submit_url = str(task.get("submit_url") or "").strip()
+    if is_jimeng_provider(provider):
+        last_raw = None
+        deadline = time.monotonic() + VIDEO_POLL_TIMEOUT
+        while time.monotonic() < deadline:
+            queried = await jimeng_query_result(upstream_task_id, "video")
+            last_raw = queried
+            report_canvas_video_progress(progress, {"status": "polling", "raw_last": queried})
+            try:
+                urls = await jimeng_store_outputs(queried, "video", allow_query=False)
+                result = {"videos": urls, "task_id": upstream_task_id, "raw": queried}
+                return result
+            except JimengPendingError:
+                await asyncio.sleep(min(60.0, max(0.0, deadline - time.monotonic())))
+        raise HTTPException(status_code=504, detail=f"即梦视频任务恢复超时：{last_raw or upstream_task_id}")
+
+    timeout = httpx.Timeout(connect=20.0, read=VIDEO_POLL_TIMEOUT, write=120.0, pool=20.0)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        if is_runninghub_provider(provider):
+            result = await wait_for_runninghub_openapi_task(client, provider, upstream_task_id, "video", progress)
+            urls = video_output_urls(result)
+            if not urls:
+                outputs = runninghub_extract_outputs(result.get("data") if isinstance(result, dict) else result)
+                urls = [url for url in outputs if str(url).startswith(("http://", "https://", "/output/", "/assets/"))]
+            if not urls:
+                raise HTTPException(status_code=502, detail=f"RunningHub 视频生成成功但没有返回视频：{result}")
+            local_urls = [await save_remote_video_to_output(url, prefix="rh_video_") for url in urls]
+            return {"videos": local_urls, "task_id": upstream_task_id, "raw": result}
+        if is_agnes_provider(provider, model):
+            result = await wait_for_agnes_video_task(client, provider, upstream_task_id, model or "agnes-video-v2.0", progress)
+        else:
+            result = await wait_for_video_task(client, provider, upstream_task_id, submit_url, progress)
+        urls = video_output_urls(result)
+        if not urls:
+            raise HTTPException(status_code=502, detail=f"视频生成成功但没有返回视频：{result}")
+        local_urls = [await save_remote_video_to_output(url) for url in urls]
+        return {"videos": local_urls, "task_id": upstream_task_id, "raw": result}
+
+async def run_canvas_video_task(task_id: str, payload: Optional["CanvasVideoRequest"] = None, resume=False):
+    update_canvas_video_task(task_id, {"status": "polling" if resume else "submitting", "error": ""})
+    try:
+        if resume:
+            result = await resume_canvas_video_task_result(task_id)
+        else:
+            if payload is None:
+                raise HTTPException(status_code=400, detail="缺少视频任务请求")
+            progress = lambda patch: update_canvas_video_task(task_id, patch)
+            result = await build_canvas_video_result(payload, progress)
+    except JimengPendingError as exc:
+        info = jimeng_pending_payload(exc)
+        update_canvas_video_task(task_id, {
+            "status": "polling",
+            "jimeng_pending": True,
+            "upstream_task_id": exc.submit_id,
+            "task_id": exc.submit_id,
+            "submit_id": exc.submit_id,
+            "kind": exc.kind,
+            "queue_info": exc.queue_info,
+            "message": info["message"],
+            "error": "",
+            "raw_last": exc.raw,
+        })
+        try:
+            result = await resume_canvas_video_task_result(task_id)
+        except Exception as resume_exc:
+            detail = getattr(resume_exc, "detail", None) or str(resume_exc)
+            status_code = getattr(resume_exc, "status_code", 500)
+            update_canvas_video_task(task_id, {
+                "status": "failed",
+                "error": str(detail),
+                "status_code": status_code,
+                "retry_after": None,
+                "next_poll_at": None,
+                "message": "",
+                "jimeng_pending": False,
+            })
+            return
+    except Exception as exc:
+        detail = getattr(exc, "detail", None) or str(exc)
+        status_code = getattr(exc, "status_code", 500)
+        update_canvas_video_task(task_id, {
+            "status": "failed",
+            "error": str(detail),
+            "status_code": status_code,
+            "retry_after": None,
+            "next_poll_at": None,
+            "message": "",
+            "jimeng_pending": False,
+        })
+        return
+    update_canvas_video_task(task_id, {
+        "status": "succeeded",
+        "result": result,
+        "videos": canvas_video_result_urls(result),
+        "error": "",
+        "retry_after": None,
+        "next_poll_at": None,
+        "message": "",
+        "jimeng_pending": False,
+        "status_code": None,
+        "raw_last": result.get("raw") if isinstance(result, dict) else result,
+    })
+
+async def resume_canvas_video_tasks_on_startup():
+    restored = load_canvas_video_tasks_into_memory()
+    if not restored:
+        return
+    for task_id, task in restored.items():
+        status = str(task.get("status") or "").strip().lower()
+        if status in CANVAS_VIDEO_TERMINAL_STATUSES:
+            continue
+        if status not in CANVAS_VIDEO_RESUMABLE_STATUSES:
+            continue
+        if canvas_video_upstream_task_id(task):
+            update_canvas_video_task(task_id, {"status": "polling", "message": "服务重启后已恢复视频任务查询"})
+            asyncio.create_task(run_canvas_video_task(task_id, resume=True))
+        else:
+            update_canvas_video_task(task_id, {
+                "status": "failed",
+                "error": "服务重启前尚未拿到上游视频任务 ID，已停止自动恢复以避免重复扣费。",
+                "retry_after": None,
+                "next_poll_at": None,
+                "message": "",
+                "jimeng_pending": False,
+            })
 
 class CanvasVideoRequest(BaseModel):
     prompt: str = Field(min_length=1, max_length=VIDEO_PROMPT_MAX_LENGTH)
@@ -5663,7 +5920,7 @@ async def generate_jimeng_provider_image(prompt, size, model, reference_images=N
             except Exception:
                 pass
 
-async def generate_jimeng_video(payload: CanvasVideoRequest, provider):
+async def generate_jimeng_video(payload: CanvasVideoRequest, provider, progress=None):
     image_refs = [ref for ref in (payload.images or []) if jimeng_video_ref_url(ref)]
     video_refs = [url for url in (payload.videos or []) if str(url or "").strip()]
     audio_refs = [url for url in (payload.audios or []) if str(url or "").strip()][:3]
@@ -5769,8 +6026,17 @@ async def generate_jimeng_video(payload: CanvasVideoRequest, provider):
             if model_version:
                 args.append(f"--model_version={model_version}")
         raw = await run_jimeng_cli(args, timeout=jimeng_poll_seconds() + 180)
+        submit_id = jimeng_submit_id(raw)
+        if submit_id:
+            report_canvas_video_progress(progress, {
+                "status": "polling",
+                "upstream_task_id": submit_id,
+                "task_id": submit_id,
+                "submit_id": submit_id,
+                "raw_submit": raw,
+            })
         urls = await jimeng_store_outputs(raw, "video")
-        return {"videos": urls, "task_id": jimeng_submit_id(raw) or None, "raw": raw}
+        return {"videos": urls, "task_id": submit_id or None, "raw": raw}
     finally:
         for path in temp_paths:
             try:
@@ -9747,7 +10013,7 @@ async def generate_runninghub_provider_image(prompt, size, model, reference_imag
         result = await wait_for_runninghub_image_task(client, provider, task_id)
         return runninghub_extract_image(result), result
 
-async def wait_for_runninghub_openapi_task(client, provider, task_id, output_kind=""):
+async def wait_for_runninghub_openapi_task(client, provider, task_id, output_kind="", on_progress=None):
     query_url = runninghub_openapi_url(provider, "query")
     deadline = time.monotonic() + 1800
     last_payload = None
@@ -9757,6 +10023,7 @@ async def wait_for_runninghub_openapi_task(client, provider, task_id, output_kin
         response.raise_for_status()
         raw = response.json()
         last_payload = raw
+        report_canvas_video_progress(on_progress, {"status": "polling", "raw_last": raw})
         status = runninghub_query_status(raw).upper()
         if status in {"SUCCESS", "SUCCEEDED", "COMPLETED", "COMPLETE", "FINISHED", "DONE", "3"}:
             return raw
@@ -9766,7 +10033,7 @@ async def wait_for_runninghub_openapi_task(client, provider, task_id, output_kin
             return raw
     raise HTTPException(status_code=504, detail=f"RunningHub 任务超时：{last_payload or task_id}")
 
-async def generate_runninghub_video(payload, provider):
+async def generate_runninghub_video(payload, provider, progress=None):
     model_def = await runninghub_model_definition(provider, payload.model)
     endpoint = runninghub_task_endpoint(provider, model_def.get("endpoint") or payload.model)
     params = model_def.get("params") if isinstance(model_def.get("params"), list) else []
@@ -9816,9 +10083,17 @@ async def generate_runninghub_video(payload, provider):
         response.raise_for_status()
         raw = response.json()
         task_id = runninghub_extract_task_id(raw)
+        if task_id:
+            report_canvas_video_progress(progress, {
+                "status": "polling",
+                "upstream_task_id": task_id,
+                "task_id": task_id,
+                "submit_url": endpoint,
+                "raw_submit": raw,
+            })
         result = raw
         if task_id and not video_output_urls(raw):
-            result = await wait_for_runninghub_openapi_task(client, provider, task_id, "video")
+            result = await wait_for_runninghub_openapi_task(client, provider, task_id, "video", progress)
         urls = video_output_urls(result)
         if not urls:
             outputs = runninghub_extract_outputs(result.get("data") if isinstance(result, dict) else result)
@@ -13056,6 +13331,12 @@ def video_retry_after_seconds(source):
             walk(response.json())
         except Exception:
             scan_text(getattr(response, "text", "") or str(source))
+    elif hasattr(source, "headers") and hasattr(source, "json"):
+        add_number(source.headers.get("Retry-After"))
+        try:
+            walk(source.json())
+        except Exception:
+            scan_text(getattr(source, "text", "") or str(source))
     elif isinstance(source, BaseException):
         scan_text(str(source))
     else:
@@ -13064,7 +13345,7 @@ def video_retry_after_seconds(source):
         return None
     return min(max(values), max(5.0, VIDEO_POLL_TIMEOUT))
 
-async def wait_for_video_task(client, provider, task_id, submit_url=""):
+async def wait_for_video_task(client, provider, task_id, submit_url="", on_progress=None):
     base_url = video_api_root(provider)
     if not base_url:
         raise HTTPException(status_code=400, detail=f"{provider.get('name') or provider['id']} 未配置 Base URL")
@@ -13080,6 +13361,13 @@ async def wait_for_video_task(client, provider, task_id, submit_url=""):
         for task_url in task_urls:
             try:
                 response = await client.get(task_url, headers=api_headers(provider=provider))
+                retry_after_delay = video_retry_after_seconds(response) or retry_after_delay
+                if response.status_code >= 400 and retry_after_delay:
+                    try:
+                        last_payload = response.json()
+                    except Exception:
+                        last_payload = {"error": response.text}
+                    break
                 response.raise_for_status()
                 raw = response.json()
                 break
@@ -13094,11 +13382,20 @@ async def wait_for_video_task(client, provider, task_id, submit_url=""):
                 delay = min(retry_after_delay, max(0.0, deadline - time.monotonic()))
                 if delay <= 0:
                     break
+                report_canvas_video_progress(on_progress, {
+                    "status": "polling",
+                    "retry_after": retry_after_delay,
+                    "next_poll_at": time.time() + delay,
+                    "raw_last": last_payload,
+                })
                 continue
             if last_error:
                 raise last_error
             raise HTTPException(status_code=502, detail=f"视频任务查询失败：{task_id}")
         last_payload = raw
+        report_canvas_video_progress(on_progress, {"status": "polling", "raw_last": raw})
+        if not isinstance(raw, dict):
+            raise HTTPException(status_code=502, detail=f"视频任务查询返回非 JSON 对象：{raw}")
         task_data = raw.get("data") if isinstance(raw.get("data"), dict) else raw
         status = str(task_data.get("status") or task_data.get("task_status") or raw.get("status") or raw.get("task_status") or "").upper()
         if status in VIDEO_TASK_SUCCESS_STATUSES:
@@ -13112,6 +13409,12 @@ async def wait_for_video_task(client, provider, task_id, submit_url=""):
             delay = min(retry_after_delay, max(0.0, deadline - time.monotonic()))
             if delay <= 0:
                 break
+            report_canvas_video_progress(on_progress, {
+                "status": "polling",
+                "retry_after": retry_after_delay,
+                "next_poll_at": time.time() + delay,
+                "raw_last": raw,
+            })
             continue
         if status in VIDEO_TASK_FAILURE_STATUSES:
             error = task_data.get("error") if isinstance(task_data.get("error"), dict) else {}
@@ -13165,7 +13468,7 @@ async def agnes_video_image_url(ref):
     uploaded = await upload_local_video_to_cloud(url, "auto")
     return uploaded.get("url") or ""
 
-async def wait_for_agnes_video_task(client, provider, video_id, model):
+async def wait_for_agnes_video_task(client, provider, video_id, model, on_progress=None):
     base_url = video_api_root(provider)
     if not base_url:
         raise HTTPException(status_code=400, detail=f"{provider.get('name') or provider['id']} 未配置 Base URL")
@@ -13178,19 +13481,44 @@ async def wait_for_agnes_video_task(client, provider, video_id, model):
         await asyncio.sleep(delay)
         raw = None
         last_error = None
+        retry_after_delay = None
         for url in (query_url, legacy_url):
             try:
                 response = await client.get(url, headers=api_headers(provider=provider, model=model))
+                retry_after_delay = video_retry_after_seconds(response) or retry_after_delay
+                if response.status_code >= 400 and retry_after_delay:
+                    try:
+                        last_payload = response.json()
+                    except Exception:
+                        last_payload = {"error": response.text}
+                    break
                 response.raise_for_status()
                 raw = response.json()
                 break
             except Exception as exc:
                 last_error = exc
+                retry_after_delay = video_retry_after_seconds(exc) or retry_after_delay
+                if retry_after_delay:
+                    break
         if raw is None:
+            if retry_after_delay:
+                delay = min(retry_after_delay, max(0.0, deadline - time.monotonic()))
+                if delay <= 0:
+                    break
+                report_canvas_video_progress(on_progress, {
+                    "status": "polling",
+                    "retry_after": retry_after_delay,
+                    "next_poll_at": time.time() + delay,
+                    "raw_last": last_payload,
+                })
+                continue
             if last_error:
                 raise last_error
             raise HTTPException(status_code=502, detail=f"Agnes 视频任务查询失败：{video_id}")
         last_payload = raw
+        report_canvas_video_progress(on_progress, {"status": "polling", "raw_last": raw})
+        if not isinstance(raw, dict):
+            raise HTTPException(status_code=502, detail=f"Agnes 视频任务查询返回非 JSON 对象：{raw}")
         task_data = raw.get("data") if isinstance(raw.get("data"), dict) else raw
         status = str(task_data.get("status") or raw.get("status") or "").upper()
         if status in VIDEO_TASK_SUCCESS_STATUSES or video_output_urls(raw):
@@ -13202,7 +13530,7 @@ async def wait_for_agnes_video_task(client, provider, video_id, model):
         delay = min(delay * 1.35, 12)
     raise HTTPException(status_code=504, detail=f"Agnes 视频生成任务超时：{last_payload or video_id}")
 
-async def generate_agnes_video(client, payload, provider, base_url, requested_model):
+async def generate_agnes_video(client, payload, provider, base_url, requested_model, progress=None):
     model = selected_model(requested_model, "agnes-video-v2.0")
     width, height = agnes_video_dimensions(payload.aspect_ratio, payload.resolution)
     num_frames, frame_rate = agnes_video_frame_count(payload.duration, 24)
@@ -13236,11 +13564,19 @@ async def generate_agnes_video(client, payload, provider, base_url, requested_mo
     raw = response.json()
     video_id = str(raw.get("video_id") or "").strip()
     task_id = str(raw.get("task_id") or raw.get("id") or "").strip()
+    if video_id or task_id:
+        report_canvas_video_progress(progress, {
+            "status": "polling",
+            "upstream_task_id": video_id or task_id,
+            "task_id": video_id or task_id,
+            "submit_url": submit_url,
+            "raw_submit": raw,
+        })
     result = raw
     if video_id and not video_output_urls(raw):
-        result = await wait_for_agnes_video_task(client, provider, video_id, model)
+        result = await wait_for_agnes_video_task(client, provider, video_id, model, progress)
     elif task_id and not video_output_urls(raw):
-        result = await wait_for_video_task(client, provider, task_id, submit_url)
+        result = await wait_for_video_task(client, provider, task_id, submit_url, progress)
     urls = video_output_urls(result)
     if not urls:
         raise HTTPException(status_code=502, detail=f"Agnes 视频生成成功但没有返回视频：{result}")
@@ -13309,7 +13645,7 @@ async def yuli_fetch_reference_bytes(client, ref_url):
         return (f"input_reference.{ext}", raw, mime)
     return None
 
-async def generate_yuli_openai_video(client, payload, provider, base_url, requested_model):
+async def generate_yuli_openai_video(client, payload, provider, base_url, requested_model, progress=None):
     """玉玉API veo3.1 走 OpenAI multipart 格式 /v1/videos，支持 seconds 时长控制。"""
     submit_url = f"{base_url}/v1/videos"
     data = {
@@ -13340,9 +13676,17 @@ async def generate_yuli_openai_video(client, payload, provider, base_url, reques
         resp_text = (response.text or "")[:500]
         raise HTTPException(status_code=502, detail=f"玉玉API 视频接口返回非 JSON 响应（状态 {response.status_code}）：{resp_text}") from exc
     task_id = raw.get("id") or extract_task_id(raw) or raw.get("task_id")
+    if task_id:
+        report_canvas_video_progress(progress, {
+            "status": "polling",
+            "upstream_task_id": task_id,
+            "task_id": task_id,
+            "submit_url": submit_url,
+            "raw_submit": raw,
+        })
     result = raw
     if task_id and not video_output_urls(raw):
-        result = await wait_for_video_task(client, provider, task_id, submit_url)
+        result = await wait_for_video_task(client, provider, task_id, submit_url, progress)
     urls = video_output_urls(result)
     if not urls:
         raise HTTPException(status_code=502, detail=f"视频生成成功但没有返回视频：{result}")
@@ -13360,14 +13704,13 @@ def volcengine_video_prompt_text(prompt, aspect_ratio="", duration=None):
     suffix_text = " ".join(suffixes)
     return f"{text} {suffix_text}".strip() if text else suffix_text
 
-@app.post("/api/canvas-video")
-async def canvas_video(payload: CanvasVideoRequest):
+async def build_canvas_video_result(payload: CanvasVideoRequest, progress=None):
     provider = get_api_provider(payload.provider_id)
     if is_jimeng_provider(provider):
-        return await generate_jimeng_video(payload, provider)
+        return await generate_jimeng_video(payload, provider, progress)
     if is_runninghub_provider(provider):
         try:
-            return await generate_runninghub_video(payload, provider)
+            return await generate_runninghub_video(payload, provider, progress)
         except httpx.HTTPStatusError as exc:
             text = exc.response.text
             raise HTTPException(status_code=exc.response.status_code, detail=f"RunningHub 视频接口错误：{text}") from exc
@@ -13393,7 +13736,7 @@ async def canvas_video(payload: CanvasVideoRequest):
     if is_agnes:
         try:
             async with httpx.AsyncClient(timeout=VIDEO_POLL_TIMEOUT) as agnes_client:
-                return await generate_agnes_video(agnes_client, payload, provider, base_url, requested_model)
+                return await generate_agnes_video(agnes_client, payload, provider, base_url, requested_model, progress)
         except httpx.HTTPStatusError as exc:
             text = exc.response.text
             raise HTTPException(status_code=exc.response.status_code, detail=f"Agnes 视频接口错误：{text}") from exc
@@ -13405,7 +13748,7 @@ async def canvas_video(payload: CanvasVideoRequest):
     if is_yuli and yuli_is_veo_openai_model(requested_model):
         try:
             async with httpx.AsyncClient(timeout=VIDEO_POLL_TIMEOUT) as yuli_client:
-                return await generate_yuli_openai_video(yuli_client, payload, provider, base_url, requested_model)
+                return await generate_yuli_openai_video(yuli_client, payload, provider, base_url, requested_model, progress)
         except httpx.HTTPStatusError as exc:
             text = exc.response.text
             raise HTTPException(status_code=exc.response.status_code, detail=f"上游视频接口错误：{text}") from exc
@@ -13763,9 +14106,17 @@ async def canvas_video(payload: CanvasVideoRequest):
                     )
                 ) from last_json_error
             task_id = extract_task_id(raw) or raw.get("task_id") or raw.get("id")
+            if task_id:
+                report_canvas_video_progress(progress, {
+                    "status": "polling",
+                    "upstream_task_id": task_id,
+                    "task_id": task_id,
+                    "submit_url": submit_url,
+                    "raw_submit": raw,
+                })
             result = raw
             if task_id and not video_output_urls(raw):
-                result = await wait_for_video_task(client, provider, task_id, submit_url)
+                result = await wait_for_video_task(client, provider, task_id, submit_url, progress)
             urls = video_output_urls(result)
             if not urls:
                 raise HTTPException(status_code=502, detail=f"视频生成成功但没有返回视频：{result}")
@@ -13831,6 +14182,48 @@ async def canvas_video(payload: CanvasVideoRequest):
     except httpx.HTTPError as exc:
         log_net_error(f"视频 网络/TLS错误 provider={provider.get('id')} model={payload.model}", exc)
         raise HTTPException(status_code=502, detail=f"请求上游视频接口失败：{exc}") from exc
+
+@app.post("/api/canvas-video")
+async def canvas_video(payload: CanvasVideoRequest):
+    return await build_canvas_video_result(payload)
+
+@app.post("/api/canvas-video-tasks")
+async def create_canvas_video_task(payload: CanvasVideoRequest):
+    task_id = f"canvas_video_{uuid.uuid4().hex}"
+    task = {
+        "id": task_id,
+        "type": "online-video",
+        "status": "queued",
+        "created_at": time.time(),
+        "updated_at": time.time(),
+        "result": None,
+        "videos": [],
+        "error": "",
+        "provider_id": payload.provider_id,
+        "model": payload.model,
+        "request": video_task_request_meta(payload),
+        "upstream_task_id": "",
+        "submit_url": "",
+        "retry_after": None,
+        "next_poll_at": None,
+    }
+    with CANVAS_TASK_LOCK:
+        CANVAS_TASKS[task_id] = task
+    persist_canvas_video_tasks()
+    asyncio.create_task(run_canvas_video_task(task_id, payload))
+    return {"task_id": task_id, "status": "queued"}
+
+@app.get("/api/canvas-video-tasks/{task_id}")
+async def get_canvas_video_task(task_id: str):
+    with CANVAS_TASK_LOCK:
+        task = dict(CANVAS_TASKS.get(task_id) or {})
+    if not task:
+        load_canvas_video_tasks_into_memory()
+        with CANVAS_TASK_LOCK:
+            task = dict(CANVAS_TASKS.get(task_id) or {})
+    if not task:
+        raise HTTPException(status_code=404, detail="视频任务不存在，可能服务已重启或任务已过期")
+    return task
 
 # --- Canvas LLM ---
 

@@ -151,6 +151,70 @@ EXTRACT_TASK_ID_PY = r'''def extract_task_id(data, allow_plain_id=False):
     return None
 '''
 
+VIDEO_RETRY_AFTER_PY = r'''def video_retry_after_seconds(source):
+    values = []
+
+    def add_number(value):
+        try:
+            seconds = float(value)
+        except Exception:
+            return
+        if seconds > 0:
+            values.append(seconds)
+
+    def scan_text(text):
+        text = str(text or "").strip()
+        if not text:
+            return
+        if text[0:1] in {"{", "["}:
+            try:
+                walk(json.loads(text))
+            except Exception:
+                pass
+        for pattern in (
+            r"retry[_\s-]*after[\"']?\s*[:=]\s*[\"']?(\d+(?:\.\d+)?)",
+            r"请等待\s*(\d+(?:\.\d+)?)\s*秒",
+            r"(\d+(?:\.\d+)?)\s*秒后再试",
+            r"(?:retry after|wait)\s*(\d+(?:\.\d+)?)\s*(?:s|sec|second|seconds)?",
+        ):
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                add_number(match.group(1))
+
+    def walk(value, depth=0):
+        if depth > 8:
+            return
+        if isinstance(value, dict):
+            for key, item in value.items():
+                normalized = str(key or "").strip().lower().replace("-", "_")
+                if normalized in {"retry_after", "retryafter"}:
+                    add_number(item)
+                else:
+                    walk(item, depth + 1)
+            return
+        if isinstance(value, (list, tuple)):
+            for item in value:
+                walk(item, depth + 1)
+            return
+        if isinstance(value, str):
+            scan_text(value)
+
+    response = getattr(source, "response", None)
+    if response is not None:
+        add_number(response.headers.get("Retry-After"))
+        try:
+            walk(response.json())
+        except Exception:
+            scan_text(getattr(response, "text", "") or str(source))
+    elif isinstance(source, BaseException):
+        scan_text(str(source))
+    else:
+        walk(source)
+    if not values:
+        return None
+    return min(max(values), max(5.0, VIDEO_POLL_TIMEOUT))
+'''
+
 SINGLE_VIDEO_BODY_PY = r'''                else:
                     if is_single_video_generations:
                         image_urls = await openai_video_generations_reference_urls(
@@ -310,6 +374,41 @@ def normalize_video_request_mode(value):
             "video URL helpers",
             required=True,
         )
+
+    if "def video_retry_after_seconds(source):" not in text:
+        match = re.search(
+            r"def humanize_video_task_failure\(reason\) -> str:\n.*?    return f\"视频生成任务失败：\{text\}\"\n\n",
+            text,
+            flags=re.S,
+        )
+        if not match:
+            raise PatchError("anchor not found: video retry_after helper")
+        text = text[:match.end()] + VIDEO_RETRY_AFTER_PY + "\n\n" + text[match.end():]
+
+    text = replace_once(
+        text,
+        "    delay = max(2.0, IMAGE_POLL_INTERVAL)\n",
+        "    delay = max(5.0, IMAGE_POLL_INTERVAL)\n",
+        "video poll initial delay",
+    )
+    text = replace_once(
+        text,
+        "        raw = None\n        last_error = None\n        for task_url in task_urls:\n",
+        "        raw = None\n        last_error = None\n        retry_after_delay = None\n        for task_url in task_urls:\n",
+        "video retry_after loop state",
+    )
+    text = replace_once(
+        text,
+        "            except Exception as exc:\n                last_error = exc\n                continue\n        if raw is None:\n            if last_error:\n                raise last_error\n            raise HTTPException(status_code=502, detail=f\"视频任务查询失败：{task_id}\")\n",
+        "            except Exception as exc:\n                last_error = exc\n                retry_after_delay = video_retry_after_seconds(exc) or retry_after_delay\n                if retry_after_delay:\n                    break\n                continue\n        if raw is None:\n            if retry_after_delay:\n                delay = min(retry_after_delay, max(0.0, deadline - time.monotonic()))\n                if delay <= 0:\n                    break\n                continue\n            if last_error:\n                raise last_error\n            raise HTTPException(status_code=502, detail=f\"视频任务查询失败：{task_id}\")\n",
+        "video retry_after exception handling",
+    )
+    text = replace_once(
+        text,
+        "        if status not in VIDEO_TASK_FAILURE_STATUSES and video_output_urls(raw):\n            return raw\n        if status in VIDEO_TASK_FAILURE_STATUSES:\n",
+        "        if status not in VIDEO_TASK_FAILURE_STATUSES and video_output_urls(raw):\n            return raw\n        retry_after_delay = video_retry_after_seconds(raw)\n        if retry_after_delay:\n            delay = min(retry_after_delay, max(0.0, deadline - time.monotonic()))\n            if delay <= 0:\n                break\n            continue\n        if status in VIDEO_TASK_FAILURE_STATUSES:\n",
+        "video retry_after payload handling",
+    )
 
     if "is_single_video_generations = is_openai_video_generations_mode(provider)" not in text:
         text = replace_once(
@@ -560,6 +659,8 @@ def validate(root):
             "def effective_video_request_mode(provider)",
             "openai_video_generations_reference_urls",
             "is_single_video_generations = is_openai_video_generations_mode(provider)",
+            "def video_retry_after_seconds(source):",
+            "delay = max(5.0, IMAGE_POLL_INTERVAL)",
         ],
         "static/api-settings.html": ["videoRequestModeInput"],
         "static/css/api-settings.css": [

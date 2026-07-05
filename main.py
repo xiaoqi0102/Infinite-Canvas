@@ -13001,18 +13001,82 @@ def humanize_video_task_failure(reason) -> str:
         )
     return f"视频生成任务失败：{text}"
 
+def video_retry_after_seconds(source):
+    values = []
+
+    def add_number(value):
+        try:
+            seconds = float(value)
+        except Exception:
+            return
+        if seconds > 0:
+            values.append(seconds)
+
+    def scan_text(text):
+        text = str(text or "").strip()
+        if not text:
+            return
+        if text[0:1] in {"{", "["}:
+            try:
+                walk(json.loads(text))
+            except Exception:
+                pass
+        for pattern in (
+            r"retry[_\s-]*after[\"']?\s*[:=]\s*[\"']?(\d+(?:\.\d+)?)",
+            r"请等待\s*(\d+(?:\.\d+)?)\s*秒",
+            r"(\d+(?:\.\d+)?)\s*秒后再试",
+            r"(?:retry after|wait)\s*(\d+(?:\.\d+)?)\s*(?:s|sec|second|seconds)?",
+        ):
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                add_number(match.group(1))
+
+    def walk(value, depth=0):
+        if depth > 8:
+            return
+        if isinstance(value, dict):
+            for key, item in value.items():
+                normalized = str(key or "").strip().lower().replace("-", "_")
+                if normalized in {"retry_after", "retryafter"}:
+                    add_number(item)
+                else:
+                    walk(item, depth + 1)
+            return
+        if isinstance(value, (list, tuple)):
+            for item in value:
+                walk(item, depth + 1)
+            return
+        if isinstance(value, str):
+            scan_text(value)
+
+    response = getattr(source, "response", None)
+    if response is not None:
+        add_number(response.headers.get("Retry-After"))
+        try:
+            walk(response.json())
+        except Exception:
+            scan_text(getattr(response, "text", "") or str(source))
+    elif isinstance(source, BaseException):
+        scan_text(str(source))
+    else:
+        walk(source)
+    if not values:
+        return None
+    return min(max(values), max(5.0, VIDEO_POLL_TIMEOUT))
+
 async def wait_for_video_task(client, provider, task_id, submit_url=""):
     base_url = video_api_root(provider)
     if not base_url:
         raise HTTPException(status_code=400, detail=f"{provider.get('name') or provider['id']} 未配置 Base URL")
     task_urls = video_task_url_candidates(provider, base_url, task_id, submit_url)
     deadline = time.monotonic() + VIDEO_POLL_TIMEOUT
-    delay = max(2.0, IMAGE_POLL_INTERVAL)
+    delay = max(5.0, IMAGE_POLL_INTERVAL)
     last_payload = {}
     while time.monotonic() < deadline:
         await asyncio.sleep(delay)
         raw = None
         last_error = None
+        retry_after_delay = None
         for task_url in task_urls:
             try:
                 response = await client.get(task_url, headers=api_headers(provider=provider))
@@ -13021,8 +13085,16 @@ async def wait_for_video_task(client, provider, task_id, submit_url=""):
                 break
             except Exception as exc:
                 last_error = exc
+                retry_after_delay = video_retry_after_seconds(exc) or retry_after_delay
+                if retry_after_delay:
+                    break
                 continue
         if raw is None:
+            if retry_after_delay:
+                delay = min(retry_after_delay, max(0.0, deadline - time.monotonic()))
+                if delay <= 0:
+                    break
+                continue
             if last_error:
                 raise last_error
             raise HTTPException(status_code=502, detail=f"视频任务查询失败：{task_id}")
@@ -13035,6 +13107,12 @@ async def wait_for_video_task(client, provider, task_id, submit_url=""):
         # 只要不是明确的失败状态，且拿到了真实视频地址，就直接当成功处理。
         if status not in VIDEO_TASK_FAILURE_STATUSES and video_output_urls(raw):
             return raw
+        retry_after_delay = video_retry_after_seconds(raw)
+        if retry_after_delay:
+            delay = min(retry_after_delay, max(0.0, deadline - time.monotonic()))
+            if delay <= 0:
+                break
+            continue
         if status in VIDEO_TASK_FAILURE_STATUSES:
             error = task_data.get("error") if isinstance(task_data.get("error"), dict) else {}
             reason = task_data.get("fail_reason") or task_data.get("message") or error.get("message") or raw.get("error") or raw.get("message") or str(raw)

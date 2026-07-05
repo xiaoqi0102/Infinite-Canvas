@@ -266,6 +266,7 @@ JIMENG_LOGIN_SESSION = {
 PROVIDER_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{2,40}$")
 SUPPORTED_PROVIDER_PROTOCOLS = {"openai", "apimart", "gemini", "gemini-cli", "volcengine", "runninghub", "jimeng", "codex"}
 SUPPORTED_IMAGE_REQUEST_MODES = {"openai", "openai-json", "openai-video-proxy", "openai-responses"}
+SUPPORTED_VIDEO_REQUEST_MODES = {"openai-videos-generations", "openai-video-generations"}
 RUNNINGHUB_DEFAULT_BASE_URL = "https://www.runninghub.cn"
 RUNNINGHUB_OPENAPI_BASE_URL = "https://www.runninghub.cn/openapi/v2"
 RUNNINGHUB_MODEL_REGISTRY_URL = "https://raw.githubusercontent.com/HM-RunningHub/ComfyUI_RH_OpenAPI/main/models_registry.json"
@@ -721,6 +722,7 @@ def default_api_providers():
             "base_url": MODELSCOPE_CHAT_BASE_URL,
             "protocol": "openai",
             "image_request_mode": "openai",
+            "video_request_mode": "openai-videos-generations",
             "image_generation_endpoint": "",
             "image_edit_endpoint": "",
             "enabled": True,
@@ -737,6 +739,7 @@ def default_api_providers():
             "base_url": RUNNINGHUB_DEFAULT_BASE_URL,
             "protocol": "runninghub",
             "image_request_mode": "openai",
+            "video_request_mode": "openai-videos-generations",
             "image_generation_endpoint": "",
             "image_edit_endpoint": "",
             "enabled": True,
@@ -755,6 +758,7 @@ def default_api_providers():
             "base_url": VOLCENGINE_DEFAULT_BASE_URL,
             "protocol": "volcengine",
             "image_request_mode": "openai",
+            "video_request_mode": "openai-videos-generations",
             "image_generation_endpoint": "",
             "image_edit_endpoint": "",
             "enabled": True,
@@ -1103,6 +1107,14 @@ def normalize_image_request_mode(value):
     mode = str(value or "").strip().lower()
     return mode if mode in SUPPORTED_IMAGE_REQUEST_MODES else "openai"
 
+def normalize_video_request_mode(value):
+    mode = str(value or "").strip().lower()
+    if mode in {"openai-video", "single-video", "video-generations"}:
+        return "openai-video-generations"
+    if mode in {"openai-videos", "videos-generations"}:
+        return "openai-videos-generations"
+    return mode if mode in SUPPORTED_VIDEO_REQUEST_MODES else "openai-videos-generations"
+
 LOCKED_RECOMMENDED_PROVIDER_RULES = {
     "exellome": {
         "names": {"exellome"},
@@ -1177,6 +1189,7 @@ def normalize_provider(item):
     if protocol not in SUPPORTED_PROVIDER_PROTOCOLS:
         protocol = "openai"
     image_request_mode = detect_image_request_mode(base_url, item.get("image_models") or []) or normalize_image_request_mode(item.get("image_request_mode"))
+    video_request_mode = normalize_video_request_mode(item.get("video_request_mode"))
     image_generation_endpoint = normalize_endpoint_override(item.get("image_generation_endpoint"), "文生图端口")
     image_edit_endpoint = normalize_endpoint_override(item.get("image_edit_endpoint"), "图生图/编辑端口")
     volc_project = re.sub(r"\s+", " ", str(item.get("volcengine_project_name") or "").strip())[:80]
@@ -1203,6 +1216,7 @@ def normalize_provider(item):
         "base_url": base_url,
         "protocol": protocol,
         "image_request_mode": image_request_mode,
+        "video_request_mode": video_request_mode,
         "image_generation_endpoint": image_generation_endpoint,
         "image_edit_endpoint": image_edit_endpoint,
         "enabled": bool(item.get("enabled", True)),
@@ -2507,6 +2521,7 @@ class ApiProviderPayload(BaseModel):
     base_url: str = ""
     protocol: str = "openai"
     image_request_mode: str = "openai"
+    video_request_mode: str = "openai-videos-generations"
     image_generation_endpoint: str = ""
     image_edit_endpoint: str = ""
     enabled: bool = True
@@ -3798,7 +3813,9 @@ def extract_image(data):
         return flexible
     raise HTTPException(status_code=502, detail="无法识别生图接口返回格式")
 
-def extract_task_id(data):
+def extract_task_id(data, allow_plain_id=False):
+    if not isinstance(data, dict):
+        return None
     if data.get("task_id"):
         return str(data["task_id"])
     if data.get("taskId"):
@@ -3809,15 +3826,16 @@ def extract_task_id(data):
         return str(data["video_id"])
     if data.get("videoId"):
         return str(data["videoId"])
-    if data.get("id") and str(data.get("id", "")).startswith("task"):
-        return str(data["id"])
+    raw_id = str(data.get("id") or "").strip()
+    if raw_id and (allow_plain_id or raw_id.startswith(("task", "video", "vidgen", "upstream_task"))):
+        return raw_id
     nested = data.get("data")
     if isinstance(nested, list) and nested:
         first = nested[0]
         if isinstance(first, dict):
-            return extract_task_id(first)
+            return extract_task_id(first, allow_plain_id=True)
     if isinstance(nested, dict):
-        return extract_task_id(nested)
+        return extract_task_id(nested, allow_plain_id=True)
     return None
 
 def extract_task_id_from_text(text):
@@ -8120,7 +8138,7 @@ def volcengine_public_asset_url(url: str) -> str:
         return public
     return "ERR:火山要求素材是公网可访问的 http/https URL；本地画布文件需配置 PUBLIC_BASE_URL/PUBLIC_MEDIA_BASE_URL 暴露为公网地址。"
 
-def local_media_path_for_cloud_upload(ref_url: str, allowed_prefixes=("image/", "video/")) -> str:
+def local_media_path_for_cloud_upload(ref_url: str, allowed_prefixes=("image/", "video/", "audio/")) -> str:
     ref_url = str(ref_url or "").strip()
     if not ref_url:
         raise HTTPException(status_code=400, detail="没有可上传的媒体文件")
@@ -8133,7 +8151,7 @@ def local_media_path_for_cloud_upload(ref_url: str, allowed_prefixes=("image/", 
         raise HTTPException(status_code=404, detail="本地媒体文件不存在或已被删除")
     ct = content_type_for_path(path)
     if not any(ct.startswith(prefix) for prefix in allowed_prefixes):
-        raise HTTPException(status_code=400, detail="请选择图片或视频文件再上传云端")
+        raise HTTPException(status_code=400, detail="请选择图片、视频或音频文件再上传云端")
     max_bytes = int(os.getenv("TEMP_SH_MAX_BYTES", str(4 * 1024 * 1024 * 1024)))
     size = os.path.getsize(path)
     if size > max_bytes:
@@ -12841,6 +12859,9 @@ def looks_like_html_response(text: str) -> bool:
 def video_submit_url_candidates(provider, base_url):
     if is_agnes_provider(provider):
         return [f"{base_url}/v1/videos"]
+    video_request_mode = effective_video_request_mode(provider)
+    if video_request_mode == "openai-video-generations":
+        return [f"{base_url}/v1/video/generations"]
     if is_apimart_provider(provider):
         return [f"{base_url}/videos/generations" if base_url.endswith("/v1") else f"{base_url}/v1/videos/generations"]
     if is_volcengine_provider(provider):
@@ -12853,30 +12874,97 @@ def video_submit_url_candidates(provider, base_url):
     return [f"{base_url}/v1/videos/generations", f"{base_url}/v2/videos/generations"]
 
 def video_task_url_candidates(provider, base_url, task_id, submit_url=""):
+    quoted_id = urllib.parse.quote(str(task_id), safe="")
     if is_agnes_provider(provider):
-        quoted_id = urllib.parse.quote(str(task_id), safe="")
         return [
             f"{base_url}/agnesapi?{urllib.parse.urlencode({'video_id': task_id})}",
             f"{base_url}/v1/videos/{quoted_id}",
         ]
+    video_request_mode = effective_video_request_mode(provider)
+    if video_request_mode == "openai-video-generations":
+        return [f"{base_url}/v1/video/generations/{quoted_id}"]
     if is_apimart_provider(provider):
-        task_path = f"{base_url}/tasks/{task_id}" if base_url.endswith("/v1") else f"{base_url}/v1/tasks/{task_id}"
+        task_path = f"{base_url}/tasks/{quoted_id}" if base_url.endswith("/v1") else f"{base_url}/v1/tasks/{quoted_id}"
         return [f"{task_path}?language=zh"]
     if is_volcengine_provider(provider):
         parsed = urllib.parse.urlparse(base_url)
         if parsed.path and parsed.path.rstrip("/"):
-            return [f"{base_url}/{task_id}"]
-        return [f"{base_url}/api/v3/contents/generations/tasks/{task_id}"]
+            return [f"{base_url}/{quoted_id}"]
+        return [f"{base_url}/api/v3/contents/generations/tasks/{quoted_id}"]
     if is_yuli_provider(provider):
         # 玉玉API 两种视频格式：OpenAI（/v1/videos/{id}）与原生（/v1/video/query?id=）。
         # 两个都试，谁返回成功就用谁，兼容 veo OpenAI 路径与 doubao 原生路径。
-        return [f"{base_url}/v1/videos/{task_id}", f"{base_url}/v1/video/query?id={task_id}"]
-    v1_task = f"{base_url}/v1/videos/generations/{task_id}"
-    v1_generic_task = f"{base_url}/v1/tasks/{task_id}"
-    v2_task = f"{base_url}/v2/videos/generations/{task_id}"
+        return [f"{base_url}/v1/videos/{quoted_id}", f"{base_url}/v1/video/query?{urllib.parse.urlencode({'id': task_id})}"]
+    v1_task = f"{base_url}/v1/videos/generations/{quoted_id}"
+    v1_generic_task = f"{base_url}/v1/tasks/{quoted_id}"
+    v2_task = f"{base_url}/v2/videos/generations/{quoted_id}"
     if "/v2/videos/generations" in str(submit_url or ""):
         return [v2_task, v1_task, v1_generic_task]
     return [v1_task, v1_generic_task, v2_task]
+
+def effective_video_request_mode(provider) -> str:
+    if (
+        is_agnes_provider(provider)
+        or is_volcengine_provider(provider)
+        or is_yuli_provider(provider)
+        or is_runninghub_provider(provider)
+        or is_jimeng_provider(provider)
+    ):
+        return "openai-videos-generations"
+    return normalize_video_request_mode((provider or {}).get("video_request_mode"))
+
+def is_openai_video_generations_mode(provider) -> bool:
+    return effective_video_request_mode(provider) == "openai-video-generations"
+
+def openai_video_generations_duration(duration) -> str:
+    try:
+        value = int(duration)
+    except Exception:
+        value = 5
+    if value <= 0:
+        return "auto"
+    return str(max(1, min(60, value)))
+
+def openai_video_generations_aspect_ratio(aspect_ratio: str) -> str:
+    value = str(aspect_ratio or "").strip()
+    return value if value in {"16:9", "9:16", "1:1", "21:9", "auto"} else "auto"
+
+def openai_video_generations_resolution(resolution: str) -> str:
+    value = str(resolution or "").strip().lower()
+    return value if value in {"480p", "720p"} else "720p"
+
+async def openai_video_generations_public_url(value, label: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    parsed = urllib.parse.urlsplit(text)
+    if parsed.scheme in {"http", "https"}:
+        host = (parsed.hostname or "").lower()
+        if host in {"127.0.0.1", "localhost", "::1"} or re.match(r"^(192\.168\.|10\.|172\.(1[6-9]|2\d|3[01])\.)", host):
+            text = urllib.parse.unquote(parsed.path or "")
+        else:
+            return text
+    if text.startswith("asset://"):
+        return text
+    try:
+        uploaded = await upload_local_video_to_cloud(text)
+        url = str((uploaded or {}).get("url") or "").strip()
+        if url.startswith(("http://", "https://")):
+            return url
+    except HTTPException as exc:
+        public_url = local_asset_public_url(text)
+        if public_url:
+            return public_url
+        raise HTTPException(status_code=400, detail=f"{label}无法转换为公网 URL：{exc.detail}") from exc
+    raise HTTPException(status_code=400, detail=f"{label}不是公网 URL，无法传给上游：{text[:160]}")
+
+async def openai_video_generations_reference_urls(values, label: str, limit: int) -> List[str]:
+    urls = []
+    for value in list(values or [])[:limit]:
+        url = await openai_video_generations_public_url(value, label)
+        if url:
+            urls.append(url)
+    return urls
 
 VIDEO_TASK_SUCCESS_STATUSES = {
     "SUCCESS", "SUCCEED", "SUCCEEDED", "COMPLETED", "COMPLETE",
@@ -13214,7 +13302,8 @@ async def canvas_video(payload: CanvasVideoRequest):
     api_key = provider_env_key_value(provider["id"])
     if not api_key:
         raise HTTPException(status_code=400, detail=f"未配置 {provider.get('name') or provider['id']} 的 API Key，请在 API 设置中填写。")
-    is_apimart = is_apimart_provider(provider)
+    is_single_video_generations = is_openai_video_generations_mode(provider)
+    is_apimart = is_apimart_provider(provider) and not is_single_video_generations
     is_volcengine = is_volcengine_provider(provider)
     is_yuli = is_yuli_provider(provider)
     is_agnes = is_agnes_provider(provider, payload.model)
@@ -13494,39 +13583,61 @@ async def canvas_video(payload: CanvasVideoRequest):
                     if payload.enable_upsample:
                         body["enable_upsample"] = True
                 else:
-                    image_payload = []
-                    for ref in payload.images[:4]:
-                        if ref.url:
-                            image_payload.append(reference_to_data_url(ref.dict(), max_size=1536))
-                    body = {
-                        "prompt": payload.prompt,
-                        "model": selected_model(payload.model, "veo3-fast"),
-                        "duration": payload.duration,
-                        "watermark": payload.watermark,
-                    }
-                    if payload.aspect_ratio:
-                        body["aspect_ratio"] = payload.aspect_ratio
-                        body["ratio"] = payload.aspect_ratio
-                    if payload.size:
-                        body["size"] = payload.size
-                    if payload.resolution:
-                        body["resolution"] = payload.resolution
-                    if image_payload:
-                        body["images"] = image_payload
-                    if payload.videos:
-                        body["videos"] = [v for v in payload.videos if v]
-                    if payload.enhance_prompt:
-                        body["enhance_prompt"] = True
-                    if payload.enable_upsample:
-                        body["enable_upsample"] = True
-                    if payload.seed is not None:
-                        body["seed"] = payload.seed
-                    if payload.camerafixed:
-                        body["camerafixed"] = True
-                    if payload.return_last_frame:
-                        body["return_last_frame"] = True
-                    if payload.generate_audio:
-                        body["generate_audio"] = True
+                    if is_single_video_generations:
+                        image_urls = await openai_video_generations_reference_urls(
+                            [ref.url for ref in payload.images if ref.url], "参考图", 9
+                        )
+                        video_urls = await openai_video_generations_reference_urls(payload.videos, "参考视频", 3)
+                        audio_urls = await openai_video_generations_reference_urls(payload.audios, "参考音频", 3)
+                        body = {
+                            "prompt": payload.prompt,
+                            "model": selected_model(payload.model, "veo3-fast"),
+                            "type": "image-to-video",
+                            "duration": openai_video_generations_duration(payload.duration),
+                            "aspect_ratio": openai_video_generations_aspect_ratio(payload.aspect_ratio),
+                            "resolution": openai_video_generations_resolution(payload.resolution),
+                            "generate_audio": bool(payload.generate_audio),
+                        }
+                        if image_urls:
+                            body["image_urls"] = image_urls
+                        if video_urls:
+                            body["video_urls"] = video_urls
+                        if audio_urls:
+                            body["audio_urls"] = audio_urls
+                    else:
+                        image_payload = []
+                        for ref in payload.images[:4]:
+                            if ref.url:
+                                image_payload.append(reference_to_data_url(ref.dict(), max_size=1536))
+                        body = {
+                            "prompt": payload.prompt,
+                            "model": selected_model(payload.model, "veo3-fast"),
+                            "duration": payload.duration,
+                            "watermark": payload.watermark,
+                        }
+                        if payload.aspect_ratio:
+                            body["aspect_ratio"] = payload.aspect_ratio
+                            body["ratio"] = payload.aspect_ratio
+                        if payload.size:
+                            body["size"] = payload.size
+                        if payload.resolution:
+                            body["resolution"] = payload.resolution
+                        if image_payload:
+                            body["images"] = image_payload
+                        if payload.videos:
+                            body["videos"] = [v for v in payload.videos if v]
+                        if payload.enhance_prompt:
+                            body["enhance_prompt"] = True
+                        if payload.enable_upsample:
+                            body["enable_upsample"] = True
+                        if payload.seed is not None:
+                            body["seed"] = payload.seed
+                        if payload.camerafixed:
+                            body["camerafixed"] = True
+                        if payload.return_last_frame:
+                            body["return_last_frame"] = True
+                        if payload.generate_audio:
+                            body["generate_audio"] = True
             # --- 发起视频生成请求 ---
             raw = None
             html_response = None

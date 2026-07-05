@@ -8,6 +8,7 @@ const idInput = document.getElementById('idInput');
 const baseInput = document.getElementById('baseInput');
 const protocolInput = document.getElementById('protocolInput');
 const imageRequestModeInput = document.getElementById('imageRequestModeInput');
+const videoRequestModeInput = document.getElementById('videoRequestModeInput');
 const imageEditRouteInput = document.getElementById('imageEditRouteInput');
 const keyInput = document.getElementById('keyInput');
 const keyHint = document.getElementById('keyHint');
@@ -284,6 +285,7 @@ function applyLockedRecommendedProtocol(item){
     if(!item || !api) return false;
     item.protocol = String(api.protocol || 'openai').toLowerCase();
     item.image_request_mode = normalizeImageRequestMode(api.image_request_mode);
+    item.video_request_mode = normalizeVideoRequestMode(api.video_request_mode);
     return true;
 }
 
@@ -721,6 +723,7 @@ function applyProviderOnboardingDefaults(id){
         item.base_url = item.base_url || LINGJING_DEFAULT_BASE_URL;
         item.protocol = item.protocol || 'openai';
         item.image_request_mode = normalizeImageRequestMode(item.image_request_mode);
+        item.video_request_mode = normalizeVideoRequestMode(item.video_request_mode);
     } else if(id === 'jimeng'){
         item.base_url = '';
         item.protocol = 'jimeng';
@@ -769,6 +772,13 @@ function syncEditor(){
             ? lockedApi.image_request_mode
             : (imageRequestModeInput?.value || item.image_request_mode)
     );
+    item.video_request_mode = normalizeVideoRequestMode(
+        item.id === 'modelscope' || item.id === 'runninghub' || item.id === 'volcengine' || CLI_PROTOCOLS.has(selectedProtocol)
+            ? 'openai-videos-generations'
+            : lockedApi
+            ? lockedApi.video_request_mode
+            : (videoRequestModeInput?.value || item.video_request_mode)
+    );
     item.image_edit_route = normalizeImageEditRoute(
         item.id === 'modelscope' || item.id === 'runninghub' || item.id === 'volcengine' || CLI_PROTOCOLS.has(selectedProtocol)
             ? 'general'
@@ -806,6 +816,7 @@ function updateProtocolFromInput(){
     if(applyLockedRecommendedProtocol(item)){
         protocolInput.value = item.protocol;
         if(imageRequestModeInput) imageRequestModeInput.value = item.image_request_mode;
+        if(videoRequestModeInput) videoRequestModeInput.value = item.video_request_mode;
         return;
     }
     const value = String(protocolInput.value || 'openai').toLowerCase();
@@ -2237,6 +2248,7 @@ function recommendedProviderForApi(api){
         item.base_url = api.base_url || item.base_url || '';
         item.protocol = api.protocol || item.protocol || 'openai';
         item.image_request_mode = normalizeImageRequestMode(api.image_request_mode || item.image_request_mode);
+        item.video_request_mode = normalizeVideoRequestMode(api.video_request_mode || item.video_request_mode);
         item.image_edit_route = normalizeImageEditRoute(api.image_edit_route || item.image_edit_route);
         if(api.empty_models_on_save){
             item.image_models = [];
@@ -2256,6 +2268,7 @@ function recommendedProviderForApi(api){
         base_url:api.base_url,
         protocol:api.protocol,
         image_request_mode:normalizeImageRequestMode(api.image_request_mode),
+        video_request_mode:normalizeVideoRequestMode(api.video_request_mode),
         image_edit_route:normalizeImageEditRoute(api.image_edit_route),
         image_generation_endpoint:'',
         image_edit_endpoint:'',
@@ -2291,6 +2304,10 @@ async function saveRecommendedApi(index){
     if(imageRequestModeInput){
         imageRequestModeInput.value = normalizeImageRequestMode(api.image_request_mode);
         imageRequestModeInput.dispatchEvent(new Event('change'));
+    }
+    if(videoRequestModeInput){
+        videoRequestModeInput.value = normalizeVideoRequestMode(api.video_request_mode);
+        videoRequestModeInput.dispatchEvent(new Event('change'));
     }
     syncEditor();
     const ok = await saveProviders();
@@ -2437,6 +2454,11 @@ function renderEditor(){
         imageRequestModeInput.value = normalizeImageRequestMode(item.image_request_mode);
         imageRequestModeInput.disabled = Boolean(lockedApi) || item.id === 'modelscope' || item.id === 'runninghub' || item.id === 'volcengine' || CLI_PROTOCOLS.has(String(protocolInput?.value || item.protocol || '').toLowerCase());
         imageRequestModeInput.title = lockedApi ? '推荐平台使用固定图片协议' : '';
+    }
+    if(videoRequestModeInput){
+        videoRequestModeInput.value = normalizeVideoRequestMode(item.video_request_mode);
+        videoRequestModeInput.disabled = Boolean(lockedApi) || item.id === 'modelscope' || item.id === 'runninghub' || item.id === 'volcengine' || CLI_PROTOCOLS.has(String(protocolInput?.value || item.protocol || '').toLowerCase());
+        videoRequestModeInput.title = lockedApi ? '推荐平台使用固定视频协议' : '';
     }
     if(imageEditRouteInput){
         imageEditRouteInput.value = normalizeImageEditRoute(item.image_edit_route);
@@ -2815,6 +2837,12 @@ function normalizeImageRequestMode(value){
     const mode = String(value || '').trim().toLowerCase();
     return ['openai', 'openai-json', 'openai-video-proxy', 'openai-responses'].includes(mode) ? mode : 'openai';
 }
+function normalizeVideoRequestMode(value){
+    const mode = String(value || '').trim().toLowerCase();
+    if(['openai-video', 'single-video', 'video-generations'].includes(mode)) return 'openai-video-generations';
+    if(['openai-videos', 'videos-generations'].includes(mode)) return 'openai-videos-generations';
+    return ['openai-videos-generations', 'openai-video-generations'].includes(mode) ? mode : 'openai-videos-generations';
+}
 function normalizeImageEditRoute(value){
     const route = String(value || '').trim().toLowerCase();
     return ['general', 'auto', 'chat'].includes(route) ? route : 'general';
@@ -2825,6 +2853,10 @@ function imageRequestModeLabel(mode){
     if(normalized === 'openai-video-proxy') return 'OpenAI 中转';
     if(normalized === 'openai-responses') return 'OpenAI RS';
     return 'OpenAI 标准';
+}
+function videoRequestModeLabel(mode){
+    const normalized = normalizeVideoRequestMode(mode);
+    return normalized === 'openai-video-generations' ? '/v1/video/generations' : '/v1/videos/generations';
 }
 function isRunningHubContext(item, baseUrl=''){
     const protocol = String(protocolInput?.value || item?.protocol || '').trim().toLowerCase();
@@ -2840,6 +2872,7 @@ function applyDetectedImageRequestMode(mode){
     if(applyLockedRecommendedProtocol(item)){
         if(protocolInput) protocolInput.value = item.protocol;
         imageRequestModeInput.value = item.image_request_mode;
+        if(videoRequestModeInput) videoRequestModeInput.value = item.video_request_mode;
         return false;
     }
     const detected = normalizeImageRequestMode(mode);
@@ -2855,6 +2888,7 @@ function applyDetectedProtocol(protocol){
     if(applyLockedRecommendedProtocol(item)){
         protocolInput.value = item.protocol;
         if(imageRequestModeInput) imageRequestModeInput.value = item.image_request_mode;
+        if(videoRequestModeInput) videoRequestModeInput.value = item.video_request_mode;
         return false;
     }
     if(String(protocolInput.value || '').toLowerCase() === detected && String(item.protocol || '').toLowerCase() === detected) return false;
@@ -2977,7 +3011,7 @@ async function probeAsync(){
                     : 'OpenAI 兼容';
         showVerifyResult(`
             ${hideTasksEndpointTip ? '' : `<div style="font-size:11px;font-weight:800;color:${color}">${icon} ${escapeHtml(probeMessage)}</div>`}
-            <div style="font-size:11px;color:var(--muted);font-weight:700;margin-top:2px">${keepManualProtocol ? '协议已验证为' : '协议已自动设置为'}：<strong style="color:var(--text)">${proto}</strong> · 图片接口：<strong style="color:var(--text)">${imageRequestModeLabel(imageRequestModeInput?.value || item.image_request_mode)}</strong></div>
+            <div style="font-size:11px;color:var(--muted);font-weight:700;margin-top:2px">${keepManualProtocol ? '协议已验证为' : '协议已自动设置为'}：<strong style="color:var(--text)">${proto}</strong> · 图片接口：<strong style="color:var(--text)">${imageRequestModeLabel(imageRequestModeInput?.value || item.image_request_mode)}</strong> · 视频接口：<strong style="color:var(--text)">${videoRequestModeLabel(videoRequestModeInput?.value || item.video_request_mode)}</strong></div>
             <details style="margin-top:6px">
                 <summary style="font-size:10.5px;color:var(--muted);cursor:pointer;font-weight:700;user-select:none">▸ 查看原始响应 (HTTP ${data.status_code})</summary>
                 <pre style="margin-top:6px;padding:10px 12px;border-radius:10px;background:var(--soft);border:1px solid var(--line-2);font-size:10.5px;font-family:ui-monospace,Menlo,monospace;white-space:pre-wrap;word-break:break-all;color:var(--text);max-height:200px;overflow:auto">${escapeHtml(rawJson)}</pre>
@@ -3042,7 +3076,7 @@ async function testConnection(){
             const jimengNote = isJimeng ? `<div style="margin-top:6px;color:#15803d;font-size:11px;font-weight:700">即梦 CLI 已可用，可在画布里选择“即梦 CLI”生成。</div>` : '';
             const codexNote = currentProtocol === 'codex' ? `<div style="margin-top:6px;color:#15803d;font-size:11px;font-weight:700">OpenAI Codex CLI 已可用，可在画布里选择“OpenAI CLI”聊天或生成图片。</div>` : '';
             const geminiCliNote = currentProtocol === 'gemini-cli' ? `<div style="margin-top:6px;color:#15803d;font-size:11px;font-weight:700">Antigravity CLI 已可用，可在画布里选择“Antigravity CLI”聊天或测试生图。</div>` : '';
-            const imageModeNote = ` · 图片接口：${imageRequestModeLabel(imageRequestModeInput?.value || item.image_request_mode)}`;
+            const imageModeNote = ` · 图片接口：${imageRequestModeLabel(imageRequestModeInput?.value || item.image_request_mode)} · 视频接口：${videoRequestModeLabel(videoRequestModeInput?.value || item.video_request_mode)}`;
             const runninghubNote = isRunningHubNow
                 ? ` · RunningHub OpenAPI${runninghubModelSourceNote(data)}`
                 : imageModeNote;
@@ -3364,7 +3398,7 @@ function addProvider(){
     let id = 'custom-api';
     let index = 2;
     while(providers.some(item => item.id === id)) id = `custom-api-${index++}`;
-    providers.push({id, name:'API', base_url:'', protocol:'openai', image_request_mode:'openai', image_edit_route:'general', image_generation_endpoint:'', image_edit_endpoint:'', enabled:true, primary:false, image_models:[], chat_models:[], video_models:[], has_key:false, key_preview:''});
+    providers.push({id, name:'API', base_url:'', protocol:'openai', image_request_mode:'openai', video_request_mode:'openai-videos-generations', image_edit_route:'general', image_generation_endpoint:'', image_edit_endpoint:'', enabled:true, primary:false, image_models:[], chat_models:[], video_models:[], has_key:false, key_preview:''});
     selectedId = id;
     renderEditor();
 }
@@ -3384,6 +3418,7 @@ async function addCliProvider(kind){
             base_url:'',
             protocol:preset.protocol,
             image_request_mode:'openai',
+            video_request_mode:'openai-videos-generations',
             image_edit_route:'general',
             image_generation_endpoint:'',
             image_edit_endpoint:'',
@@ -3565,6 +3600,11 @@ async function saveProviders(){
                 ? 'openai'
                 : item.image_request_mode
         );
+        item.video_request_mode = normalizeVideoRequestMode(
+            item.id === 'modelscope' || item.id === 'runninghub' || item.id === 'volcengine' || isCliProtocol
+                ? 'openai-videos-generations'
+                : item.video_request_mode
+        );
         item.image_edit_route = normalizeImageEditRoute(
             item.id === 'modelscope' || item.id === 'runninghub' || item.id === 'volcengine' || isCliProtocol
                 ? 'general'
@@ -3608,6 +3648,7 @@ async function saveProviders(){
                 base_url:item.base_url,
                 protocol:(item.id === 'modelscope') ? 'openai' : item.id === 'runninghub' ? 'runninghub' : item.id === 'volcengine' ? 'volcengine' : (item.protocol || 'openai'),
                 image_request_mode:item.image_request_mode || 'openai',
+                video_request_mode:item.video_request_mode || 'openai-videos-generations',
                 image_edit_route:item.image_edit_route || 'general',
                 image_generation_endpoint:item.image_generation_endpoint || '',
                 image_edit_endpoint:item.image_edit_endpoint || '',
@@ -3706,9 +3747,21 @@ window.onload = () => {
         if(applyLockedRecommendedProtocol(item)){
             if(protocolInput) protocolInput.value = item.protocol;
             imageRequestModeInput.value = item.image_request_mode;
+            if(videoRequestModeInput) videoRequestModeInput.value = item.video_request_mode;
             return;
         }
         item.image_request_mode = normalizeImageRequestMode(imageRequestModeInput.value);
+    });
+    if(videoRequestModeInput) videoRequestModeInput.addEventListener('change', () => {
+        const item = provider();
+        if(!item) return;
+        if(applyLockedRecommendedProtocol(item)){
+            if(protocolInput) protocolInput.value = item.protocol;
+            if(imageRequestModeInput) imageRequestModeInput.value = item.image_request_mode;
+            videoRequestModeInput.value = item.video_request_mode;
+            return;
+        }
+        item.video_request_mode = normalizeVideoRequestMode(videoRequestModeInput.value);
     });
     if(imageEditRouteInput) imageEditRouteInput.addEventListener('change', () => {
         const item = provider();

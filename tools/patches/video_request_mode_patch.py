@@ -151,7 +151,68 @@ EXTRACT_TASK_ID_PY = r'''def extract_task_id(data, allow_plain_id=False):
     return None
 '''
 
-VIDEO_RETRY_AFTER_PY = r'''def video_retry_after_seconds(source):
+VIDEO_RETRY_AFTER_PY = r'''def video_task_failure_reason(payload):
+    if isinstance(payload, dict):
+        task_data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+        error = task_data.get("error") if isinstance(task_data.get("error"), dict) else {}
+        return (
+            task_data.get("fail_reason")
+            or task_data.get("message")
+            or error.get("message")
+            or payload.get("error")
+            or payload.get("message")
+            or str(payload)
+        )
+    return str(payload or "")
+
+def is_video_terminal_error(source):
+    parts = []
+
+    def add(value, depth=0):
+        if value is None or depth > 8:
+            return
+        if isinstance(value, dict):
+            for key, item in value.items():
+                parts.append(str(key))
+                add(item, depth + 1)
+            return
+        if isinstance(value, (list, tuple)):
+            for item in value:
+                add(item, depth + 1)
+            return
+        parts.append(str(value))
+
+    response = getattr(source, "response", None)
+    if response is not None:
+        try:
+            add(response.json())
+        except Exception:
+            add(getattr(response, "text", "") or str(source))
+    elif hasattr(source, "json"):
+        try:
+            add(source.json())
+        except Exception:
+            add(getattr(source, "text", "") or str(source))
+    elif isinstance(source, BaseException):
+        add(str(source))
+    else:
+        add(source)
+    text = "\n".join(part for part in parts if part).lower()
+    if not text:
+        return False
+    return any(re.search(pattern, text, re.IGNORECASE) for pattern in (
+        r"insufficient[_\s-]*quota",
+        r"insufficient\s+credits?",
+        r"credits[_\s-]*remaining",
+        r"not\s+enough\s+credits?",
+        r"quota\s+exceeded",
+        r"payment\s+required",
+        r"billing",
+        r"余额不足",
+        r"额度不足",
+    ))
+
+def video_retry_after_seconds(source):
     values = []
 
     def add_number(value):
@@ -549,6 +610,45 @@ CREATE_CANVAS_VIDEO_TASK_JS = r'''async function createCanvasVideoTask(payload, 
 }
 '''
 
+SMART_CREATE_CANVAS_VIDEO_TASK_JS = r'''async function createSmartCanvasVideoTask(payload){
+    const res = await fetch('/api/canvas-video-tasks', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify(payload)
+    });
+    if(!res.ok) throw new Error(await smartResponseErrorMessage(res, tr('smart.errRunFailed')));
+    return res.json();
+}
+'''
+
+SMART_POLL_CANVAS_VIDEO_TASK_JS = r'''async function pollSmartCanvasVideoTask(taskId){
+    if(!taskId) throw new Error(tr('smart.errRunFailed'));
+    if(activeSmartTaskPolls.has(taskId)) return activeSmartTaskPolls.get(taskId);
+    const promise = (async () => {
+        for(let i = 0; i < 900; i++){
+            await sleep(5000);
+            const task = await fetch(`/api/canvas-video-tasks/${encodeURIComponent(taskId)}`).then(async r => {
+                if(!r.ok) throw new Error(await smartResponseErrorMessage(r, tr('smart.errRunFailed')));
+                return r.json();
+            });
+            if(task.status === 'succeeded') return task.result || task;
+            if(task.status === 'failed'){
+                const recoverTaskId = task.upstream_task_id || task.submit_id || '';
+                if(recoverTaskId && !isSmartTerminalTaskError(task.error)) throw new ImageTaskRecoverSignal({taskId, recoverTaskId, providerId:task.provider_id, kind:'video', message:task.error || tr('smart.errRunFailed')});
+                throw new Error(task.error || tr('smart.errRunFailed'));
+            }
+        }
+        throw new Error(tr('smart.errRunTimeout'));
+    })();
+    activeSmartTaskPolls.set(taskId, promise);
+    try {
+        return await promise;
+    } finally {
+        activeSmartTaskPolls.delete(taskId);
+    }
+}
+'''
+
 CANVAS_VIDEO_TASK_HELPERS_JS = r'''function canvasVideoOutputItems(result){
     return resultMediaUrls(result).map(item => {
         const url = outputUrlValue(item);
@@ -901,6 +1001,15 @@ def normalize_video_request_mode(value):
             '    elif hasattr(source, "headers") and hasattr(source, "json"):\n        add_number(source.headers.get("Retry-After"))\n        try:\n            walk(source.json())\n        except Exception:\n            scan_text(getattr(source, "text", "") or str(source))\n    elif isinstance(source, BaseException):\n        scan_text(str(source))\n',
             "video_retry_after raw response support",
         )
+    if "def is_video_terminal_error(source):" not in text:
+        helper_prefix = VIDEO_RETRY_AFTER_PY.split("def video_retry_after_seconds(source):", 1)[0].rstrip()
+        text = replace_once(
+            text,
+            "def video_retry_after_seconds(source):\n",
+            helper_prefix + "\n\ndef video_retry_after_seconds(source):\n",
+            "video terminal error helper",
+            required=True,
+        )
 
     text = replace_once(
         text,
@@ -926,6 +1035,21 @@ def normalize_video_request_mode(value):
         "        if status not in VIDEO_TASK_FAILURE_STATUSES and video_output_urls(raw):\n            return raw\n        retry_after_delay = video_retry_after_seconds(raw)\n        if retry_after_delay:\n            delay = min(retry_after_delay, max(0.0, deadline - time.monotonic()))\n            if delay <= 0:\n                break\n            continue\n        if status in VIDEO_TASK_FAILURE_STATUSES:\n",
         "video retry_after payload handling",
     )
+    if "response.status_code >= 400 and is_video_terminal_error(response)" not in text:
+        text = text.replace(
+            "                retry_after_delay = video_retry_after_seconds(response) or retry_after_delay\n                if response.status_code >= 400 and retry_after_delay:\n",
+            "                retry_after_delay = video_retry_after_seconds(response) or retry_after_delay\n                if response.status_code >= 400 and is_video_terminal_error(response):\n                    try:\n                        payload = response.json()\n                    except Exception:\n                        payload = {\"error\": response.text}\n                    raise HTTPException(status_code=response.status_code, detail=humanize_video_task_failure(video_task_failure_reason(payload)))\n                if response.status_code >= 400 and retry_after_delay:\n",
+        )
+    if "if is_video_terminal_error(exc):\n                    raise exc" not in text:
+        text = text.replace(
+            "            except Exception as exc:\n                last_error = exc\n                retry_after_delay = video_retry_after_seconds(exc) or retry_after_delay\n",
+            "            except Exception as exc:\n                if is_video_terminal_error(exc):\n                    raise exc\n                last_error = exc\n                retry_after_delay = video_retry_after_seconds(exc) or retry_after_delay\n",
+        )
+    if "if is_video_terminal_error(raw):" not in text:
+        text = text.replace(
+            "        task_data = raw.get(\"data\") if isinstance(raw.get(\"data\"), dict) else raw\n        status = ",
+            "        task_data = raw.get(\"data\") if isinstance(raw.get(\"data\"), dict) else raw\n        if is_video_terminal_error(raw):\n            raise HTTPException(status_code=502, detail=humanize_video_task_failure(video_task_failure_reason(raw)))\n        status = ",
+        )
 
     if "is_single_video_generations = is_openai_video_generations_mode(provider)" not in text:
         text = replace_once(
@@ -1286,6 +1410,130 @@ def patch_canvas_js(text):
     return text
 
 
+def patch_smart_canvas_js(text):
+    if "async function createSmartCanvasVideoTask" not in text:
+        text = regex_replace(
+            text,
+            r"(async function createSmartComfyTask\(payload\)\{\n.*?    return res\.json\(\);\n\}\n)",
+            r"\1" + SMART_CREATE_CANVAS_VIDEO_TASK_JS,
+            "smart canvas video task submit",
+            required=True,
+        )
+
+    text = replace_once(
+        text,
+        "    if(activeSettings.engine === 'comfy') return generateComfyUrlsWithSettings(activeSettings, prompt, refs);\n    if(isApiLikeEngine(activeSettings.engine) && activeSettings.apiKind === 'video'){\n        return {urls:await runApiVideoGeneration(prompt, refs, activeSettings), kind:'video'};\n    }\n",
+        "    if(activeSettings.engine === 'comfy') return generateComfyUrlsWithSettings(activeSettings, prompt, refs);\n    if(isApiLikeEngine(activeSettings.engine) && activeSettings.apiKind === 'video'){\n        const taskResult = await runApiVideoGeneration(prompt, refs, activeSettings);\n        const taskIds = Array.isArray(taskResult?.taskIds) ? taskResult.taskIds : [];\n        if(taskIds.length){\n            const settled = await Promise.all(taskIds.map(taskId => pollSmartCanvasVideoTask(taskId)));\n            const urls = settled.flatMap(result => resultMediaUrls(result?.videos?.length ? result.videos : (result?.result || result))).filter(Boolean);\n            return {urls, kind:'video'};\n        }\n        const urls = resultMediaUrls(taskResult);\n        return {urls, kind:'video'};\n    }\n",
+        "smart generateUrls video task polling",
+    )
+
+    if "return runApiVideoGeneration(prompt, refs, runSettings);" not in text:
+        text = replace_once(
+            text,
+            "async function runApiGeneration(prompt, refs, runSettings=settings){\n    if(!runSettings.provider_id || !runSettings.model) throw new Error(tr('smart.errNoApiModel'));\n",
+            "async function runApiGeneration(prompt, refs, runSettings=settings){\n    if(isApiLikeEngine(runSettings.engine) && runSettings.apiKind === 'video'){\n        return runApiVideoGeneration(prompt, refs, runSettings);\n    }\n    if(!runSettings.provider_id || !runSettings.model) throw new Error(tr('smart.errNoApiModel'));\n",
+            "smart runApiGeneration video route",
+            required=True,
+        )
+
+    if "const task = await createSmartCanvasVideoTask(payload);" not in text:
+        text = replace_once(
+            text,
+            "        const result = await fetch('/api/canvas-video', {\n            method:'POST',\n            headers:{'Content-Type':'application/json'},\n            body:JSON.stringify(payload)\n        }).then(async r => { if(!r.ok) throw new Error(await smartResponseErrorMessage(r, tr('smart.errRunFailed'))); return r.json(); });\n        if(result && result.jimeng_pending) throw new JimengPendingSignal({submitId:result.submit_id, kind:result.kind || 'video', queueInfo:result.queue_info, message:result.message});\n        return resultMediaUrls(result);\n",
+            "        const task = await createSmartCanvasVideoTask(payload);\n        const taskId = task?.task_id || task?.id || '';\n        if(!taskId) throw new Error(tr('smart.errRunFailed'));\n        return {taskIds:[taskId], count:1, providerId:payload.provider_id, model:payload.model, kind:'video'};\n",
+            "smart video long request to task submit",
+            required=True,
+        )
+
+    if "const outVideos = await runApiVideoGeneration" in text:
+        text = replace_once(
+            text,
+            "        if(isApiLikeEngine(settings.engine) && settings.apiKind === 'video'){\n            const outVideos = await runApiVideoGeneration(prompt, refs);\n            if(!outVideos.length) throw new Error(tr('smart.errNoOutVideos'));\n            finalizePendingNode(pendingNode, outVideos, pendingMeta, 'video');\n            if(sourceVisualState) restoreSourceVisualState(node, sourceVisualState);\n            addSmartGenerationLog({run:runLog, outputs:outVideos, runMs:nowMs() - runLogStart});\n            clearPromptInput({preserveDraft:true});\n            settings = previousSettings;\n            scheduleSave();\n            return;\n        }\n",
+            "",
+            "smart runGeneration remove long video branch",
+            required=True,
+        )
+
+    text = replace_once(
+        text,
+        "        ? (settings.comfyMode === 'text' || settings.comfyMode === 'enhance' || settings.comfyMode === 'edit' || settings.comfyMode === 'custom' ? 1 : 1)\n        : Math.max(1, Math.min(8, Number(settings.count || 1)));\n",
+        "        ? (settings.comfyMode === 'text' || settings.comfyMode === 'enhance' || settings.comfyMode === 'edit' || settings.comfyMode === 'custom' ? 1 : 1)\n        : isApiLikeEngine(settings.engine) && settings.apiKind === 'video'\n        ? 1\n        : Math.max(1, Math.min(8, Number(settings.count || 1)));\n",
+        "smart video expected count",
+    )
+    text = replace_once(
+        text,
+        "            pendingNode.pendingTasks = taskIds.map(taskId => ({taskId, kind:'image', providerId:outImages.providerId, model:outImages.model}));\n",
+        "            const taskKind = outImages.kind || 'image';\n            pendingNode.pendingTasks = taskIds.map(taskId => ({taskId, kind:taskKind, providerId:outImages.providerId, model:outImages.model}));\n",
+        "smart pending task kind",
+    )
+    text = replace_once(
+        text,
+        "            if(!(pendingNode.images || []).length) throw new Error(tr('smart.errNoOutImages'));\n",
+        "            if(!(pendingNode.images || []).length) throw new Error(taskKind === 'video' ? tr('smart.errNoOutVideos') : tr('smart.errNoOutImages'));\n",
+        "smart pending media empty error",
+    )
+
+    if "function isSmartTerminalTaskError" not in text:
+        text = replace_once(
+            text,
+            "function providerIdForSmartTask(node, task){\n    return task?.providerId || node?.runSettings?.provider_id || settings.provider_id || 'comfly';\n}\n",
+            "function providerIdForSmartTask(node, task){\n    return task?.providerId || node?.runSettings?.provider_id || settings.provider_id || 'comfly';\n}\nfunction isSmartTerminalTaskError(message){\n    const text = String(message || '').toLowerCase();\n    return /(insufficient[_\\s-]*quota|insufficient\\s+credits?|credits[_\\s-]*remaining|not\\s+enough\\s+credits?|quota\\s+exceeded|payment\\s+required|billing|余额不足|额度不足)/i.test(text);\n}\n",
+            "smart terminal task error helper",
+            required=True,
+        )
+
+    text = replace_once(
+        text,
+        "    const recoverTaskId = task.recoverTaskId || extractUpstreamTaskId(task.error || '');\n",
+        "    const recoverTaskId = task.kind === 'video'\n        ? (task.recoverTaskId || task.taskId || localTaskId || extractUpstreamTaskId(task.error || ''))\n        : (task.recoverTaskId || extractUpstreamTaskId(task.error || ''));\n",
+        "smart recover task id by kind",
+    )
+    if "if(task.kind === 'video'){" not in text:
+        text = replace_once(
+            text,
+            "    try {\n        const data = await fetchImageTaskQuery(providerIdForSmartTask(node, task), recoverTaskId);\n",
+            "    try {\n        if(task.kind === 'video'){\n            const res = await fetch(`/api/canvas-video-tasks/${encodeURIComponent(task.taskId || localTaskId)}`);\n            if(!res.ok) throw new Error(await smartResponseErrorMessage(res, tr('smart.errRunFailed')));\n            const data = await res.json();\n            if(data.status === 'succeeded'){\n                task.failed = false;\n                task.querying = false;\n                finalizeSmartPendingTask(node, task.taskId, resultMediaUrls(data.videos?.length ? data.videos : (data.result || data)), 'video');\n                render();\n                scheduleSave();\n                return;\n            }\n            if(data.status === 'failed'){\n                task.error = data.error || tr('smart.errRunFailed');\n                toast(task.error.slice(0, 160));\n            } else {\n                task.failed = false;\n                task.error = data.message || '视频任务仍在生成中';\n                toast(task.error);\n                pollSmartCanvasVideoTask(task.taskId || localTaskId).then(result => {\n                    finalizeSmartPendingTask(node, task.taskId || localTaskId, resultMediaUrls(result?.videos?.length ? result.videos : (result?.result || result)), 'video');\n                    render();\n                    scheduleSave();\n                }).catch(err => toast((err.message || tr('smart.errRunFailed')).slice(0, 160)));\n            }\n            return;\n        }\n        const data = await fetchImageTaskQuery(providerIdForSmartTask(node, task), recoverTaskId);\n",
+            "smart video manual task query",
+            required=True,
+        )
+
+    text = replace_once(
+        text,
+        "                if(recoverTaskId) throw new ImageTaskRecoverSignal({taskId, recoverTaskId, providerId:task.provider_id, kind:'image', message:task.error || tr('smart.errRunFailed')});\n",
+        "                if(recoverTaskId && !isSmartTerminalTaskError(task.error)) throw new ImageTaskRecoverSignal({taskId, recoverTaskId, providerId:task.provider_id, kind:task.kind || 'image', message:task.error || tr('smart.errRunFailed')});\n",
+        "smart terminal image task failure",
+    )
+    if "async function pollSmartCanvasVideoTask" not in text:
+        text = replace_once(
+            text,
+            "function finalizeSmartPendingTask(node, taskId, images, kind='image'){\n",
+            SMART_POLL_CANVAS_VIDEO_TASK_JS + "function finalizeSmartPendingTask(node, taskId, images, kind='image'){\n",
+            "smart video task poller",
+            required=True,
+        )
+
+    text = replace_once(
+        text,
+        "            const result = await pollSmartCanvasTask(task.taskId);\n            finalizeSmartPendingTask(node, task.taskId, resultMediaUrls(result?.image_items?.length ? result.image_items : (result?.images?.length ? result.images : result)), task.kind || 'image');\n",
+        "            const taskKind = task.kind || 'image';\n            const result = taskKind === 'video'\n                ? await pollSmartCanvasVideoTask(task.taskId)\n                : await pollSmartCanvasTask(task.taskId);\n            const media = taskKind === 'video'\n                ? (result?.videos?.length ? result.videos : (result?.result || result))\n                : (result?.image_items?.length ? result.image_items : (result?.images?.length ? result.images : result));\n            finalizeSmartPendingTask(node, task.taskId, resultMediaUrls(media), taskKind);\n",
+        "smart resume media task polling",
+    )
+    text = replace_once(
+        text,
+        "                task.providerId = e.providerId || task.providerId || providerIdForSmartTask(node, task);\n                task.error = e.message || tr('smart.errRunFailed');\n",
+        "                task.providerId = e.providerId || task.providerId || providerIdForSmartTask(node, task);\n                task.kind = e.kind || task.kind || 'image';\n                task.error = e.message || tr('smart.errRunFailed');\n",
+        "smart recover task kind",
+    )
+    text = replace_once(
+        text,
+        "        if(!e?.smartGenerationLogged) addSmartGenerationLog({run:runLog, outputs:[], runMs:nowMs() - runLogStart, error:e.message || String(e)});\n        toast((e.message || tr('smart.errRunFailed')).slice(0, 160));\n",
+        "        if(!e?.smartGenerationLogged) addSmartGenerationLog({run:runLog, outputs:[], runMs:nowMs() - runLogStart, error:e.message || String(e)});\n        scheduleSave();\n        toast((e.message || tr('smart.errRunFailed')).slice(0, 160));\n",
+        "smart failure save",
+    )
+
+    return text
+
+
 def patch_config(text):
     try:
         data = json.loads(text)
@@ -1331,6 +1579,7 @@ def validate(root):
             "openai_video_generations_reference_urls",
             "is_single_video_generations = is_openai_video_generations_mode(provider)",
             "def video_retry_after_seconds(source):",
+            "def is_video_terminal_error(source):",
             "delay = max(5.0, IMAGE_POLL_INTERVAL)",
             "CANVAS_VIDEO_TASKS_FILE",
             "def update_canvas_video_task",
@@ -1351,6 +1600,13 @@ def validate(root):
             "async function pollCanvasVideoTask",
             "canvasTaskType:'online-video'",
             "pollCanvasVideoTask(p.canvasTaskId",
+        ],
+        "static/js/smart-canvas.js": [
+            "async function createSmartCanvasVideoTask",
+            "async function pollSmartCanvasVideoTask",
+            "pollSmartCanvasVideoTask(task.taskId)",
+            "kind:taskKind",
+            "isSmartTerminalTaskError",
         ],
     }
     missing = []
@@ -1383,6 +1639,7 @@ def main():
         ("static/css/api-settings.css", patch_css),
         ("static/js/api-settings.js", patch_js),
         ("static/js/canvas.js", patch_canvas_js),
+        ("static/js/smart-canvas.js", patch_smart_canvas_js),
     ]
     if (root / "data/api_providers.json").exists():
         targets.append(("data/api_providers.json", patch_config))
@@ -1407,6 +1664,7 @@ def main():
         checks = [
             ("Python syntax check", py_cmd),
             ("Frontend JS syntax check", ["node", "--check", "static/js/api-settings.js"]),
+            ("Smart canvas JS syntax check", ["node", "--check", "static/js/smart-canvas.js"]),
         ]
         for label, cmd in checks:
             try:

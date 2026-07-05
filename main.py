@@ -13276,6 +13276,67 @@ def humanize_video_task_failure(reason) -> str:
         )
     return f"视频生成任务失败：{text}"
 
+def video_task_failure_reason(payload):
+    if isinstance(payload, dict):
+        task_data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+        error = task_data.get("error") if isinstance(task_data.get("error"), dict) else {}
+        return (
+            task_data.get("fail_reason")
+            or task_data.get("message")
+            or error.get("message")
+            or payload.get("error")
+            or payload.get("message")
+            or str(payload)
+        )
+    return str(payload or "")
+
+def is_video_terminal_error(source):
+    parts = []
+
+    def add(value, depth=0):
+        if value is None or depth > 8:
+            return
+        if isinstance(value, dict):
+            for key, item in value.items():
+                parts.append(str(key))
+                add(item, depth + 1)
+            return
+        if isinstance(value, (list, tuple)):
+            for item in value:
+                add(item, depth + 1)
+            return
+        parts.append(str(value))
+
+    response = getattr(source, "response", None)
+    if response is not None:
+        try:
+            add(response.json())
+        except Exception:
+            add(getattr(response, "text", "") or str(source))
+    elif hasattr(source, "json"):
+        try:
+            add(source.json())
+        except Exception:
+            add(getattr(source, "text", "") or str(source))
+    elif isinstance(source, BaseException):
+        add(str(source))
+    else:
+        add(source)
+    text = "\n".join(part for part in parts if part).lower()
+    if not text:
+        return False
+    return any(re.search(pattern, text, re.IGNORECASE) for pattern in (
+        r"insufficient[_\s-]*quota",
+        r"insufficient\s+credits?",
+        r"credits[_\s-]*remaining",
+        r"not\s+enough\s+credits?",
+        r"quota\s+exceeded",
+        r"payment\s+required",
+        r"billing",
+        r"余额不足",
+        r"额度不足",
+    ))
+
 def video_retry_after_seconds(source):
     values = []
 
@@ -13362,6 +13423,12 @@ async def wait_for_video_task(client, provider, task_id, submit_url="", on_progr
             try:
                 response = await client.get(task_url, headers=api_headers(provider=provider))
                 retry_after_delay = video_retry_after_seconds(response) or retry_after_delay
+                if response.status_code >= 400 and is_video_terminal_error(response):
+                    try:
+                        payload = response.json()
+                    except Exception:
+                        payload = {"error": response.text}
+                    raise HTTPException(status_code=response.status_code, detail=humanize_video_task_failure(video_task_failure_reason(payload)))
                 if response.status_code >= 400 and retry_after_delay:
                     try:
                         last_payload = response.json()
@@ -13372,6 +13439,8 @@ async def wait_for_video_task(client, provider, task_id, submit_url="", on_progr
                 raw = response.json()
                 break
             except Exception as exc:
+                if is_video_terminal_error(exc):
+                    raise exc
                 last_error = exc
                 retry_after_delay = video_retry_after_seconds(exc) or retry_after_delay
                 if retry_after_delay:
@@ -13397,6 +13466,8 @@ async def wait_for_video_task(client, provider, task_id, submit_url="", on_progr
         if not isinstance(raw, dict):
             raise HTTPException(status_code=502, detail=f"视频任务查询返回非 JSON 对象：{raw}")
         task_data = raw.get("data") if isinstance(raw.get("data"), dict) else raw
+        if is_video_terminal_error(raw):
+            raise HTTPException(status_code=502, detail=humanize_video_task_failure(video_task_failure_reason(raw)))
         status = str(task_data.get("status") or task_data.get("task_status") or raw.get("status") or raw.get("task_status") or "").upper()
         if status in VIDEO_TASK_SUCCESS_STATUSES:
             return raw
@@ -13486,6 +13557,12 @@ async def wait_for_agnes_video_task(client, provider, video_id, model, on_progre
             try:
                 response = await client.get(url, headers=api_headers(provider=provider, model=model))
                 retry_after_delay = video_retry_after_seconds(response) or retry_after_delay
+                if response.status_code >= 400 and is_video_terminal_error(response):
+                    try:
+                        payload = response.json()
+                    except Exception:
+                        payload = {"error": response.text}
+                    raise HTTPException(status_code=response.status_code, detail=humanize_video_task_failure(video_task_failure_reason(payload)))
                 if response.status_code >= 400 and retry_after_delay:
                     try:
                         last_payload = response.json()
@@ -13496,6 +13573,8 @@ async def wait_for_agnes_video_task(client, provider, video_id, model, on_progre
                 raw = response.json()
                 break
             except Exception as exc:
+                if is_video_terminal_error(exc):
+                    raise exc
                 last_error = exc
                 retry_after_delay = video_retry_after_seconds(exc) or retry_after_delay
                 if retry_after_delay:
@@ -13520,6 +13599,8 @@ async def wait_for_agnes_video_task(client, provider, video_id, model, on_progre
         if not isinstance(raw, dict):
             raise HTTPException(status_code=502, detail=f"Agnes 视频任务查询返回非 JSON 对象：{raw}")
         task_data = raw.get("data") if isinstance(raw.get("data"), dict) else raw
+        if is_video_terminal_error(raw):
+            raise HTTPException(status_code=502, detail=humanize_video_task_failure(video_task_failure_reason(raw)))
         status = str(task_data.get("status") or raw.get("status") or "").upper()
         if status in VIDEO_TASK_SUCCESS_STATUSES or video_output_urls(raw):
             return raw

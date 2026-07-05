@@ -1,0 +1,52 @@
+{
+  "name": "infinite-canvas-desktop",
+  "version": "2026.06.03",
+  "description": "Infinite Canvas desktop client powered by Electron and FastAPI.",
+  "main": "electron/main.js",
+  "private": true,
+  "scripts": {
+    "desktop": "electron .",
+    "build:backend": "pyinstaller --noconfirm build/backend.spec",
+    "build:win": "npm run build:backend && electron-builder --win nsis",
+    "pack:win": "npm run build:backend && electron-builder --win dir"
+  },
+  "devDependencies": {
+    "electron": "^39.2.7",
+    "electron-builder": "^26.0.12"
+  },
+  "build": {
+    "appId": "cn.infinitecanvas.desktop",
+    "productName": "Infinite Canvas",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "electron/**/*",
+      "static/images/logo.png"
+    ],
+    "extraResources": [
+      {
+        "from": "dist/infinite-canvas-backend",
+        "to": "backend"
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Infinite Canvas"
+    }
+  }
+}

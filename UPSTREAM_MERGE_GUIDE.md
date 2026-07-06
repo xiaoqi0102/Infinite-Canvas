@@ -1,10 +1,11 @@
 # 后续源项目更新合并指导
 
-本文档用于后续从源项目 `upstream/main` 合并更新时，保护本仓库已有的本地改动。重点保护三组补丁集：
+本文档用于后续从源项目 `upstream/main` 合并更新时，保护本仓库已有的本地改动。重点保护四组补丁集：
 
 1. 视频生成接口与轮询任务化改动，详见 `VIDEO_GENERATION_POLLING_CHANGES.md`。
 2. WebDAV 云同步与 API 配置同步改动，详见 `WEBDAV_CLOUD_SYNC_CHANGES.md`。
 3. Electron 客户端用户数据持久化改动：所有 API 配置、画布、素材、输出、历史、自定义工作流等用户文件必须写入安装目录同级 `InfiniteCanvas_Data`，不能写入安装目录内部。
+4. Electron 客户端构建版本命名改动：Windows 安装包文件名后缀必须来自根目录 `VERSION`，不能回退到旧的 `package.json.version`。
 
 本文件不是用户使用说明，而是合并、解冲突、验证时的工程操作清单。
 
@@ -159,6 +160,9 @@ git status
 - `main.py`
 - `electron/main.js`
 - `package.json`
+- `package-lock.json`
+- `scripts/sync-electron-version.cjs`
+- `打包Electron桌面版.bat`
 - `ELECTRON_DESKTOP.md`
 
 必须保留的数据目录策略：
@@ -195,6 +199,37 @@ git status
 - 不要让 `os.makedirs(STATIC_DIR)` 或 `os.makedirs(WORKFLOW_DIR)` 在打包版写应用资源目录。
 - 不要把自定义工作流上传回应用根目录的 `workflows/custom`。
 - 不要删掉 `desktop.log` 诊断日志；打包版 `stdio` 通常不可见，这个日志是用户现场排查的第一入口。
+
+### 2.4 桌面端构建版本命名补丁
+
+目标：每次按项目根目录 `VERSION` 更新后，Windows 安装包文件名必须使用同一个版本后缀，避免 UI 显示新版本但安装包仍叫旧版本。
+
+关键文件：
+
+- `VERSION`
+- `package.json`
+- `package-lock.json`
+- `scripts/sync-electron-version.cjs`
+- `打包Electron桌面版.bat`
+- `ELECTRON_DESKTOP.md`
+
+必须保留的构建规则：
+
+- `npm run build:win` 和 `npm run pack:win` 必须先执行 `npm run sync:desktop-version`。
+- `scripts/sync-electron-version.cjs` 必须读取根目录 `VERSION` 的第一行作为项目版本。
+- `package.json.version` 可以使用去掉前导零的 semver 兼容值，例如 `VERSION=2026.07.6` 时写入 `2026.7.6`。
+- Windows 安装包文件名必须保留原始 `VERSION` 文本，例如 `release/Infinite-Canvas-Setup-2026.07.6.exe`。
+- 安装包前缀使用连字符，确保 `.exe`、`.blockmap` 和 `latest.yml` 引用同一个文件名。
+- `build.win.artifactName` 必须由同步脚本维护，不要手动改回 electron-builder 默认命名。
+- 构建日志应打印 `Project VERSION`、Electron metadata version 和 expected installer 路径，便于现场确认。
+
+合并时特别注意：
+
+- 上游如果改了 `package.json.version`，合并后要重新运行 `npm run sync:desktop-version`。
+- 上游如果改了 `package.json` 的 `scripts` 或 `build.win`，不要丢掉 `sync:desktop-version` 和 `artifactName`。
+- 不要只在构建后手动重命名 `.exe`；这会让 `latest.yml` 或其他构建元数据和真实产物名失配。
+- 不要把 `artifactName` 改回带空格的安装包名，除非同时验证 `latest.yml` 也引用真实存在的同名文件。
+- 如果 `VERSION` 改成非 `MAJOR.MINOR.PATCH` 数字格式，必须先调整同步脚本规则，再打包。
 
 ## 3. 高风险冲突文件处理
 
@@ -361,10 +396,13 @@ INFINITE_CANVAS_SKIP_STATIC_SYNC
 
 ### 3.8 `package.json`
 
-保护打包和卸载行为。
+保护打包、卸载行为和安装包版本命名。
 
 保留原则：
 
+- `scripts.sync:desktop-version` 必须存在。
+- `build:win` / `pack:win` 必须先执行 `npm run sync:desktop-version`。
+- `build.win.artifactName` 必须由 `scripts/sync-electron-version.cjs` 写入并保留原始 `VERSION` 后缀。
 - `build.nsis.deleteAppDataOnUninstall` 必须是 `false`。
 - `allowToChangeInstallationDirectory` 必须保留为 `true`，用户可以继续选择安装位置。
 - `extraResources` 必须继续把 `dist/infinite-canvas-backend` 打进 `resources/backend`。
@@ -377,14 +415,19 @@ deleteAppDataOnUninstall
 allowToChangeInstallationDirectory
 extraResources
 dist/infinite-canvas-backend
+sync:desktop-version
+artifactName
 ```
 
 ### 3.9 `ELECTRON_DESKTOP.md`
 
-保护桌面端运行数据说明。
+保护桌面端运行数据和构建版本命名说明。
 
 保留原则：
 
+- 文档必须说明安装包文件名后缀来自根目录 `VERSION`。
+- 文档必须说明 `npm run sync:desktop-version` 会同步 Electron 元数据和 `build.win.artifactName`。
+- 示例应保持类似 `VERSION=2026.07.6` -> `release/Infinite-Canvas-Setup-2026.07.6.exe`。
 - 文档必须明确 `InfiniteCanvas_Data` 位于安装目录同级，不在安装目录内部。
 - 示例应保持类似 `D:\Apps\Infinite Canvas` -> `D:\Apps\InfiniteCanvas_Data`。
 - 文档必须说明系统 userData 回退条件。
@@ -468,8 +511,12 @@ Electron 和打包配置检查：
 
 ```powershell
 node --check electron\main.js
+node --check scripts\sync-electron-version.cjs
+npm run sync:desktop-version
 node -e "const p=require('./package.json'); if(p.build.nsis.deleteAppDataOnUninstall !== false) process.exit(1); console.log('nsis uninstall keeps app data')"
-Select-String -Path electron\main.js,ELECTRON_DESKTOP.md,package.json -Pattern "InfiniteCanvas_Data|INFINITE_CANVAS_USER_DATA_DIR|deleteAppDataOnUninstall|desktop.log"
+$v = (Get-Content -Raw VERSION).Trim()
+node -e "const fs=require('fs'); const p=require('./package.json'); const v=fs.readFileSync('VERSION','utf8').trim(); if(!p.build.win.artifactName.includes(v)) process.exit(1); console.log('installer suffix follows VERSION')"
+Select-String -Path electron\main.js,ELECTRON_DESKTOP.md,package.json,scripts\sync-electron-version.cjs -Pattern "InfiniteCanvas_Data|INFINITE_CANVAS_USER_DATA_DIR|deleteAppDataOnUninstall|desktop.log|sync:desktop-version|artifactName"
 ```
 
 ## 6. 手工功能验证清单
@@ -604,6 +651,7 @@ git config core.excludesfile "E:/Infinite-Canvas/.git/info/exclude"
 - `static/index.html` 没有丢 `cloud-sync`。
 - `smart-canvas.js` 没有把视频任务对象当视频数组处理。
 - 打包版数据目录设计仍是安装目录同级，不是安装目录内部。
+- Windows 安装包文件名后缀与根目录 `VERSION` 一致。
 - `ELECTRON_DESKTOP.md` 已同步任何新的桌面端数据目录策略。
 
 完成后记录本次合并中遇到的新坑，追加到本文档。

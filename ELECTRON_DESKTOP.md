@@ -22,14 +22,31 @@ Run:
 
 The build flow is:
 
-1. PyInstaller packages `main.py` plus `static/`, `workflows/`, and `VERSION` into `dist/infinite-canvas-backend/`.
-2. electron-builder packages the Electron shell and embeds the backend folder as an extra resource.
-3. The Windows installer is written to `release/`.
+1. `npm run sync:desktop-version` reads the root `VERSION` file and updates the Electron package metadata before packaging.
+2. PyInstaller packages `main.py` plus `static/`, `workflows/`, and `VERSION` into `dist/infinite-canvas-backend/`.
+3. electron-builder packages the Electron shell and embeds the backend folder as an extra resource.
+4. The Windows installer is written to `release/`.
 
-Current installer output:
+## Build Version Naming
+
+The visible installer suffix comes from the first line of the root `VERSION` file. For example, if `VERSION` contains:
 
 ```text
-release/Infinite Canvas Setup 2026.6.3.exe
+2026.07.6
+```
+
+the Windows installer should be generated as:
+
+```text
+release/Infinite-Canvas-Setup-2026.07.6.exe
+```
+
+The sync step also writes a semver-compatible value to `package.json.version` for Electron metadata. That metadata may omit leading zeros, but the installer filename keeps the original `VERSION` text through `build.win.artifactName`. The installer prefix uses hyphens so the generated `.exe`, `.blockmap`, and `latest.yml` paths stay identical.
+
+You can run the version sync step by itself to check the expected output before a full build:
+
+```bat
+npm run sync:desktop-version
 ```
 
 ## Runtime Data

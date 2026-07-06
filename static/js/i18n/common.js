@@ -2,6 +2,7 @@
     if(!window.StudioI18n) return;
     window.StudioI18n.register({
         "common.apiSettings": { zh: "API 设置", en: "API Settings" },
+        "common.cloudSync": { zh: "云同步", en: "Cloud Sync" },
         "common.comfyuiSettings": { zh: "工作流设置", en: "Workflow Settings" },
         "common.darkMode": { zh: "黑夜模式", en: "Dark Mode" },
         "common.lightMode": { zh: "白天模式", en: "Light Mode" },

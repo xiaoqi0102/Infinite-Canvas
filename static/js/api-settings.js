@@ -95,6 +95,8 @@ const GEMINI_CLI_DEFAULT_IMAGE_MODELS = ['auto'];
 const GEMINI_CLI_DEFAULT_CHAT_MODELS = ['auto'];
 const CLI_PROTOCOLS = new Set(['jimeng', 'codex', 'gemini-cli']);
 const API_PROTOCOLS = ['openai', 'apimart', 'gemini', 'volcengine', 'runninghub', 'jimeng', 'codex', 'gemini-cli'];
+let cloudSyncAutoEnabled = false;
+let cloudSyncAutoTimer = null;
 const CLI_PROVIDER_PRESETS = {
     jimeng:{id:'jimeng', name:'即梦 CLI', protocol:'jimeng'},
     codex:{id:'codex', name:'GPT CLI', protocol:'codex'},
@@ -304,6 +306,37 @@ function broadcastStudioApiChange(type='providers-changed'){
     try { new BroadcastChannel('studio-api').postMessage(message); } catch(e) {}
     try { window.parent?.postMessage(message, '*'); } catch(e) {}
     try { window.top?.postMessage(message, '*'); } catch(e) {}
+}
+async function loadCloudSyncAutoConfig(){
+    try {
+        const res = await fetch('/api/cloud-sync/config');
+        const data = await res.json().catch(() => ({}));
+        if(!res.ok) throw new Error(data.detail || data.message || `${res.status} ${res.statusText}`);
+        cloudSyncAutoEnabled = Boolean(data.config?.auto_sync);
+        return cloudSyncAutoEnabled;
+    } catch(e) {
+        cloudSyncAutoEnabled = false;
+        return false;
+    }
+}
+async function uploadCloudSyncSavedProviders(){
+    const res = await fetch('/api/cloud-sync/upload', {method:'POST'});
+    const data = await res.json().catch(() => ({}));
+    if(!res.ok) throw new Error(data.detail || data.message || `${res.status} ${res.statusText}`);
+    return data;
+}
+function queueCloudSyncAutoUpload(){
+    clearTimeout(cloudSyncAutoTimer);
+    cloudSyncAutoTimer = setTimeout(async () => {
+        const enabled = await loadCloudSyncAutoConfig();
+        if(!enabled) return;
+        try {
+            await uploadCloudSyncSavedProviders();
+            setStatus(`${tr('api.saved')} - ${tr('api.cloudSyncAutoUploaded')}`);
+        } catch(err) {
+            setStatus(`${tr('api.saved')} - ${tr('api.cloudSyncUploadFailed')}: ${err.message || err}`);
+        }
+    }, 900);
 }
 function rhEditorSideScrollEl(){
     return rhWorkflowEditorNodeList?.closest?.('.rh-workflow-editor-side') || rhWorkflowEditorNodeList;
@@ -3692,6 +3725,7 @@ async function saveProviders(){
         setStatus(tr('api.saved'));
         // 广播变更，画布等其他 iframe 立即重新拉取最新平台/模型列表
         broadcastStudioApiChange('providers-changed');
+        queueCloudSyncAutoUpload();
         return true;
     } catch(err) {
         setStatus(err.message || tr('api.saveFailed'));
@@ -3708,6 +3742,9 @@ window.addEventListener('message', event => {
         window.StudioI18n.set(event.data.lang);
         if(recommendInlineOpen) renderRecommendApi();
         else renderEditor();
+    }
+    if(event.data?.type === 'providers-changed' && event.data?.source === 'cloud-sync') {
+        loadProviders();
     }
 });
 rhWorkflowEditorOverlay?.addEventListener('mousedown', event => {
@@ -3737,6 +3774,7 @@ window.onload = () => {
     if(window.StudioI18n) window.StudioI18n.apply();
     syncRecommendView();
     loadProviders();
+    loadCloudSyncAutoConfig();
     // 平台名输入时实时预览生成的 ID
     if(nameInput) nameInput.addEventListener('input', updateIdPreview);
     if(protocolInput) protocolInput.addEventListener('change', updateProtocolFromInput);

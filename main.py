@@ -245,6 +245,8 @@ API_PROVIDERS_FILE = os.path.join(DATA_DIR, "api_providers.json")
 RUNNINGHUB_WORKFLOW_STORE_FILE = os.path.join(DATA_DIR, "runninghub_workflows.json")
 CANVAS_VIDEO_TASKS_FILE = os.path.join(DATA_DIR, "canvas_video_tasks.json")
 SHARED_FOLDERS_FILE = os.path.join(DATA_DIR, "shared_folders.json")
+CLOUD_SYNC_CONFIG_FILE = os.path.join(DATA_DIR, "cloud_sync_config.json")
+CLOUD_SYNC_BACKUP_DIR = os.path.join(DATA_DIR, "cloud_sync_backups")
 GLOBAL_CONFIG_FILE = os.path.join(BASE_DIR, "global_config.json")
 CANVAS_TRASH_RETENTION_MS = 30 * 24 * 60 * 60 * 1000
 LOCAL_IMAGE_IMPORT_MAX_BYTES = int(os.getenv("LOCAL_IMAGE_IMPORT_MAX_BYTES", str(50 * 1024 * 1024)))
@@ -1381,6 +1383,261 @@ def update_env_values(updates):
             os.environ[key] = str(value or "")
     with open(API_ENV_FILE, "w", encoding="utf-8") as f:
         f.write("\n".join(next_lines).rstrip() + "\n")
+
+CLOUD_SYNC_SCHEMA = "infinite-canvas.api-sync.v1"
+CLOUD_SYNC_FILE_NAME = "api-settings.json"
+CLOUD_SYNC_DEFAULT_BASE_URL = "https://dav.jianguoyun.com/dav/"
+CLOUD_SYNC_STATIC_ENV_KEYS = {
+    "COMFLY_API_KEY",
+    "COMFLY_BASE_URL",
+    "MODELSCOPE_API_KEY",
+    "MODELSCOPE_CHAT_MODELS",
+    "RUNNINGHUB_API_KEY",
+    "RUNNINGHUB_WALLET_API_KEY",
+    "ARK_API_KEY",
+    "VOLCENGINE_ACCESS_KEY_ID",
+    "VOLCENGINE_SECRET_ACCESS_KEY",
+    "IMAGE_MODELS",
+    "CHAT_MODELS",
+    "VIDEO_MODELS",
+}
+
+def cloud_sync_now_ms():
+    return int(time.time() * 1000)
+
+def cloud_sync_default_config():
+    return {
+        "method": "webdav",
+        "provider": "jianguoyun",
+        "base_url": CLOUD_SYNC_DEFAULT_BASE_URL,
+        "username": "",
+        "password": "",
+        "remote_root": "infinite-canvas-sync",
+        "profile": "default",
+        "auto_sync": False,
+        "last_sync_at": 0,
+        "last_upload_at": 0,
+        "last_download_at": 0,
+    }
+
+def cloud_sync_clean_path(value, fallback):
+    text = str(value or "").replace("\\", "/").strip().strip("/")
+    parts = []
+    for part in text.split("/"):
+        clean = re.sub(r"[\x00-\x1f?#]+", "_", part.strip())
+        clean = clean.strip(" .")
+        if clean and clean not in {".", ".."}:
+            parts.append(clean[:80])
+    return "/".join(parts) if parts else fallback
+
+def normalize_cloud_sync_config(raw=None, saved=None):
+    raw = raw if isinstance(raw, dict) else {}
+    saved = saved if isinstance(saved, dict) else {}
+    defaults = cloud_sync_default_config()
+    provider = str(raw.get("provider") or saved.get("provider") or defaults["provider"]).strip().lower()
+    if provider not in {"jianguoyun", "custom"}:
+        provider = defaults["provider"]
+    base_url = str(raw.get("base_url") or saved.get("base_url") or "").strip()
+    if not base_url and provider == "jianguoyun":
+        base_url = CLOUD_SYNC_DEFAULT_BASE_URL
+    password_value = raw.get("password")
+    password = str(password_value) if password_value is not None and str(password_value) else str(saved.get("password") or "")
+    return {
+        "method": "webdav",
+        "provider": provider,
+        "base_url": base_url,
+        "username": str(raw.get("username") or saved.get("username") or "").strip(),
+        "password": password,
+        "remote_root": cloud_sync_clean_path(raw.get("remote_root") or saved.get("remote_root") or defaults["remote_root"], defaults["remote_root"]),
+        "profile": cloud_sync_clean_path(raw.get("profile") or saved.get("profile") or defaults["profile"], defaults["profile"]),
+        "auto_sync": bool(raw.get("auto_sync", saved.get("auto_sync", defaults["auto_sync"]))),
+        "last_sync_at": int(raw.get("last_sync_at", saved.get("last_sync_at", 0)) or 0),
+        "last_upload_at": int(raw.get("last_upload_at", saved.get("last_upload_at", 0)) or 0),
+        "last_download_at": int(raw.get("last_download_at", saved.get("last_download_at", 0)) or 0),
+    }
+
+def load_cloud_sync_config():
+    if not os.path.exists(CLOUD_SYNC_CONFIG_FILE):
+        return cloud_sync_default_config()
+    try:
+        with open(CLOUD_SYNC_CONFIG_FILE, "r", encoding="utf-8") as f:
+            return normalize_cloud_sync_config(json.load(f), cloud_sync_default_config())
+    except Exception as exc:
+        print(f"加载云同步配置失败: {exc}")
+        return cloud_sync_default_config()
+
+def save_cloud_sync_config(config):
+    config = normalize_cloud_sync_config(config, load_cloud_sync_config())
+    os.makedirs(DATA_DIR, exist_ok=True)
+    with GLOBAL_CONFIG_LOCK:
+        with open(CLOUD_SYNC_CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(config, f, ensure_ascii=False, indent=2)
+    return config
+
+def public_cloud_sync_config(config=None):
+    config = normalize_cloud_sync_config(config or load_cloud_sync_config())
+    return {
+        "method": config["method"],
+        "provider": config["provider"],
+        "base_url": config["base_url"],
+        "username": config["username"],
+        "remote_root": config["remote_root"],
+        "profile": config["profile"],
+        "auto_sync": config["auto_sync"],
+        "has_password": bool(config.get("password")),
+        "password_preview": mask_secret(config.get("password") or ""),
+        "last_sync_at": int(config.get("last_sync_at") or 0),
+        "last_upload_at": int(config.get("last_upload_at") or 0),
+        "last_download_at": int(config.get("last_download_at") or 0),
+        "remote_file": cloud_sync_remote_path(config),
+    }
+
+def require_cloud_sync_config(config):
+    config = normalize_cloud_sync_config(config, load_cloud_sync_config())
+    if not config.get("base_url"):
+        raise HTTPException(status_code=400, detail="请先填写 WebDAV 服务器地址")
+    if not config.get("username"):
+        raise HTTPException(status_code=400, detail="请先填写 WebDAV 账号")
+    if not config.get("password"):
+        raise HTTPException(status_code=400, detail="请先填写 WebDAV 密码或应用密码")
+    return config
+
+def cloud_sync_url_join(base_url, *segments):
+    url = str(base_url or "").strip()
+    if not url:
+        return ""
+    url = url.rstrip("/") + "/"
+    for segment in segments:
+        for part in str(segment or "").strip("/").split("/"):
+            if part:
+                url += urllib.parse.quote(part, safe="") + "/"
+    return url
+
+def cloud_sync_remote_path(config):
+    config = normalize_cloud_sync_config(config)
+    return f"{config['remote_root']}/{config['profile']}/{CLOUD_SYNC_FILE_NAME}"
+
+def cloud_sync_remote_file_url(config):
+    config = normalize_cloud_sync_config(config)
+    parent = cloud_sync_url_join(config["base_url"], config["remote_root"], config["profile"])
+    return parent + urllib.parse.quote(CLOUD_SYNC_FILE_NAME, safe="")
+
+def cloud_sync_webdav_request(method, url, config, *, expected=(200, 201, 204, 207), headers=None, data=None, timeout=30):
+    config = require_cloud_sync_config(config)
+    try:
+        response = requests.request(
+            method,
+            url,
+            auth=(config["username"], config["password"]),
+            headers=headers or {},
+            data=data,
+            timeout=timeout,
+        )
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail=f"WebDAV 请求失败：{exc}") from exc
+    if response.status_code not in expected:
+        detail = (response.text or response.reason or "").strip().replace("\r", " ").replace("\n", " ")
+        raise HTTPException(status_code=502, detail=f"WebDAV {method} 失败（{response.status_code}）：{detail[:240]}")
+    return response
+
+def cloud_sync_ensure_remote_dirs(config):
+    config = require_cloud_sync_config(config)
+    current = str(config["base_url"]).rstrip("/") + "/"
+    for segment in f"{config['remote_root']}/{config['profile']}".split("/"):
+        if not segment:
+            continue
+        current = cloud_sync_url_join(current, segment)
+        cloud_sync_webdav_request("MKCOL", current, config, expected=(200, 201, 204, 405))
+
+def read_api_env_map():
+    values = {}
+    if not os.path.exists(API_ENV_FILE):
+        return values
+    try:
+        with open(API_ENV_FILE, "r", encoding="utf-8-sig") as f:
+            for raw_line in f.read().splitlines():
+                line = raw_line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                key = key.strip()
+                if key:
+                    values[key] = value.strip().strip('"').strip("'")
+    except Exception as exc:
+        print(f"读取 API/.env 失败: {exc}")
+    return values
+
+def is_api_sync_env_key(key):
+    key = str(key or "").strip()
+    return key in CLOUD_SYNC_STATIC_ENV_KEYS or (key.startswith("API_PROVIDER_") and key.endswith("_KEY"))
+
+def cloud_sync_env_scope_keys(providers=None):
+    providers = providers if providers is not None else load_api_providers()
+    keys = set(CLOUD_SYNC_STATIC_ENV_KEYS)
+    for provider in providers or []:
+        provider_id = str((provider or {}).get("id") or "").strip().lower()
+        if provider_id:
+            keys.add(provider_key_env(provider_id))
+        if provider_id == "runninghub":
+            keys.add(runninghub_wallet_key_env())
+        if provider_id == "volcengine":
+            keys.add(volcengine_access_key_env())
+            keys.add(volcengine_secret_key_env())
+    for key in read_api_env_map():
+        if is_api_sync_env_key(key):
+            keys.add(key)
+    return keys
+
+def cloud_sync_export_env_values(providers):
+    file_values = read_api_env_map()
+    env_values = {}
+    for key in sorted(cloud_sync_env_scope_keys(providers)):
+        value = os.getenv(key, "")
+        if not value and key in file_values:
+            value = file_values.get(key, "")
+        if value:
+            env_values[key] = value
+    return env_values
+
+def make_cloud_sync_payload():
+    providers = load_api_providers()
+    return {
+        "schema": CLOUD_SYNC_SCHEMA,
+        "app": "Infinite Canvas",
+        "app_version": current_app_version(),
+        "exported_at": cloud_sync_now_ms(),
+        "providers": providers,
+        "env": cloud_sync_export_env_values(providers),
+    }
+
+def cloud_sync_backup_current():
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    backup_dir = os.path.join(CLOUD_SYNC_BACKUP_DIR, stamp)
+    os.makedirs(backup_dir, exist_ok=True)
+    for source in (API_PROVIDERS_FILE, API_ENV_FILE):
+        if os.path.exists(source):
+            shutil.copy2(source, os.path.join(backup_dir, os.path.basename(source)))
+    return backup_dir
+
+def apply_cloud_sync_payload(payload):
+    if not isinstance(payload, dict) or payload.get("schema") != CLOUD_SYNC_SCHEMA:
+        raise HTTPException(status_code=400, detail="云端配置格式不兼容")
+    raw_providers = payload.get("providers")
+    if not isinstance(raw_providers, list):
+        raise HTTPException(status_code=400, detail="云端配置缺少 API 平台列表")
+    providers = [normalize_provider(item) for item in raw_providers if isinstance(item, dict)]
+    if not providers:
+        raise HTTPException(status_code=400, detail="云端配置没有可用的 API 平台")
+    providers = merge_default_api_providers(providers, inject_missing=True)
+    raw_env = payload.get("env") if isinstance(payload.get("env"), dict) else {}
+    env_values = {str(key).strip(): str(value or "") for key, value in raw_env.items() if str(key or "").strip()}
+    scope_keys = cloud_sync_env_scope_keys(load_api_providers()) | cloud_sync_env_scope_keys(providers) | set(env_values.keys())
+    env_updates = {key: env_values.get(key, "") for key in sorted(scope_keys) if is_api_sync_env_key(key)}
+    backup_dir = cloud_sync_backup_current()
+    save_api_providers(providers)
+    update_env_values(env_updates)
+    reload_env_globals()
+    return {"backup_dir": backup_dir, "providers": providers, "env_count": len([v for v in env_updates.values() if v])}
 
 BACKEND_LOCAL_LOAD = {addr: 0 for addr in COMFYUI_INSTANCES}
 
@@ -2801,6 +3058,16 @@ class ApiProviderPayload(BaseModel):
     clear_wallet_key: bool = False
     clear_volcengine_access_key_id: bool = False
     clear_volcengine_secret_access_key: bool = False
+
+class CloudSyncConfigPayload(BaseModel):
+    method: str = "webdav"
+    provider: str = "jianguoyun"
+    base_url: str = ""
+    username: str = ""
+    password: Optional[str] = None
+    remote_root: str = "infinite-canvas-sync"
+    profile: str = "default"
+    auto_sync: bool = False
 
 class ChatRequest(BaseModel):
     conversation_id: str = ""
@@ -12007,6 +12274,73 @@ async def ai_config():
 @app.get("/api/models")
 async def ai_models():
     return {"chat_models": CHAT_MODELS, "image_models": IMAGE_MODELS, "video_models": VIDEO_MODELS}
+
+@app.get("/api/cloud-sync/config")
+async def get_cloud_sync_config():
+    return {"config": public_cloud_sync_config()}
+
+@app.put("/api/cloud-sync/config")
+async def save_cloud_sync_config_api(payload: CloudSyncConfigPayload):
+    config = save_cloud_sync_config(payload.dict())
+    return {"config": public_cloud_sync_config(config)}
+
+@app.post("/api/cloud-sync/test")
+async def test_cloud_sync_config(payload: CloudSyncConfigPayload):
+    saved = load_cloud_sync_config()
+    config = require_cloud_sync_config(normalize_cloud_sync_config(payload.dict(), saved))
+    cloud_sync_webdav_request("PROPFIND", str(config["base_url"]).rstrip("/") + "/", config, headers={"Depth": "0"}, expected=(200, 207))
+    return {"ok": True, "remote_file": cloud_sync_remote_path(config)}
+
+@app.post("/api/cloud-sync/upload")
+async def upload_cloud_sync_config():
+    config = require_cloud_sync_config(load_cloud_sync_config())
+    payload = make_cloud_sync_payload()
+    cloud_sync_ensure_remote_dirs(config)
+    body = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+    cloud_sync_webdav_request(
+        "PUT",
+        cloud_sync_remote_file_url(config),
+        config,
+        expected=(200, 201, 204),
+        headers={"Content-Type": "application/json; charset=utf-8"},
+        data=body,
+    )
+    now = cloud_sync_now_ms()
+    config["last_sync_at"] = now
+    config["last_upload_at"] = now
+    save_cloud_sync_config(config)
+    return {
+        "ok": True,
+        "remote_file": cloud_sync_remote_path(config),
+        "exported_at": payload.get("exported_at"),
+        "env_count": len(payload.get("env") or {}),
+        "provider_count": len(payload.get("providers") or []),
+        "config": public_cloud_sync_config(config),
+    }
+
+@app.post("/api/cloud-sync/download")
+async def download_cloud_sync_config():
+    config = require_cloud_sync_config(load_cloud_sync_config())
+    response = cloud_sync_webdav_request("GET", cloud_sync_remote_file_url(config), config, expected=(200,))
+    try:
+        payload = response.json()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="云端文件不是有效 JSON") from exc
+    result = apply_cloud_sync_payload(payload)
+    now = cloud_sync_now_ms()
+    config["last_sync_at"] = now
+    config["last_download_at"] = now
+    save_cloud_sync_config(config)
+    return {
+        "ok": True,
+        "remote_file": cloud_sync_remote_path(config),
+        "imported_at": now,
+        "backup_dir": result["backup_dir"],
+        "env_count": result["env_count"],
+        "provider_count": len(result["providers"]),
+        "providers": public_api_providers(),
+        "config": public_cloud_sync_config(config),
+    }
 
 @app.get("/api/providers")
 async def api_providers():

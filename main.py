@@ -278,6 +278,9 @@ RUNNINGHUB_DEFAULT_BASE_URL = "https://www.runninghub.cn"
 RUNNINGHUB_OPENAPI_BASE_URL = "https://www.runninghub.cn/openapi/v2"
 RUNNINGHUB_MODEL_REGISTRY_URL = "https://raw.githubusercontent.com/HM-RunningHub/ComfyUI_RH_OpenAPI/main/models_registry.json"
 RUNNINGHUB_LLM_BASE_URL = "https://llm.runninghub.cn/v1"
+RUNNINGHUB_FILE_HOST_REWRITES = {
+    "rh-images-1252422369.cos.ap-beijing.myqcloud.com": "rh-images.xiaoyaoyou.com",
+}
 LINGJING_DEFAULT_BASE_URL = "https://apistudio.vip"
 RUNNINGHUB_LLM_MODELS_URLS = [
     "https://llm.runninghub.cn/v1/models",
@@ -308,7 +311,7 @@ JIMENG_DEFAULT_VIDEO_MODELS = [
     "3.0",
     "3.0fast",
 ]
-CODEX_DEFAULT_IMAGE_MODELS = ["gpt-image-2", "$imagegen"]
+CODEX_DEFAULT_IMAGE_MODELS = ["gpt-image-2"]
 CODEX_DEFAULT_CHAT_MODELS = ["gpt-5.5"]
 GEMINI_CLI_DEFAULT_IMAGE_MODELS = ["auto"]
 GEMINI_CLI_DEFAULT_CHAT_MODELS = ["auto"]
@@ -337,6 +340,8 @@ VOLCENGINE_DEFAULT_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
 VOLCENGINE_DEFAULT_PROJECT_NAME = "default"
 VOLCENGINE_DEFAULT_REGION = "cn-beijing"
 RUNNINGHUB_DEFAULT_IMAGE_MODELS = [
+    "gpt-image-2.0/text-to-image-channel-low-price",
+    "gpt-image-2.0/edit-channel-low-price",
     "gpt-image-2/text-to-image-official-stable",
     "gpt-image-2/image-to-image-official-stable",
     "nano-banana/text-to-image-official-stable",
@@ -348,6 +353,16 @@ RUNNINGHUB_DEFAULT_VIDEO_MODELS = [
     "seedance-2.0-global/text-to-video",
     "seedance-2.0-global/image-to-video",
 ]
+RUNNINGHUB_MODEL_ENDPOINT_ALIASES = {
+    "gpt-image-2.0/text-to-image-channel-low-price": "rhart-image-g-2/text-to-image",
+    "gpt-image-2/text-to-image-channel-low-price": "rhart-image-g-2/text-to-image",
+    "gpt-image-2.0/edit-channel-low-price": "rhart-image-g-2/image-to-image",
+    "gpt-image-2/edit-channel-low-price": "rhart-image-g-2/image-to-image",
+    "gpt-image-2.0/image-to-image-channel-low-price": "rhart-image-g-2/image-to-image",
+    "gpt-image-2/image-to-image-channel-low-price": "rhart-image-g-2/image-to-image",
+    "nano-banana/text-to-image-channel-low-price": "rhart-image-v1/text-to-image",
+    "nano-banana/edit-channel-low-price": "rhart-image-v1/edit",
+}
 RUNNINGHUB_DEFAULT_APPS = [
     {
         "id": "2058517022748798977",
@@ -864,7 +879,10 @@ def merge_default_api_providers(providers, inject_missing=True):
         current["base_url"] = ""
         default_image_models = CODEX_DEFAULT_IMAGE_MODELS if current_protocol == "codex" else GEMINI_CLI_DEFAULT_IMAGE_MODELS
         default_chat_models = CODEX_DEFAULT_CHAT_MODELS if current_protocol == "codex" else GEMINI_CLI_DEFAULT_CHAT_MODELS
-        current["image_models"] = model_list_from_values([*(current.get("image_models") or []), *default_image_models])
+        image_models = current.get("image_models") or []
+        if current_protocol == "codex":
+            image_models = [item for item in image_models if str(item or "").strip().lower() != "$imagegen"]
+        current["image_models"] = model_list_from_values([*image_models, *default_image_models])
         current["chat_models"] = model_list_from_values([*(current.get("chat_models") or []), *default_chat_models])
         current["video_models"] = []
     return merged
@@ -1128,12 +1146,14 @@ LOCKED_RECOMMENDED_PROVIDER_RULES = {
         "base_urls": {"https://new.exellome.online"},
         "protocol": "apimart",
         "image_request_mode": "openai-video-proxy",
+        "video_models": [],
     },
     "fhl": {
         "names": {"fhl"},
         "base_urls": {"https://www.fhl.mom"},
         "protocol": "openai",
         "image_request_mode": "openai-responses",
+        "video_models": [],
     },
 }
 
@@ -1150,6 +1170,16 @@ def locked_recommended_provider_rule(provider_id="", name="", base_url=""):
         if pid == key or pname in rule["names"] or pbase in rule["base_urls"] or (phost and phost in hosts):
             return rule
     return None
+
+def apply_locked_recommended_model_rules(base_url="", grouped=None):
+    rule = locked_recommended_provider_rule("", "", base_url)
+    if not rule or "video_models" not in rule:
+        return grouped
+    grouped = {key: list(value or []) for key, value in (grouped or {}).items()}
+    grouped.setdefault("image", [])
+    grouped.setdefault("chat", [])
+    grouped["video"] = list(rule.get("video_models") or [])
+    return grouped
 
 def provider_endpoint_url(provider, key, default_path):
     base_url = str((provider or {}).get("base_url") or AI_BASE_URL).strip().rstrip("/")
@@ -1206,7 +1236,8 @@ def normalize_provider(item):
         base_url = base_url or VOLCENGINE_DEFAULT_BASE_URL
         volc_project = volc_project or VOLCENGINE_DEFAULT_PROJECT_NAME
         volc_region = volc_region or VOLCENGINE_DEFAULT_REGION
-    if protocol == "jimeng":
+    if provider_id == "jimeng" or protocol == "jimeng":
+        protocol = "jimeng"
         base_url = ""
     if protocol in {"codex", "gemini-cli"}:
         base_url = ""
@@ -1217,6 +1248,9 @@ def normalize_provider(item):
     if locked_rule:
         protocol = locked_rule["protocol"]
         image_request_mode = locked_rule["image_request_mode"]
+    video_models = model_list_from_values(item.get("video_models") or [])
+    if locked_rule and "video_models" in locked_rule:
+        video_models = model_list_from_values(locked_rule.get("video_models") or [])
     return {
         "id": provider_id,
         "name": name,
@@ -1230,7 +1264,7 @@ def normalize_provider(item):
         "primary": bool(item.get("primary", False)),
         "image_models": model_list_from_values(item.get("image_models") or []),
         "chat_models": model_list_from_values(item.get("chat_models") or []),
-        "video_models": model_list_from_values(item.get("video_models") or []),
+        "video_models": video_models,
         "model_protocols": normalize_model_protocols(item.get("model_protocols")),
         "ms_loras": normalize_ms_loras(item.get("ms_loras") or []),
         "ms_defaults_version": int(item.get("ms_defaults_version") or 0),
@@ -4634,7 +4668,7 @@ def provider_protocol(provider):
 # 单模型可覆盖的协议（仅 OpenAI / Gemini，二者可共用同一站点的 Base URL + Key）
 PER_MODEL_PROTOCOL_OPTIONS = {"openai", "gemini"}
 # 协议固定、不支持单模型覆盖的内置平台
-FIXED_PROTOCOL_PROVIDER_IDS = {"modelscope", "volcengine", "runninghub"}
+FIXED_PROTOCOL_PROVIDER_IDS = {"modelscope", "volcengine", "jimeng", "runninghub"}
 
 def normalize_model_protocols(value):
     """规整 {模型名: 协议} 覆盖表，仅保留 openai/gemini。"""
@@ -4689,7 +4723,7 @@ def is_runninghub_provider(provider):
     return provider_protocol(provider) == "runninghub" or str((provider or {}).get("id") or "").strip().lower() == "runninghub"
 
 def is_jimeng_provider(provider):
-    return provider_protocol(provider) == "jimeng"
+    return provider_protocol(provider) == "jimeng" or str((provider or {}).get("id") or "").strip().lower() == "jimeng"
 
 def is_codex_provider(provider):
     return provider_protocol(provider) == "codex"
@@ -4897,14 +4931,18 @@ def gpt_image_2_skill_size_arg(size="", model="", prompt="", provider="openai"):
     text = " ".join([str(size or ""), str(model or ""), str(prompt or "")]).lower()
     size_text = str(size or "").strip()
     if str(provider or "").strip().lower() == "codex":
-        if "4k" in text or "3840" in text:
-            return "4K"
         if "1k" in text or "1024" in text:
             return "1K"
-        width, height = parse_size_pair(size_text)
-        if max(width, height) >= 2400:
+        if "2k" in text or "2048" in text:
+            return "2K"
+        if "4k" in text or "3840" in text:
             return "4K"
-        return "2K"
+        width, height = parse_size_pair(size_text)
+        if 0 < max(width, height) < 1800:
+            return "1K"
+        if 1800 <= max(width, height) < 3000:
+            return "2K"
+        return "4K"
     match = re.search(r"(\d{3,5})\s*[x×*]\s*(\d{3,5})", size_text, flags=re.I)
     if match:
         width = int(match.group(1))
@@ -4931,6 +4969,7 @@ def gpt_image_2_skill_prompt_arg(prompt="", size="", provider="openai"):
     prompt_text = str(prompt or "").strip()
     if str(provider or "").strip().lower() != "codex":
         return prompt_text
+    size_arg = gpt_image_2_skill_size_arg(size, "", prompt, provider)
     size_text = str(size or "").strip()
     width, height = parse_size_pair(size_text)
     ratio_text = ""
@@ -4944,13 +4983,15 @@ def gpt_image_2_skill_prompt_arg(prompt="", size="", provider="openai"):
             height = int(ratio_match.group(2))
             ratio_text = f"{width}:{height}"
     if not ratio_text:
-        return prompt_text
+        return f"{prompt_text} 画质要求：目标输出 {size_arg} 高分辨率图片。 Image quality requirement: output a {size_arg} high-resolution image."
     orientation_zh = "横版/宽幅" if width > height else ("竖版/长幅" if height > width else "正方形")
     orientation_en = "landscape/wide" if width > height else ("portrait/tall" if height > width else "square")
     return (
         f"{prompt_text} "
+        f"画质要求：目标输出 {size_arg} 高分辨率图片。"
         f"画幅要求：必须生成 {orientation_zh} 图片，宽高比 {ratio_text}。"
         f"请不要交换宽高，不要输出反向比例。"
+        f" Image quality requirement: output a {size_arg} high-resolution image."
         f" Canvas requirement: generate a {orientation_en} image with aspect ratio {ratio_text}; "
         "do not swap width and height."
     )
@@ -4995,6 +5036,31 @@ def parse_gpt_image_2_skill_output(stdout_text="", stderr_text=""):
     pattern = r"([A-Za-z]:\\[^\r\n\"'<>]+\.(?:png|jpe?g|webp|gif)|/[^\r\n\"'<>]+\.(?:png|jpe?g|webp|gif))"
     paths.extend(re.findall(pattern, text, flags=re.I))
     return items, paths
+
+def codex_postprocess_image_to_requested_size(path="", requested_size="", provider=""):
+    provider_text = str(provider or "").strip().lower()
+    if provider_text not in {"codex", "gemini-cli"}:
+        return ""
+    width, height = parse_size_pair(requested_size)
+    if not width or not height or not path or not os.path.isfile(path):
+        return ""
+    try:
+        with Image.open(path) as img:
+            img.load()
+            if img.width == width and img.height == height:
+                return ""
+            resample = getattr(Image, "Resampling", Image).LANCZOS
+            oriented = ImageOps.exif_transpose(img)
+            converted = oriented.convert("RGBA") if oriented.mode in ("RGBA", "LA", "P") else oriented.convert("RGB")
+            resized = ImageOps.fit(converted, (width, height), method=resample, centering=(0.5, 0.5))
+            base, _ext = os.path.splitext(path)
+            upscaled_path = f"{base}_upscaled_{width}x{height}.png"
+            resized.save(upscaled_path, format="PNG")
+            return upscaled_path
+    except Exception as exc:
+        label = "Gemini CLI" if provider_text == "gemini-cli" else "Codex GPT Image 2"
+        print(f"{label} 图片尺寸后处理失败：{exc}")
+        return ""
 
 async def generate_codex_provider_image_via_gpt_image_2_skill(prompt, size, model, ref_paths=None):
     exe = gpt_image_2_skill_executable()
@@ -5053,14 +5119,15 @@ async def generate_codex_provider_image_via_gpt_image_2_skill(prompt, size, mode
         message = err_text or out_text or f"exit={proc.returncode}"
         raise HTTPException(status_code=502, detail=f"GPT Image 2 Skill 调用失败：{message[:1200]}")
     parsed, reported_paths = parse_gpt_image_2_skill_output(out_text, err_text)
-    urls = []
+    candidate_paths = []
     if os.path.isfile(out_path):
-        url = codex_output_url_from_path(out_path)
+        candidate_paths.append(out_path)
+    candidate_paths.extend([path for path in reported_paths if path and os.path.isfile(path)])
+    urls = []
+    for path in candidate_paths:
+        processed_path = codex_postprocess_image_to_requested_size(path, size, tool_provider)
+        url = codex_output_url_from_path(processed_path or path)
         if url:
-            urls.append(url)
-    for path in reported_paths:
-        url = codex_output_url_from_path(path)
-        if url and url not in urls:
             urls.append(url)
     if not urls:
         status_text = (out_text or err_text or "")[:1200]
@@ -5156,36 +5223,11 @@ def codex_models_payload(raw=None):
 
 async def generate_codex_provider_image(prompt, size, model, reference_images=None, provider=None):
     ref_paths, temp_paths = await codex_reference_paths(reference_images)
-    since = time.time()
     try:
         skill_result = await generate_codex_provider_image_via_gpt_image_2_skill(prompt, size, model, ref_paths)
         if skill_result:
             return skill_result
-        image_prompt = (
-            "$imagegen\n\n"
-            f"任务：{prompt}\n\n"
-            f"尺寸/比例参考：{size or 'auto'}。\n"
-            f"请生成或编辑图片，并把最终图片文件保存到这个本地目录：{OUTPUT_OUTPUT_DIR}\n"
-            "只需要输出最终文件路径和一句简短说明；不要修改项目代码，不要创建额外文档。"
-        )
-        raw = await run_codex_cli(image_prompt, model="", image_paths=ref_paths, timeout=codex_timeout(), output_last_message=True)
-        files = codex_output_image_files(since)
-        urls = []
-        for path in files:
-            url = codex_output_url_from_path(path)
-            if url and url not in urls:
-                urls.append(url)
-        if not urls:
-            text = f"{raw.get('text') or raw.get('_stdout') or ''}\n{raw.get('_stderr') or ''}"
-            pattern = r"([A-Za-z]:\\[^\r\n\"'<>]+\.(?:png|jpe?g|webp|gif)|/[^\r\n\"'<>]+\.(?:png|jpe?g|webp|gif))"
-            for match in re.findall(pattern, text, flags=re.I):
-                url = codex_output_url_from_path(match.strip())
-                if url and url not in urls:
-                    urls.append(url)
-        if not urls:
-            status_text = (raw.get("text") or raw.get("_stdout") or raw.get("_stderr") or "")[:1200]
-            raise HTTPException(status_code=502, detail=f"OpenAI CLI 已返回，但没有在输出目录发现图片：{status_text}")
-        return {"type": "url", "value": urls[0]}, {"images": urls, "text": raw.get("text"), "provider": "codex"}
+        raise HTTPException(status_code=400, detail="未找到 GPT Image 2 helper，OpenAI CLI 生图已禁用 $imagegen 回退。请先安装 gpt-image-2-skill 后再生成图片。")
     finally:
         for path in temp_paths:
             try:
@@ -5419,13 +5461,14 @@ def gemini_cli_image_size_instruction(size="", model=""):
             orientation = "正方形" if width == height else ("横版" if width > height else "竖版")
             return (
                 f"目标输出分辨率：{width}x{height} 像素（宽 x 高），画面方向：{orientation}。"
-                "请尽量直接生成这个像素尺寸或最接近的高分辨率图片，不要默认降到 1024x1024。"
+                f"最终保存到输出目录的图片文件实际像素必须是 {width}x{height}。"
+                "如果生成器先得到较小图片，请在保存前放大或导出到目标尺寸，不要返回 1024px 小图。"
             )
     combined = f"{size_text} {model_text}".lower()
     if "4k" in combined:
-        return "目标输出为 4K 高分辨率图片，长边至少 4096 像素；不要默认输出 1024px 小图。"
+        return "目标输出为 4K 高分辨率图片；最终保存文件需要达到当前画幅对应的 4K 像素尺寸，不要默认输出 1024px 小图。"
     if "2k" in combined:
-        return "目标输出为 2K 高分辨率图片，长边至少 2048 像素；不要默认输出 1024px 小图。"
+        return "目标输出为 2K 高分辨率图片；最终保存文件需要达到当前画幅对应的 2K 像素尺寸，不要默认输出 1024px 小图。"
     return f"尺寸/比例参考：{size_text or 'auto'}。如果可以指定分辨率，请优先输出高分辨率图片。"
 
 async def generate_gemini_cli_provider_image(prompt, size, model, reference_images=None, provider=None):
@@ -5454,14 +5497,17 @@ async def generate_gemini_cli_provider_image(prompt, size, model, reference_imag
         files = codex_output_image_files(since)
         urls = []
         for path in files:
-            url = codex_output_url_from_path(path)
+            processed_path = codex_postprocess_image_to_requested_size(path, size, "gemini-cli")
+            url = codex_output_url_from_path(processed_path or path)
             if url and url not in urls:
                 urls.append(url)
         if not urls:
             text = f"{raw.get('text') or raw.get('_stdout') or ''}\n{raw.get('_stderr') or ''}"
             pattern = r"([A-Za-z]:\\[^\r\n\"'<>]+\.(?:png|jpe?g|webp|gif)|/[^\r\n\"'<>]+\.(?:png|jpe?g|webp|gif))"
             for match in re.findall(pattern, text, flags=re.I):
-                url = codex_output_url_from_path(match.strip())
+                match_path = match.strip()
+                processed_path = codex_postprocess_image_to_requested_size(match_path, size, "gemini-cli")
+                url = codex_output_url_from_path(processed_path or match_path)
                 if url and url not in urls:
                     urls.append(url)
         if not urls:
@@ -5568,13 +5614,50 @@ def jimeng_cli_executable():
         return configured
     return shutil.which("dreamina") or shutil.which("dreamina.exe") or shutil.which("dreamina.cmd") or ""
 
+def decode_utf16_auto(raw: bytes) -> str:
+    # WSL/Windows interop emits UTF-16 for null-heavy diagnostics, but the
+    # endianness varies by source (console vs proxy vs subprocess), so a
+    # hard-coded "utf-16le" silently byte-swaps UTF-16BE text into garbage
+    # (e.g. "localhost" -> 氀漀挀愀氀栀漀猀琀). Decode both ways and keep
+    # whichever produces more plain ASCII, since diagnostics are ASCII-heavy.
+    try:
+        le = raw.decode("utf-16le", errors="ignore")
+    except Exception:
+        le = ""
+    try:
+        be = raw.decode("utf-16be", errors="ignore")
+    except Exception:
+        be = ""
+    def ascii_score(text):
+        return sum(1 for ch in text if 0x20 <= ord(ch) <= 0x7e)
+    return le if ascii_score(le) >= ascii_score(be) else be
+
 def decode_wsl_output(data: bytes) -> str:
     data = data or b""
     if not data:
         return ""
+
+    # WSL can mix UTF-16 diagnostics with UTF-8 command output in the same
+    # stream. Decode per line so a WSL proxy warning does not corrupt CLI errors.
+    if b"\x00" in data[:400]:
+        lines = []
+        for raw_line in data.splitlines():
+            if not raw_line:
+                lines.append("")
+                continue
+            sample = raw_line[:200]
+            nul_ratio = sample.count(0) / max(1, len(sample))
+            if nul_ratio > 0.2:
+                try:
+                    lines.append(decode_utf16_auto(raw_line))
+                    continue
+                except Exception:
+                    pass
+            lines.append(raw_line.decode("utf-8-sig", errors="ignore"))
+        return "\n".join(lines)
     if b"\x00" in data[:200]:
         try:
-            return data.decode("utf-16le", errors="ignore")
+            return decode_utf16_auto(data)
         except Exception:
             pass
     return data.decode("utf-8-sig", errors="ignore")
@@ -5612,11 +5695,14 @@ def jimeng_wsl_base_args(exe="wsl.exe"):
 
 def jimeng_clean_wsl_stderr(text):
     lines = []
+    skip_next_warning_context = False
     for line in str(text or "").splitlines():
         clean = line.replace("\x00", "").strip()
         low = clean.lower()
         is_proxy_warning = "localhost" in low and "wsl" in low and ("nat" in low or "proxy" in low or "代理" in clean)
-        if clean and not is_proxy_warning:
+        is_python_warning = "requestsdependencywarning" in low or (skip_next_warning_context and clean.startswith("warnings.warn("))
+        skip_next_warning_context = "requestsdependencywarning" in low
+        if clean and not is_proxy_warning and not is_python_warning:
             lines.append(clean)
     return "\n".join(lines).strip()
 
@@ -6338,9 +6424,36 @@ def image_task_fail_reason(payload):
     error = task_data.get("error") if isinstance(task_data.get("error"), dict) else {}
     return task_data.get("fail_reason") or task_data.get("message") or error.get("message") or (payload.get("message") if isinstance(payload, dict) else "") or "生图任务失败"
 
+async def httpx_request_with_transient_retries(client, method, url, attempts=2, retry_delay=1.2, **kwargs):
+    attempts = max(1, int(attempts or 1))
+    last_exc = None
+    retry_statuses = {502, 503, 504, 520, 522, 524}
+    for attempt in range(attempts):
+        try:
+            response = await client.request(method, url, **kwargs)
+            if response.status_code in retry_statuses and attempt + 1 < attempts:
+                await asyncio.sleep(retry_delay * (attempt + 1))
+                continue
+            return response
+        except (httpx.RemoteProtocolError, httpx.ReadError, httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout, httpx.PoolTimeout) as exc:
+            last_exc = exc
+            if attempt + 1 >= attempts:
+                raise
+            print(f"[HTTPX-RETRY] {method} {url} transient error: {exc}; retry {attempt + 2}/{attempts}", flush=True)
+            await asyncio.sleep(retry_delay * (attempt + 1))
+    if last_exc:
+        raise last_exc
+    raise httpx.HTTPError(f"请求失败：{method} {url}")
+
 async def fetch_image_task_payload(client, task_id, provider=None):
     task_url = image_task_url_for_provider(provider, task_id)
-    response = await client.get(task_url, headers=api_headers(provider=provider))
+    response = await httpx_request_with_transient_retries(
+        client,
+        "GET",
+        task_url,
+        attempts=3,
+        headers=api_headers(provider=provider),
+    )
     response.raise_for_status()
     return response.json()
 
@@ -6551,7 +6664,7 @@ def filename_from_media_url(url: str, fallback: str = "download.bin") -> str:
     return sanitize_export_filename(name or fallback, fallback)
 
 def fetch_remote_media_bytes(url: str, timeout: float = 30.0, max_bytes: int = 200 * 1024 * 1024):
-    text = str(url or "").strip()
+    text = rewrite_runninghub_file_url(str(url or "").strip())
     parsed = urllib.parse.urlparse(text)
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
         return None
@@ -8772,6 +8885,7 @@ async def save_ai_image_to_output(image_data, prefix="online_", category="output
     value = image_data["value"]
     if value.startswith("/output/") or value.startswith("/assets/"):
         return value
+    value = rewrite_runninghub_file_url(value)
     try:
         timeout = httpx.Timeout(connect=20.0, read=300.0, write=60.0, pool=20.0)
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
@@ -8788,7 +8902,7 @@ async def save_ai_image_to_output(image_data, prefix="online_", category="output
                 f.write(response.content)
             return output_url_for(filename, category)
     except Exception as e:
-        print(f"保存上游图片失败: {e}")
+        print(f"保存上游图片失败: {e}; url={value}")
         return value
 
 def image_output_meta(url, source_item=None):
@@ -9375,6 +9489,17 @@ def runninghub_output_ext(remote, content_type=""):
         return "jpg"
     return "png"
 
+def rewrite_runninghub_file_url(url):
+    text = str(url or "")
+    if not text:
+        return text
+    try:
+        parsed = urllib.parse.urlsplit(text)
+    except Exception:
+        return text
+    target = RUNNINGHUB_FILE_HOST_REWRITES.get((parsed.netloc or "").lower())
+    return parsed._replace(netloc=target).geturl() if target else text
+
 def runninghub_extract_outputs(data):
     arr = []
     if isinstance(data, list):
@@ -9390,16 +9515,17 @@ def runninghub_extract_outputs(data):
     outputs = []
     for item in arr:
         if isinstance(item, str):
-            outputs.append(item)
+            outputs.append(rewrite_runninghub_file_url(item))
         elif isinstance(item, dict):
             url = item.get("fileUrl") or item.get("file_url") or item.get("url") or item.get("downloadUrl") or item.get("download_url")
             if isinstance(url, list):
-                outputs.extend([str(u) for u in url if u])
+                outputs.extend([rewrite_runninghub_file_url(u) for u in url if u])
             elif url:
-                outputs.append(str(url))
+                outputs.append(rewrite_runninghub_file_url(url))
     return outputs
 
 async def runninghub_store_remote_output(client, remote):
+    remote = rewrite_runninghub_file_url(remote)
     if not str(remote or "").startswith(("http://", "https://")):
         return remote
     response = await client.get(remote, follow_redirects=True)
@@ -9483,17 +9609,42 @@ def runninghub_workflow_node_info_list(workflow_json):
     return result
 
 def runninghub_task_endpoint(provider, model):
-    model_path = str(model or "").strip().strip("/")
+    raw_model_path = str(model or "").strip()
+    model_path = raw_model_path.strip("/")
     if not model_path:
         model_path = RUNNINGHUB_DEFAULT_IMAGE_MODELS[0]
-    if model_path.startswith("/openapi/"):
-        return runninghub_endpoint_url(provider, model_path)
+    if raw_model_path.startswith("/openapi/"):
+        return runninghub_endpoint_url(provider, raw_model_path)
     if model_path.startswith("openapi/"):
         return runninghub_endpoint_url(provider, f"/{model_path}")
     return runninghub_openapi_url(provider, model_path)
 
+def runninghub_endpoint_alias_for_model(model):
+    model_id = str(model or "").strip().strip("/")
+    if not model_id:
+        return ""
+    direct = RUNNINGHUB_MODEL_ENDPOINT_ALIASES.get(model_id)
+    if direct:
+        return direct
+    lowered = model_id.lower()
+    if lowered.startswith("gpt-image-2.0/") or lowered.startswith("gpt-image-2/"):
+        if "/text-to-image-" in lowered or lowered.endswith("/text-to-image"):
+            return "rhart-image-g-2/text-to-image"
+        if "/edit-" in lowered or lowered.endswith("/edit"):
+            return "rhart-image-g-2/image-to-image"
+        if "/image-to-image-" in lowered or lowered.endswith("/image-to-image"):
+            return "rhart-image-g-2/image-to-image"
+    if lowered.startswith("nano-banana/"):
+        if "/text-to-image-" in lowered or lowered.endswith("/text-to-image"):
+            return "rhart-image-v1/text-to-image"
+        if "/edit-" in lowered or lowered.endswith("/edit"):
+            return "rhart-image-v1/edit"
+    return ""
+
 def runninghub_registry_fallback():
     image = [
+        {"name_en": "gpt-image-2.0/text-to-image-channel-low-price", "endpoint": "rhart-image-g-2/text-to-image", "output_type": "image"},
+        {"name_en": "gpt-image-2.0/edit-channel-low-price", "endpoint": "rhart-image-g-2/image-to-image", "output_type": "image"},
         {"name_en": "gpt-image-2/text-to-image-official-stable", "endpoint": "rhart-image-g-2-official/text-to-image", "output_type": "image"},
         {"name_en": "gpt-image-2/image-to-image-official-stable", "endpoint": "rhart-image-g-2-official/image-to-image", "output_type": "image"},
         {"name_en": "nano-banana/text-to-image-official-stable", "endpoint": "rhart-image-v1-official/text-to-image", "output_type": "image"},
@@ -9676,12 +9827,20 @@ async def runninghub_model_definition(provider, model):
         mid = runninghub_model_id(item)
         endpoint = str(item.get("endpoint") or "").strip().strip("/")
         if requested and requested in {mid, endpoint, f"/openapi/v2/{endpoint}", f"openapi/v2/{endpoint}"}:
+            if endpoint:
+                return item
+            alias = runninghub_endpoint_alias_for_model(mid or requested)
+            if alias:
+                patched = dict(item)
+                patched["endpoint"] = alias
+                return patched
             return item
     endpoint = requested
     if endpoint.startswith("/openapi/v2/"):
         endpoint = endpoint[len("/openapi/v2/"):]
     elif endpoint.startswith("openapi/v2/"):
         endpoint = endpoint[len("openapi/v2/"):]
+    endpoint = runninghub_endpoint_alias_for_model(requested) or endpoint
     return {"name_en": requested, "endpoint": endpoint or RUNNINGHUB_DEFAULT_IMAGE_MODELS[0], "output_type": classify_upstream_model(requested), "params": []}
 
 def runninghub_schema_options(field):
@@ -9822,19 +9981,22 @@ def runninghub_extract_image(raw):
         if isinstance(results, list):
             for item in results:
                 if isinstance(item, str) and item.startswith(("http://", "https://")):
-                    return {"type": "url", "value": item}
+                    return {"type": "url", "value": rewrite_runninghub_file_url(item)}
                 if not isinstance(item, dict):
                     continue
                 if item.get("type") == "url" and item.get("value"):
-                    return {"type": "url", "value": item["value"]}
+                    return {"type": "url", "value": rewrite_runninghub_file_url(item["value"])}
                 if item.get("type") == "b64" and item.get("value"):
                     return {"type": "b64", "value": item["value"], "mime_type": item.get("mime_type") or "image/png"}
                 url = item.get("url") or item.get("fileUrl") or item.get("file_url") or item.get("download_url") or item.get("imageUrl") or item.get("image_url")
                 if isinstance(url, list) and url:
                     url = url[0]
                 if isinstance(url, str) and url:
-                    return {"type": "url", "value": url}
-    return extract_image(raw)
+                    return {"type": "url", "value": rewrite_runninghub_file_url(url)}
+    image = extract_image(raw)
+    if image.get("type") == "url":
+        image["value"] = rewrite_runninghub_file_url(image.get("value"))
+    return image
 
 async def runninghub_upload_reference(client, provider, ref):
     path = output_file_from_url(ref.get("url", ""))
@@ -10425,7 +10587,14 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
             if image_refs:
                 body["images"] = [await openai_video_proxy_public_reference_url(ref) for ref in image_refs[:6]]
             video_url = f"{base_url}/videos" if base_url.endswith("/v1") else f"{base_url}/v1/videos"
-            response = await client.post(video_url, headers=api_headers(provider=provider, model=model), json=body)
+            response = await httpx_request_with_transient_retries(
+                client,
+                "POST",
+                video_url,
+                attempts=2,
+                headers=api_headers(provider=provider, model=model),
+                json=body,
+            )
         elif image_request_mode == "openai-responses":
             tool = {"type": "image_generation"}
             tool["action"] = "edit" if image_refs else "generate"
@@ -10853,6 +11022,7 @@ def view_image(filename: str, type: str = "input", subfolder: str = ""):
 
 @app.get("/api/download-output")
 def download_output(request: Request, url: str, name: str = "", inline: bool = False):
+    url = rewrite_runninghub_file_url(url)
     path = output_file_from_url(url)
     if not path:
         path = local_media_file_by_basename(filename_from_media_url(url, ""))
@@ -11781,15 +11951,27 @@ async def runninghub_workflow_info(workflowId: str = ""):
 
 @app.get("/api/runninghub/workflows")
 def list_runninghub_workflows():
+    providers = load_api_providers()
+    hidden_ids = runninghub_saved_hidden_workflow_ids()
+    for provider in providers:
+        if provider.get("id") != "runninghub":
+            continue
+        for entry in provider.get("rh_workflows") or []:
+            workflow_id = runninghub_workflow_store_key(entry.get("workflowId") or entry.get("id"))
+            if workflow_id and entry.get("hidden") is True:
+                hidden_ids.add(workflow_id)
     with RUNNINGHUB_WORKFLOW_LOCK:
         store = load_runninghub_workflow_store()
-    merged = {workflow_id: cfg for workflow_id, cfg in store.items() if isinstance(cfg, dict)}
-    for provider in load_api_providers():
+    merged = {workflow_id: cfg for workflow_id, cfg in store.items() if isinstance(cfg, dict) and workflow_id not in hidden_ids}
+    for provider in providers:
         if provider.get("id") != "runninghub":
             continue
         for entry in provider.get("rh_workflows") or []:
             workflow_id = runninghub_workflow_store_key(entry.get("workflowId") or entry.get("id"))
             if not workflow_id:
+                continue
+            if entry.get("hidden") is True:
+                merged.pop(workflow_id, None)
                 continue
             provider_cfg = runninghub_provider_workflow_config(workflow_id)
             if provider_cfg:
@@ -11936,7 +12118,7 @@ async def runninghub_query(taskId: str = ""):
 
 @app.post("/api/runninghub/upload-asset")
 async def runninghub_upload_asset(payload: RunningHubUploadAssetRequest):
-    source_url = str(payload.url or "").strip()
+    source_url = rewrite_runninghub_file_url(str(payload.url or "").strip())
     if not source_url:
         raise HTTPException(status_code=400, detail="url 必填")
     provider = runninghub_provider()
@@ -11999,7 +12181,7 @@ async def codex_status():
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10)
         out_text, err_text = codex_decode_output(stdout, stderr)
         ok = proc.returncode == 0
-        helper_message = "GPT Image 2 helper 已安装，OpenAI CLI 生图会优先使用 Image 2。" if image2_exe else "未找到 GPT Image 2 helper，OpenAI CLI 生图会回退 Codex 内置 $imagegen。"
+        helper_message = "GPT Image 2 helper 已安装，OpenAI CLI 生图会使用 GPT Image 2。" if image2_exe else "未找到 GPT Image 2 helper，OpenAI CLI 生图不可用；已禁用 Codex 内置 $imagegen 回退。"
         return {
             "installed": ok,
             "logged_in": None,
@@ -12589,6 +12771,7 @@ async def probe_openai_models_endpoint(client, base_url: str, api_key: str):
     if response.status_code < 300:
         grouped, ids = parse_upstream_models(raw, "openai") if isinstance(raw, dict) else ({"image": [], "chat": [], "video": []}, [])
         grouped, ids = apply_agnes_model_defaults(base_url, grouped, ids)
+        grouped = apply_locked_recommended_model_rules(base_url, grouped)
         return True, {
             "status": response.status_code,
             "message": f"OpenAI 兼容模型列表端点可用{f'，找到 {len(ids)} 个模型' if ids else ''}",
@@ -12759,6 +12942,7 @@ async def test_provider_connection(payload: TestConnectionPayload):
             data = resp.json() if resp.text else {}
             grouped, ids = parse_upstream_models(data, protocol)
             grouped, ids = apply_agnes_model_defaults(base_url, grouped, ids)
+            grouped = apply_locked_recommended_model_rules(base_url, grouped)
             if protocol == "volcengine" and not ids:
                 detected, probe = await probe_volcengine_auto_detect(client, base_url, api_key)
                 if detected:
@@ -13040,6 +13224,7 @@ async def fetch_models_from_upstream(base_url: str, api_key: str, protocol: str 
         raise HTTPException(status_code=502, detail=f"请求上游模型列表失败：{e}")
     grouped, ids = parse_upstream_models(raw, protocol)
     grouped, ids = apply_agnes_model_defaults(base_url, grouped, ids)
+    grouped = apply_locked_recommended_model_rules(base_url, grouped)
     if protocol == "volcengine" and not ids:
         payload = volcengine_default_model_payload(raw=raw)
         return {
@@ -13149,6 +13334,67 @@ async def online_image(payload: OnlineImageRequest):
 async def query_image_task(payload: ImageTaskQueryRequest):
     provider = get_api_provider(payload.provider_id)
     task_id = str(payload.task_id or "").strip()
+    if is_runninghub_provider(provider):
+        api_key = runninghub_api_key(provider)
+        url = runninghub_endpoint_url(provider, "/task/openapi/outputs")
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(connect=20.0, read=240.0, write=30.0, pool=20.0)) as client:
+                response = await client.post(url, headers=runninghub_app_headers(True), json={"apiKey": api_key, "taskId": task_id})
+                response.raise_for_status()
+                raw = response.json()
+                code = raw.get("code") if isinstance(raw, dict) else None
+                if code in (0, "0"):
+                    local_urls = []
+                    local_items = []
+                    for remote in runninghub_extract_outputs(raw.get("data")):
+                        try:
+                            local_url = await runninghub_store_remote_output(client, remote)
+                        except Exception:
+                            local_url = rewrite_runninghub_file_url(remote)
+                        if local_url:
+                            local_urls.append(local_url)
+                            local_items.append(image_output_meta(local_url))
+                    result = {
+                        "status": "succeeded",
+                        "prompt": "",
+                        "images": local_urls,
+                        "image_items": local_items,
+                        "timestamp": time.time(),
+                        "type": "online",
+                        "model": "",
+                        "provider_id": provider["id"],
+                        "provider_name": provider.get("name") or provider["id"],
+                        "task_id": task_id,
+                        "request_id": "",
+                        "params": {"provider_id": provider["id"]},
+                        "raw": raw,
+                    }
+                    save_to_history(result)
+                    if GLOBAL_LOOP:
+                        asyncio.run_coroutine_threadsafe(manager.broadcast_new_image(result), GLOBAL_LOOP)
+                    return result
+                if code in (805, "805"):
+                    return {
+                        "status": "failed",
+                        "task_id": task_id,
+                        "provider_id": provider["id"],
+                        "provider_name": provider.get("name") or provider["id"],
+                        "error": runninghub_fail_reason(raw),
+                        "raw": raw,
+                    }
+                return {
+                    "status": "running",
+                    "task_id": task_id,
+                    "provider_id": provider["id"],
+                    "provider_name": provider.get("name") or provider["id"],
+                    "message": "RunningHub 任务仍在生成中",
+                    "raw": raw,
+                }
+        except httpx.HTTPStatusError as exc:
+            text = exc.response.text or ""
+            raise HTTPException(status_code=exc.response.status_code, detail=f"查询 RunningHub 任务失败：{text[:300]}") from exc
+        except httpx.HTTPError as exc:
+            raise HTTPException(status_code=502, detail=f"查询 RunningHub 任务失败：{exc}") from exc
     timeout = httpx.Timeout(connect=20.0, read=300.0, write=60.0, pool=20.0)
     try:
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
@@ -17180,6 +17426,26 @@ def runninghub_workflow_entry_from_config(cfg, fallback=None):
         "updatedAt": (cfg or {}).get("updatedAt") or fallback.get("updatedAt") or 0,
     }, "workflow")
 
+def runninghub_saved_hidden_workflow_ids():
+    if not os.path.exists(API_PROVIDERS_FILE):
+        return set()
+    try:
+        with open(API_PROVIDERS_FILE, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+    except Exception:
+        return set()
+    hidden = set()
+    for provider in raw if isinstance(raw, list) else []:
+        if not isinstance(provider, dict) or str(provider.get("id") or "").strip().lower() != "runninghub":
+            continue
+        for entry in provider.get("rh_workflows") or []:
+            if not isinstance(entry, dict) or entry.get("hidden") is not True:
+                continue
+            key = runninghub_workflow_store_key(entry.get("workflowId") or entry.get("id"))
+            if key:
+                hidden.add(key)
+    return hidden
+
 def runninghub_provider_with_workflow_store(provider):
     if not isinstance(provider, dict) or provider.get("id") != "runninghub":
         return provider
@@ -17193,6 +17459,7 @@ def runninghub_provider_with_workflow_store(provider):
         for item in workflows
         if item.get("hidden") is True and runninghub_workflow_store_key(item.get("workflowId") or item.get("id"))
     }
+    hidden_ids.update(runninghub_saved_hidden_workflow_ids())
     by_id = {
         runninghub_workflow_store_key(item.get("workflowId") or item.get("id")): item
         for item in workflows
@@ -17219,6 +17486,8 @@ def runninghub_provider_workflow_config(workflow_id: str):
     key = runninghub_workflow_store_key(workflow_id)
     if not key:
         return None
+    if key in runninghub_saved_hidden_workflow_ids():
+        return None
     providers = load_api_providers()
     provider = next((item for item in providers if item.get("id") == "runninghub"), None)
     if not provider:
@@ -17227,6 +17496,8 @@ def runninghub_provider_workflow_config(workflow_id: str):
         entry_key = runninghub_workflow_store_key(entry.get("workflowId") or entry.get("id"))
         if entry_key != key:
             continue
+        if entry.get("hidden") is True:
+            return None
         cfg = {
             "workflowId": key,
             "title": entry.get("title") or key,

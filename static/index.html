@@ -799,6 +799,74 @@
             color:#052e16;
         }
 
+        .client-update-btn {
+            display:none;
+            width:44px;
+            min-height:22px;
+            padding:0 6px;
+            border-radius:999px;
+            border:1px solid var(--border);
+            background:transparent;
+            color:var(--muted);
+            align-items:center;
+            justify-content:center;
+            gap:5px;
+            font-size:9px;
+            font-weight:900;
+            line-height:1;
+            white-space:nowrap;
+            overflow:hidden;
+            cursor:pointer;
+            transition:width 0.3s var(--fluid-ease) 0.5s, background-color .2s, color .2s, border-color .2s, opacity .2s;
+        }
+        .client-update-btn.show { display:flex; }
+        .sidebar:hover .client-update-btn {
+            width:170px;
+            transition-delay:0s;
+        }
+        .client-update-btn:hover {
+            background:var(--nav-hover-bg);
+            border-color:var(--stage-border);
+            color:var(--text);
+        }
+        .client-update-btn[disabled] {
+            opacity:.68;
+            cursor:wait;
+        }
+        .client-update-btn svg {
+            width:13px;
+            height:13px;
+            flex:0 0 auto;
+        }
+        .client-update-text {
+            opacity:0;
+            max-width:0;
+            overflow:hidden;
+            white-space:nowrap;
+            transition:opacity 0.3s 0.5s, max-width 0.3s var(--fluid-ease) 0.5s;
+        }
+        .sidebar:hover .client-update-text {
+            opacity:1;
+            max-width:126px;
+            transition-delay:.15s;
+        }
+        .client-update-btn.is-checking svg {
+            animation:client-update-spin .9s linear infinite;
+        }
+        @keyframes client-update-spin { to { transform:rotate(360deg); } }
+        html.theme-dark .client-update-btn,
+        body.theme-dark .client-update-btn {
+            border-color:var(--border);
+            background:transparent;
+            color:var(--muted);
+        }
+        html.theme-dark .client-update-btn:hover,
+        body.theme-dark .client-update-btn:hover {
+            background:var(--nav-hover-bg);
+            border-color:var(--stage-border);
+            color:var(--text);
+        }
+
         @media (max-height: 760px) {
             .sidebar {
                 padding: 18px 0 14px;
@@ -850,6 +918,7 @@
             }
             .project-version-badge { width:40px; min-height:16px; font-size:8px; }
             .update-now-btn.show { min-height:22px; width:48px; }
+            .client-update-btn.show { min-height:20px; width:40px; font-size:8px; }
             .author-box {
                 height:32px;
                 flex-basis:32px;
@@ -909,6 +978,7 @@
             .side-pill svg { width:15px; height:15px; }
             .project-version-badge { width:38px; min-height:16px; font-size:8px; }
             .update-now-btn.show { width:46px; min-height:22px; font-size:8px; }
+            .client-update-btn.show { width:38px; min-height:20px; font-size:8px; }
         }
 
         .studio-modal[hidden] {
@@ -1389,7 +1459,8 @@
             transition-delay: .15s;
         }
         .sidebar.is-pinned .project-version-badge,
-        .sidebar.is-pinned .update-now-btn {
+        .sidebar.is-pinned .update-now-btn,
+        .sidebar.is-pinned .client-update-btn {
             width: 170px;
             transition-delay: 0s;
         }
@@ -1407,6 +1478,11 @@
         }
         .sidebar.is-pinned .update-now-text {
             max-width: 130px;
+            transition-delay: .15s;
+        }
+        .sidebar.is-pinned .client-update-text {
+            opacity: 1;
+            max-width: 126px;
             transition-delay: .15s;
         }
 
@@ -1446,7 +1522,8 @@
             opacity: 0;
             max-width: 0;
         }
-        .sidebar.is-collapsing:hover .project-version-badge {
+        .sidebar.is-collapsing:hover .project-version-badge,
+        .sidebar.is-collapsing:hover .client-update-btn {
             width: 44px;
         }
         .sidebar.is-collapsing:hover .project-version-compact,
@@ -1466,6 +1543,10 @@
         }
         .sidebar.is-collapsing:hover .update-now-text {
             max-width: 42px;
+        }
+        .sidebar.is-collapsing:hover .client-update-text {
+            opacity: 0;
+            max-width: 0;
         }
     </style>
 </head>
@@ -1631,6 +1712,13 @@
                     <span id="update-now-text" class="update-now-text" data-i18n="update.oneClick">一键更新</span>
                 </button>
                 <div id="project-version-badge" class="project-version-badge" title="点击检测更新" role="button" tabindex="0" onclick="checkForUpdates(true)" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();checkForUpdates(true);}">v-</div>
+                <button id="client-update-btn" class="client-update-btn" onclick="checkClientUpdate()" type="button" title="检查客户端更新" hidden>
+                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <path d="M21 12a9 9 0 1 1-2.64-6.36"></path>
+                        <path d="M21 3v6h-6"></path>
+                    </svg>
+                    <span id="client-update-text" class="client-update-text" data-i18n="clientUpdate.check">检查客户端更新</span>
+                </button>
             </div>
 
             <div class="author-box">
@@ -2072,6 +2160,7 @@
             document.querySelectorAll('iframe').forEach(frame => syncLanguageToFrame(frame));
             updateProjectUpdateTitle();
             refreshUpdateButtonText();
+            refreshClientUpdateButton();
             refreshProjectUpdateModalText();
         }
 
@@ -2104,6 +2193,7 @@
             const theme = window.StudioTheme ? window.StudioTheme.get() : 'light';
             updateThemeIcon(theme);
             if(window.StudioI18n) window.StudioI18n.apply();
+            refreshClientUpdateButton();
             broadcastLanguage();
             const sidebar = document.getElementById('studioSidebar');
             if(sidebar) {
@@ -2201,6 +2291,56 @@
                 btn.setAttribute('aria-label', text.textContent);
             }
         }
+
+        function desktopClientApi() {
+            const api = window.InfiniteCanvasDesktop;
+            return api && typeof api.checkClientUpdate === 'function' ? api : null;
+        }
+
+        function refreshClientUpdateButton() {
+            const btn = document.getElementById('client-update-btn');
+            const text = document.getElementById('client-update-text');
+            if(!btn || !text) return;
+            const api = desktopClientApi();
+            const isEn = window.StudioI18n?.lang?.() === 'en';
+            btn.hidden = !api;
+            btn.classList.toggle('show', !!api);
+            if(!api) return;
+            const checking = btn.classList.contains('is-checking');
+            text.textContent = checking ? (isEn ? 'Checking...' : '检查中...') : (isEn ? 'Client update' : '检查客户端更新');
+            btn.title = isEn ? 'Check desktop client updates' : '检查桌面客户端更新';
+            btn.setAttribute('aria-label', btn.title);
+        }
+
+        async function checkClientUpdate() {
+            const api = desktopClientApi();
+            const btn = document.getElementById('client-update-btn');
+            const isEn = window.StudioI18n?.lang?.() === 'en';
+            if(!api) {
+                alert(isEn ? 'Client update checks are only available in the desktop app.' : '客户端更新检查只在桌面版中可用。');
+                return;
+            }
+            try {
+                if(btn) {
+                    btn.disabled = true;
+                    btn.classList.add('is-checking');
+                    refreshClientUpdateButton();
+                }
+                const result = await api.checkClientUpdate();
+                if(result && result.ok === false) throw new Error(result.error || 'Update check was rejected.');
+            } catch(e) {
+                alert(isEn ? 'Client update check failed.' : '客户端更新检查失败。');
+            } finally {
+                setTimeout(() => {
+                    if(btn) {
+                        btn.disabled = false;
+                        btn.classList.remove('is-checking');
+                    }
+                    refreshClientUpdateButton();
+                }, 500);
+            }
+        }
+        window.checkClientUpdate = checkClientUpdate;
 
         function updateProjectUpdateTitle() {
             const gitBtn = document.getElementById('github-entry-btn');

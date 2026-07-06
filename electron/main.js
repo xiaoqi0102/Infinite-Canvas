@@ -1,4 +1,5 @@
-const { app, BrowserWindow, dialog, Menu, shell } = require('electron');
+const { app, BrowserWindow, dialog, ipcMain, shell } = require('electron');
+const { autoUpdater } = require('electron-updater');
 const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const net = require('node:net');
@@ -7,9 +8,15 @@ const path = require('node:path');
 const PORT = Number(process.env.INFINITE_CANVAS_PORT || 3000);
 const HOST = '127.0.0.1';
 const USER_DATA_DIR_NAME = 'InfiniteCanvas_Data';
+const CLIENT_UPDATE_CHECK_DELAY_MS = Number(process.env.INFINITE_CANVAS_UPDATE_DELAY_MS || 15000);
 
 let mainWindow = null;
 let backendProcess = null;
+let clientUpdateState = 'idle';
+let manualUpdateCheckPending = false;
+let installPromptVisible = false;
+let lastDownloadProgressLog = 0;
+let downloadedUpdateInfo = null;
 
 function appRoot() {
   return app.isPackaged ? process.resourcesPath : path.join(__dirname, '..');
@@ -72,6 +79,26 @@ function appendRuntimeLog(dataRoot, event, details = {}) {
     const line = `[${new Date().toISOString()}] ${event}${detailText ? ` ${detailText}` : ''}\n`;
     fs.appendFileSync(path.join(dataRoot, 'desktop.log'), line, 'utf8');
   } catch (_) {}
+}
+
+function appendClientUpdateLog(event, details = {}) {
+  if (!app.isPackaged) return;
+  try {
+    appendRuntimeLog(userDataRoot(), `client-update-${event}`, details);
+  } catch (_) {}
+}
+
+function dialogParentWindow() {
+  return mainWindow && !mainWindow.isDestroyed() ? mainWindow : undefined;
+}
+
+function showDesktopDialog(options) {
+  const parent = dialogParentWindow();
+  return parent ? dialog.showMessageBox(parent, options) : dialog.showMessageBox(options);
+}
+
+function updateVersion(info) {
+  return info && info.version ? String(info.version) : '';
 }
 
 function userDataRoot() {
@@ -185,6 +212,226 @@ function startBackend() {
   });
 }
 
+function installDownloadedClientUpdate(info) {
+  appendClientUpdateLog('install-now', { version: updateVersion(info) });
+  stopBackend();
+  setTimeout(() => {
+    autoUpdater.quitAndInstall(false, true);
+  }, 300);
+}
+
+async function promptInstallDownloadedClientUpdate(info) {
+  if (installPromptVisible) return;
+  installPromptVisible = true;
+  try {
+    const version = updateVersion(info);
+    const result = await showDesktopDialog({
+      type: 'info',
+      buttons: ['重启并安装', '稍后'],
+      defaultId: 0,
+      cancelId: 1,
+      title: '客户端更新已下载',
+      message: version ? `Infinite Canvas ${version} 已下载完成。` : 'Infinite Canvas 客户端更新已下载完成。',
+      detail: '重启后会安装新版客户端。用户数据保存在安装目录同级的 InfiniteCanvas_Data，不会被安装包覆盖。',
+    });
+    if (result.response === 0) {
+      installDownloadedClientUpdate(info);
+    } else {
+      appendClientUpdateLog('install-deferred', { version });
+    }
+  } finally {
+    installPromptVisible = false;
+  }
+}
+
+async function promptDownloadClientUpdate(info) {
+  const version = updateVersion(info);
+  const result = await showDesktopDialog({
+    type: 'info',
+    buttons: ['下载更新', '稍后'],
+    defaultId: 0,
+    cancelId: 1,
+    title: '发现客户端更新',
+    message: version ? `发现 Infinite Canvas 客户端新版本 ${version}。` : '发现 Infinite Canvas 客户端新版本。',
+    detail: '这会从 GitHub Release 下载桌面安装包。网页里的“一键更新”仍保留用于源项目 main.py、VERSION 和 static 更新提醒。',
+  });
+  if (result.response !== 0) {
+    clientUpdateState = 'idle';
+    appendClientUpdateLog('download-deferred', { version });
+    return;
+  }
+  clientUpdateState = 'downloading';
+  lastDownloadProgressLog = 0;
+  appendClientUpdateLog('download-start', { version });
+  try {
+    await autoUpdater.downloadUpdate();
+  } catch (error) {
+    clientUpdateState = 'idle';
+    appendClientUpdateLog('download-error', { message: error.message });
+    await showDesktopDialog({
+      type: 'error',
+      buttons: ['知道了'],
+      title: '客户端下载失败',
+      message: '无法下载客户端更新。',
+      detail: error.message,
+    });
+  }
+}
+
+function configureClientUpdater() {
+  autoUpdater.autoDownload = false;
+  autoUpdater.autoInstallOnAppQuit = false;
+
+  autoUpdater.on('checking-for-update', () => {
+    appendClientUpdateLog('checking-for-update', { version: app.getVersion() });
+  });
+
+  autoUpdater.on('update-available', (info) => {
+    clientUpdateState = 'prompting-download';
+    manualUpdateCheckPending = false;
+    appendClientUpdateLog('update-available', { version: updateVersion(info) });
+    promptDownloadClientUpdate(info).catch((error) => {
+      clientUpdateState = 'idle';
+      appendClientUpdateLog('prompt-error', { message: error.message });
+    });
+  });
+
+  autoUpdater.on('update-not-available', (info) => {
+    clientUpdateState = 'idle';
+    appendClientUpdateLog('update-not-available', { version: updateVersion(info) });
+    if (manualUpdateCheckPending) {
+      showDesktopDialog({
+        type: 'info',
+        buttons: ['知道了'],
+        title: '客户端已是最新',
+        message: '当前客户端已是最新版本。',
+        detail: `当前版本：${app.getVersion()}`,
+      }).catch(() => {});
+    }
+    manualUpdateCheckPending = false;
+  });
+
+  autoUpdater.on('download-progress', (progress) => {
+    const now = Date.now();
+    const percent = Math.round(progress.percent || 0);
+    if (percent >= 100 || now - lastDownloadProgressLog > 30000) {
+      lastDownloadProgressLog = now;
+      appendClientUpdateLog('download-progress', {
+        percent,
+        transferred: progress.transferred,
+        total: progress.total,
+      });
+    }
+  });
+
+  autoUpdater.on('update-downloaded', (info) => {
+    clientUpdateState = 'downloaded';
+    manualUpdateCheckPending = false;
+    downloadedUpdateInfo = info;
+    appendClientUpdateLog('update-downloaded', { version: updateVersion(info) });
+    promptInstallDownloadedClientUpdate(info).catch((error) => {
+      appendClientUpdateLog('install-prompt-error', { message: error.message });
+    });
+  });
+
+  autoUpdater.on('error', (error) => {
+    const wasManual = manualUpdateCheckPending;
+    clientUpdateState = 'idle';
+    manualUpdateCheckPending = false;
+    appendClientUpdateLog('update-error', { message: error.message });
+    if (wasManual) {
+      showDesktopDialog({
+        type: 'error',
+        buttons: ['知道了'],
+        title: '客户端更新检查失败',
+        message: '无法检查客户端更新。',
+        detail: error.message,
+      }).catch(() => {});
+    }
+  });
+}
+
+function checkForClientUpdates(options = {}) {
+  const manual = !!options.manual;
+  if (!app.isPackaged) {
+    appendClientUpdateLog('skip-dev-mode', { manual });
+    if (manual) {
+      showDesktopDialog({
+        type: 'info',
+        buttons: ['知道了'],
+        title: '开发模式不检查客户端更新',
+        message: '客户端自动更新只在打包安装版中启用。',
+      }).catch(() => {});
+    }
+    return;
+  }
+
+  if (clientUpdateState === 'checking') {
+    manualUpdateCheckPending = manualUpdateCheckPending || manual;
+    return;
+  }
+  if (clientUpdateState === 'prompting-download') {
+    return;
+  }
+  if (clientUpdateState === 'downloading') {
+    if (manual) {
+      showDesktopDialog({
+        type: 'info',
+        buttons: ['知道了'],
+        title: '客户端更新下载中',
+        message: '客户端更新正在下载，请稍候。',
+      }).catch(() => {});
+    }
+    return;
+  }
+  if (clientUpdateState === 'downloaded') {
+    promptInstallDownloadedClientUpdate(downloadedUpdateInfo || {}).catch(() => {});
+    return;
+  }
+
+  clientUpdateState = 'checking';
+  manualUpdateCheckPending = manual;
+  autoUpdater.checkForUpdates().catch((error) => {
+    const wasManual = manualUpdateCheckPending;
+    clientUpdateState = 'idle';
+    manualUpdateCheckPending = false;
+    appendClientUpdateLog('check-error', { message: error.message });
+    if (wasManual) {
+      showDesktopDialog({
+        type: 'error',
+        buttons: ['知道了'],
+        title: '客户端更新检查失败',
+        message: '无法检查客户端更新。',
+        detail: error.message,
+      }).catch(() => {});
+    }
+  });
+}
+
+function scheduleClientUpdateCheck() {
+  if (!app.isPackaged) {
+    appendClientUpdateLog('disabled', { reason: 'not-packaged' });
+    return;
+  }
+  setTimeout(() => checkForClientUpdates({ manual: false }), CLIENT_UPDATE_CHECK_DELAY_MS);
+}
+
+function registerClientUpdateIpc() {
+  ipcMain.handle('client-update:check', (event) => {
+    if (!mainWindow || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents) {
+      appendClientUpdateLog('ipc-denied');
+      return { ok: false, error: 'unauthorized' };
+    }
+    checkForClientUpdates({ manual: true });
+    return {
+      ok: true,
+      packaged: app.isPackaged,
+      state: clientUpdateState,
+      version: app.getVersion(),
+    };
+  });
+}
+
 async function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1440,
@@ -196,6 +443,7 @@ async function createWindow() {
     title: 'Infinite Canvas',
     icon: path.join(__dirname, '..', 'static', 'images', 'logo.png'),
     webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
     },
@@ -218,10 +466,12 @@ function stopBackend() {
 
 app.whenReady().then(async () => {
   try {
-    Menu.setApplicationMenu(null);
+    configureClientUpdater();
+    registerClientUpdateIpc();
     startBackend();
     await waitForServer();
     await createWindow();
+    scheduleClientUpdateCheck();
   } catch (error) {
     dialog.showErrorBox('Infinite Canvas 启动失败', error.message);
     app.quit();

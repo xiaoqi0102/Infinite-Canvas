@@ -1,11 +1,12 @@
 # 后续源项目更新合并指导
 
-本文档用于后续从源项目 `upstream/main` 合并更新时，保护本仓库已有的本地改动。重点保护四组补丁集：
+本文档用于后续从源项目 `upstream/main` 合并更新时，保护本仓库已有的本地改动。重点保护五组补丁集：
 
 1. 视频生成接口与轮询任务化改动，详见 `VIDEO_GENERATION_POLLING_CHANGES.md`。
 2. WebDAV 云同步与 API 配置同步改动，详见 `WEBDAV_CLOUD_SYNC_CHANGES.md`。
 3. Electron 客户端用户数据持久化改动：所有 API 配置、画布、素材、输出、历史、自定义工作流等用户文件必须写入安装目录同级 `InfiniteCanvas_Data`，不能写入安装目录内部。
 4. Electron 客户端构建版本命名改动：Windows 安装包文件名后缀必须来自根目录 `VERSION`，不能回退到旧的 `package.json.version`。
+5. Electron 客户端安装包级自动更新改动：打包客户端从 GitHub Release 检查、下载并安装新版本；网页“一键更新”仍保留为源项目更新提醒。
 
 本文件不是用户使用说明，而是合并、解冲突、验证时的工程操作清单。
 
@@ -236,6 +237,43 @@ git status
 - 不要把 `artifactName` 改回带空格的安装包名，除非同时验证 `latest.yml` 也引用真实存在的同名文件。
 - 如果 `VERSION` 改成非 `MAJOR.MINOR.PATCH` 数字格式，必须先调整同步脚本规则，再打包。
 
+### 2.5 桌面端安装包级自动更新补丁
+
+目标：打包版 Electron 客户端通过 GitHub Release 的 `latest.yml`、`.exe` 和 `.blockmap` 检查、下载并安装新客户端；网页内“一键更新”仍用于源项目 `main.py`、`VERSION`、`static` 更新提醒，不改成安装包更新。
+
+关键文件：
+
+- `electron/main.js`
+- `electron/preload.js`
+- `static/index.html`
+- `static/js/i18n/common.js`
+- `package.json`
+- `package-lock.json`
+- `ELECTRON_DESKTOP.md`
+
+必须保留的客户端更新规则：
+
+- `electron-updater` 必须作为运行时依赖存在。
+- `build.publish` 必须指向 `provider=github`、`owner=xiaoqi0102`、`repo=Infinite-Canvas`。
+- Electron 自动更新只在 `app.isPackaged` 时启用，开发模式不检查。
+- 自动检查应在窗口打开后延迟执行，不阻塞后端启动和首屏。
+- 手动入口应保留在网页左侧底部版本号下方的 `检查客户端更新` 按钮中，通过 `electron/preload.js` 暴露的窄 IPC 调用 Electron 主进程。
+- 不要把客户端更新入口放回 Electron 原生菜单或 Windows 托盘菜单；用户入口应在 `static/index.html` 侧栏底部。
+- 不要复用网页里的 `update-now-btn`；它仍然只服务源项目更新提醒。
+- `update-available` 时先询问用户是否下载；`update-downloaded` 后再询问是否重启并安装。
+- 重启安装前必须调用 `stopBackend()`，再调用 `autoUpdater.quitAndInstall()`。
+- 更新事件必须写入当前 `InfiniteCanvas_Data/desktop.log`，事件名前缀为 `client-update-`。
+- `BrowserWindow.webPreferences` 必须保留 `preload: path.join(__dirname, 'preload.js')`、`contextIsolation: true` 和 `nodeIntegration: false`。
+- preload 只能暴露 `window.InfiniteCanvasDesktop.checkClientUpdate()` 这类窄接口，不要把通用 `ipcRenderer` 暴露给网页。
+
+合并时特别注意：
+
+- 不要把 `static/index.html` 的“一键更新”改成客户端安装包更新；它是源项目更新提醒。
+- 不要删除 `static/index.html` 左侧底部 `client-update-btn`，它应位于 `project-version-badge` 之后、`author-box` 之前。
+- 不要删除 `autoUpdater.autoDownload = false`，否则会绕过“下载更新 / 稍后”的用户确认。
+- 不要让客户端更新写入或覆盖 `InfiniteCanvas_Data`。
+- 发布新客户端时必须上传 `Infinite-Canvas-Setup-<VERSION>.exe`、`.blockmap` 和 `latest.yml` 到同一个 GitHub Release tag。
+
 ## 3. 高风险冲突文件处理
 
 ### 3.1 `main.py`
@@ -351,6 +389,7 @@ cloud-sync
 保留原则：
 
 - 保留侧边栏 “云同步” 按钮。
+- 保留侧边栏底部版本号下方的 `检查客户端更新` 按钮；它是桌面安装包更新入口，不是源项目“一键更新”。
 - 保留 `frame-cloud-sync`。
 - 保留 `PAGE_IDS` 中的 `cloud-sync`。
 - 保留更多设置展开逻辑。
@@ -362,6 +401,8 @@ cloud-sync
 cloud-sync
 frame-cloud-sync
 PAGE_IDS
+client-update-btn
+checkClientUpdate
 ```
 
 ### 3.6 静态 HTML 版本号
@@ -385,6 +426,8 @@ PAGE_IDS
 - `migrateLegacyInstallData()` 必须从旧的 `path.join(installRoot(), USER_DATA_DIR_NAME)` 非覆盖补拷。
 - `appendRuntimeLog()` 必须写入当前数据目录下的 `desktop.log`。
 - 后端环境变量必须包含 `INFINITE_CANVAS_USER_DATA_DIR`、兼容的 `INFINITE_CANVAS_BASE_DIR`、`INFINITE_CANVAS_SKIP_STATIC_SYNC=1`。
+- `ipcMain.handle('client-update:check', ...)` 必须保留，且应校验调用方来自当前主窗口后再触发 `checkForClientUpdates({ manual: true })`。
+- `BrowserWindow` 必须加载 `electron/preload.js`，不要关闭 `contextIsolation` 或打开 `nodeIntegration`。
 
 检查关键词：
 
@@ -397,6 +440,8 @@ appendRuntimeLog
 desktop.log
 INFINITE_CANVAS_USER_DATA_DIR
 INFINITE_CANVAS_SKIP_STATIC_SYNC
+client-update:check
+preload.js
 ```
 
 ### 3.8 `package.json`
@@ -409,6 +454,8 @@ INFINITE_CANVAS_SKIP_STATIC_SYNC
 - `build:win` / `pack:win` 必须先执行 `npm run sync:desktop-version`。
 - `build:backend` 必须执行 `node scripts/build-backend.cjs`，确保 PyInstaller 使用项目 venv。
 - `build.win.artifactName` 必须由 `scripts/sync-electron-version.cjs` 写入并保留原始 `VERSION` 后缀。
+- `dependencies.electron-updater` 必须存在。
+- `build.publish` 必须指向 `xiaoqi0102/Infinite-Canvas` 的 GitHub Release。
 - `build.nsis.deleteAppDataOnUninstall` 必须是 `false`。
 - `allowToChangeInstallationDirectory` 必须保留为 `true`，用户可以继续选择安装位置。
 - `extraResources` 必须继续把 `dist/infinite-canvas-backend` 打进 `resources/backend`。
@@ -424,6 +471,8 @@ dist/infinite-canvas-backend
 sync:desktop-version
 build-backend.cjs
 artifactName
+electron-updater
+publish
 ```
 
 ### 3.9 `ELECTRON_DESKTOP.md`
@@ -435,6 +484,8 @@ artifactName
 - 文档必须说明安装包文件名后缀来自根目录 `VERSION`。
 - 文档必须说明 `npm run sync:desktop-version` 会同步 Electron 元数据和 `build.win.artifactName`。
 - 文档必须说明后端打包通过 `scripts/build-backend.cjs` 使用项目 `venv`，避免漏打 `httpx` 等 Python 依赖。
+- 文档必须说明客户端安装包级自动更新依赖 GitHub Release 的 `.exe`、`.blockmap` 和 `latest.yml`。
+- 文档必须说明网页“一键更新”仍是源项目更新提醒，不是安装包更新。
 - 示例应保持类似 `VERSION=2026.07.6` -> `release/Infinite-Canvas-Setup-2026.07.6.exe`。
 - 文档必须明确 `InfiniteCanvas_Data` 位于安装目录同级，不在安装目录内部。
 - 示例应保持类似 `D:\Apps\Infinite Canvas` -> `D:\Apps\InfiniteCanvas_Data`。
@@ -524,9 +575,10 @@ node --check scripts\sync-electron-version.cjs
 npm run sync:desktop-version
 npm run build:backend
 node -e "const p=require('./package.json'); if(p.build.nsis.deleteAppDataOnUninstall !== false) process.exit(1); console.log('nsis uninstall keeps app data')"
+node -e "const p=require('./package.json'); if(!p.dependencies || !p.dependencies['electron-updater']) process.exit(1); const pub=Array.isArray(p.build.publish)?p.build.publish[0]:p.build.publish; if(!pub || pub.provider!=='github' || pub.owner!=='xiaoqi0102' || pub.repo!=='Infinite-Canvas') process.exit(1); console.log('electron updater publish config ok')"
 $v = (Get-Content -Raw VERSION).Trim()
 node -e "const fs=require('fs'); const p=require('./package.json'); const v=fs.readFileSync('VERSION','utf8').trim(); if(!p.build.win.artifactName.includes(v)) process.exit(1); console.log('installer suffix follows VERSION')"
-Select-String -Path electron\main.js,ELECTRON_DESKTOP.md,package.json,scripts\build-backend.cjs,scripts\sync-electron-version.cjs -Pattern "InfiniteCanvas_Data|INFINITE_CANVAS_USER_DATA_DIR|deleteAppDataOnUninstall|desktop.log|sync:desktop-version|build-backend|artifactName|httpx"
+Select-String -Path electron\main.js,ELECTRON_DESKTOP.md,package.json,scripts\build-backend.cjs,scripts\sync-electron-version.cjs -Pattern "InfiniteCanvas_Data|INFINITE_CANVAS_USER_DATA_DIR|deleteAppDataOnUninstall|desktop.log|sync:desktop-version|build-backend|artifactName|httpx|electron-updater|autoUpdater|client-update"
 ```
 
 ## 6. 手工功能验证清单
@@ -663,6 +715,7 @@ git config core.excludesfile "E:/Infinite-Canvas/.git/info/exclude"
 - 打包版数据目录设计仍是安装目录同级，不是安装目录内部。
 - Windows 安装包文件名后缀与根目录 `VERSION` 一致。
 - 后端打包使用项目 `venv`，不是全局 `pyinstaller`。
+- Electron 安装包级自动更新仍只在打包版启用，并保留网页“一键更新”的源项目更新用途。
 - `ELECTRON_DESKTOP.md` 已同步任何新的桌面端数据目录策略。
 
 完成后记录本次合并中遇到的新坑，追加到本文档。

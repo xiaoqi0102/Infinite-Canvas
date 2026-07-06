@@ -21,6 +21,14 @@
     "directories": {
       "output": "release"
     },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "xiaoqi0102",
+        "repo": "Infinite-Canvas",
+        "releaseType": "release"
+      }
+    ],
     "files": [
       "electron/**/*",
       "static/images/logo.png"
@@ -51,5 +59,8 @@
       "createStartMenuShortcut": true,
       "shortcutName": "Infinite Canvas"
     }
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.9"
   }
 }

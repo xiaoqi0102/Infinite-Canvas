@@ -23,6 +23,7 @@
         "update.openProject": { zh: "打开项目", en: "Open Project" },
         "update.oneClick": { zh: "一键更新", en: "Update" },
         "update.versionLine": { zh: "本地 {local} · 最新 {remote}", en: "Local {local} · Latest {remote}" },
+        "clientUpdate.check": { zh: "检查客户端更新", en: "Client update" },
         "nav.textToImage": { zh: "文生图", en: "Text to Image" },
         "nav.localTools": { zh: "本地功能", en: "Local Tools" },
         "nav.enhance": { zh: "细节增强", en: "Enhance" },

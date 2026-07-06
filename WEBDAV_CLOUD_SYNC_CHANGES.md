@@ -415,7 +415,7 @@ queueCloudSyncAutoUpload();
 
 ### 6.3 手动导入/导出
 
-云同步页下方新增“手动导入导出”模块：
+云同步页顶部新增“手动导入导出”模块：
 
 - `导出 API 备份`：调用 `/api/cloud-sync/export`，下载当前本机 API 设置快照。
 - `选择备份 JSON`：读取用户选择的 JSON 文件，二次确认后调用 `/api/cloud-sync/import`。

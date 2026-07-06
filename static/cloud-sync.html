@@ -19,9 +19,9 @@
     <script src="/static/vendor/js/tailwindcss-cdn.js?v=2026.07.5.1783050005"></script>
     <script src="/static/vendor/js/lucide.js?v=2026.07.5.1783050005"></script>
     <script src="/static/js/theme.js?v=2026.07.5.1783301528"></script>
-    <script src="/static/js/i18n.js?v=2026.07.6.1783314000"></script>
+    <script src="/static/js/i18n.js?v=2026.07.5.1783326005"></script>
     <link rel="stylesheet" href="/static/css/theme.css?v=2026.07.5.1783050005">
-    <link rel="stylesheet" href="/static/css/api-settings.css?v=2026.07.6.1783314000">
+    <link rel="stylesheet" href="/static/css/api-settings.css?v=2026.07.5.1783326878">
     <style>
         .cloud-sync-page .wrap { max-width:920px; }
         .cloud-sync-page .page-head .sub { max-width:680px; }
@@ -39,6 +39,26 @@
                     <div class="sub" data-i18n="api.cloudSyncDesc">通过 WebDAV 在多设备间同步 API 平台、模型列表和 Key。</div>
                 </div>
             </header>
+
+            <section class="block cloud-sync-manual-block">
+                <div class="block-head">
+                    <div>
+                        <div class="block-title" data-i18n="api.cloudSyncManualTitle">手动导入导出</div>
+                        <div class="block-desc" data-i18n="api.cloudSyncManualDesc">导出本机 API 配置备份，或导入备份文件恢复到本机。</div>
+                    </div>
+                </div>
+                <input id="cloudSyncImportFile" class="cloud-sync-import-input" type="file" accept="application/json,.json">
+                <div class="cloud-sync-manual-card">
+                    <button id="cloudSyncImportBtn" class="cloud-sync-file-btn" type="button" onclick="chooseCloudSyncImport()">
+                        <i data-lucide="folder-open" class="w-4 h-4"></i>
+                        <span data-i18n="api.cloudSyncManualImport">选择备份 JSON</span>
+                    </button>
+                    <button id="cloudSyncExportBtn" class="cloud-sync-file-btn" type="button" onclick="exportCloudSyncFile()">
+                        <i data-lucide="download" class="w-4 h-4"></i>
+                        <span data-i18n="api.cloudSyncManualExport">导出 API 备份</span>
+                    </button>
+                </div>
+            </section>
 
             <section id="cloudSyncBlock" class="block cloud-sync-block">
                 <div class="block-head">
@@ -104,28 +124,9 @@
                 </div>
             </section>
 
-            <section class="block cloud-sync-manual-block">
-                <div class="block-head">
-                    <div>
-                        <div class="block-title" data-i18n="api.cloudSyncManualTitle">手动导入导出</div>
-                        <div class="block-desc" data-i18n="api.cloudSyncManualDesc">导出本机 API 配置备份，或导入备份文件恢复到本机。</div>
-                    </div>
-                </div>
-                <input id="cloudSyncImportFile" class="cloud-sync-import-input" type="file" accept="application/json,.json">
-                <div class="cloud-sync-manual-card">
-                    <button id="cloudSyncImportBtn" class="cloud-sync-file-btn" type="button" onclick="chooseCloudSyncImport()">
-                        <i data-lucide="folder-open" class="w-4 h-4"></i>
-                        <span data-i18n="api.cloudSyncManualImport">选择备份 JSON</span>
-                    </button>
-                    <button id="cloudSyncExportBtn" class="cloud-sync-file-btn" type="button" onclick="exportCloudSyncFile()">
-                        <i data-lucide="download" class="w-4 h-4"></i>
-                        <span data-i18n="api.cloudSyncManualExport">导出 API 备份</span>
-                    </button>
-                </div>
-            </section>
         </div>
     </div>
 
-    <script src="/static/js/cloud-sync.js?v=2026.07.6.1783314000"></script>
+    <script src="/static/js/cloud-sync.js?v=2026.07.5.1783326156"></script>
 </body>
 </html>

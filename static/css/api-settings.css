@@ -170,11 +170,11 @@ body.studio-theme-dark .cloud-sync-warning,
 html.studio-theme-dark body .cloud-sync-warning { background:rgba(154,52,18,.16); border-color:rgba(251,146,60,.26); color:#fdba74; }
 .cloud-sync-actions { grid-column:1/-1; display:flex; flex-wrap:wrap; gap:8px; align-items:center; padding-top:2px; }
 .cloud-sync-actions .action-btn[disabled] { opacity:.58; cursor:not-allowed; transform:none; box-shadow:none; }
-.cloud-sync-manual-block { margin-top:18px; }
+.cloud-sync-manual-block { margin:0 0 18px; }
 .cloud-sync-import-input { display:none; }
 .cloud-sync-manual-card { display:grid; grid-template-columns:1fr 1fr; gap:14px; padding:24px; border:1px solid var(--line); border-radius:14px; background:var(--soft); }
-.cloud-sync-file-btn { min-width:0; min-height:44px; padding:0 18px; border-radius:12px; border:1px solid rgba(37,99,235,.12); background:#1683f7; color:#fff; display:inline-flex; align-items:center; justify-content:center; gap:8px; font-size:13px; line-height:1.2; font-weight:900; transition:all .16s ease; box-shadow:0 12px 24px rgba(22,131,247,.18); }
-.cloud-sync-file-btn:hover { background:#0f73df; transform:translateY(-1px); box-shadow:0 16px 28px rgba(22,131,247,.24); }
+.cloud-sync-file-btn { min-width:0; min-height:44px; padding:0 18px; border-radius:10px; border:1px solid var(--line); background:var(--panel); color:var(--muted); display:inline-flex; align-items:center; justify-content:center; gap:8px; font-size:12px; line-height:1.2; font-weight:800; transition:all .15s ease; box-shadow:none; }
+.cloud-sync-file-btn:hover { border-color:var(--text); background:var(--soft); color:var(--text); }
 .cloud-sync-file-btn:disabled { opacity:.58; cursor:not-allowed; transform:none; box-shadow:none; }
 .cloud-sync-file-btn i,
 .cloud-sync-file-btn svg { flex:0 0 auto; color:currentColor; }

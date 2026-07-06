@@ -1,9 +1,10 @@
 # 后续源项目更新合并指导
 
-本文档用于后续从源项目 `upstream/main` 合并更新时，保护本仓库已有的本地改动。重点保护两组补丁集：
+本文档用于后续从源项目 `upstream/main` 合并更新时，保护本仓库已有的本地改动。重点保护三组补丁集：
 
 1. 视频生成接口与轮询任务化改动，详见 `VIDEO_GENERATION_POLLING_CHANGES.md`。
 2. WebDAV 云同步与 API 配置同步改动，详见 `WEBDAV_CLOUD_SYNC_CHANGES.md`。
+3. Electron 客户端用户数据持久化改动：所有 API 配置、画布、素材、输出、历史、自定义工作流等用户文件必须写入安装目录同级 `InfiniteCanvas_Data`，不能写入安装目录内部。
 
 本文件不是用户使用说明，而是合并、解冲突、验证时的工程操作清单。
 
@@ -149,18 +150,67 @@ git status
 - 上游如果改了 provider schema，导入云同步包后仍要走 `normalize_provider()`、`merge_default_api_providers()`、`save_api_providers()`、`update_env_values()`、`reload_env_globals()` 这些路径。
 - 自动上传只在保存 API 配置成功后触发，失败只提示，不回滚本地保存。
 
+### 2.3 桌面端用户数据持久化补丁
+
+目标：打包客户端更新、覆盖安装、卸载重装时，用户文件不被安装目录覆盖或删除。所有用户可写数据进入安装目录同级 `InfiniteCanvas_Data`，应用资源、静态文件、内置工作流和更新目标仍留在应用根目录。
+
+关键文件：
+
+- `main.py`
+- `electron/main.js`
+- `package.json`
+- `ELECTRON_DESKTOP.md`
+
+必须保留的数据目录策略：
+
+- 打包后若安装在 `D:\Apps\Infinite Canvas`，用户数据目录应为 `D:\Apps\InfiniteCanvas_Data`。
+- 不能使用 `D:\Apps\Infinite Canvas\InfiniteCanvas_Data` 作为主目录，因为它仍在安装目录内部。
+- 如果安装目录父级不可写，Electron 才回退到系统 userData 下的 `InfiniteCanvas_Data`。
+- Electron 必须通过 `INFINITE_CANVAS_USER_DATA_DIR` 把最终目录传给后端。
+- `INFINITE_CANVAS_BASE_DIR` 可继续传同一个值作为兼容别名。
+- 打包版必须设置 `INFINITE_CANVAS_SKIP_STATIC_SYNC=1`，避免启动时写静态资源。
+
+必须保留的用户数据边界：
+
+- `BASE_DIR` / `APP_ROOT` 仍代表应用根目录。
+- `STATIC_DIR` 和内置 `WORKFLOW_DIR` 仍从应用根目录派生。
+- `USER_DATA_ROOT` 代表用户数据根目录。
+- `API_ENV_FILE`、`DATA_DIR`、`ASSETS_DIR`、`OUTPUT_DIR`、`HISTORY_FILE`、`GLOBAL_CONFIG_FILE` 必须从 `USER_DATA_ROOT` 派生。
+- 自定义工作流写入 `USER_WORKFLOW_DIR` / `CUSTOM_WORKFLOW_DIR`，内置工作流继续从应用根目录读取。
+- `shared_folders` 的相对路径基准应是 `USER_DATA_ROOT`，不要退回 `BASE_DIR`。
+
+必须保留的迁移与诊断能力：
+
+- 后端启动前运行 `migrate_user_data_from_app_root()`，从旧应用根目录补拷 `API/`、`data/`、`assets/`、`output/`、`history.json`、`global_config.json`、`workflows/custom`、`workflows/自定义`。
+- 迁移只补缺，不覆盖目标已有文件。
+- 迁移成功写 `.migration_complete.json`；迁移失败写 `.migration_failed.json`，以便下次继续尝试。
+- Electron 启动时从旧的安装目录内部 `InfiniteCanvas_Data` 非覆盖补拷到新的同级目录。
+- Electron 启动时把诊断日志写到当前 `InfiniteCanvas_Data/desktop.log`，至少记录数据目录、安装/资源路径、后端命令、端口、退出码和启动错误。
+- `package.json` 的 NSIS 配置必须保留 `deleteAppDataOnUninstall: false`。
+
+合并时特别注意：
+
+- 不要把 `BASE_DIR` 整体改成用户数据目录；这会导致静态资源、内置工作流、自更新目标混在用户数据里。
+- 不要把 `safe_update_target()`、`safe_static_dir()` 等更新目标改到 `USER_DATA_ROOT`。
+- 不要让 `os.makedirs(STATIC_DIR)` 或 `os.makedirs(WORKFLOW_DIR)` 在打包版写应用资源目录。
+- 不要把自定义工作流上传回应用根目录的 `workflows/custom`。
+- 不要删掉 `desktop.log` 诊断日志；打包版 `stdio` 通常不可见，这个日志是用户现场排查的第一入口。
+
 ## 3. 高风险冲突文件处理
 
 ### 3.1 `main.py`
 
-这是最高风险文件。上游经常修改模型、平台、任务、接口相关逻辑，本地又在同一文件里维护视频任务化和 WebDAV 云同步。
+这是最高风险文件。上游经常修改模型、平台、任务、接口相关逻辑，本地又在同一文件里维护视频任务化、WebDAV 云同步和用户数据目录拆分。
 
 保留原则：
 
 - 合入上游新增 provider、RunningHub、CLI、模型列表等修复。
 - 同时保留视频任务化接口和云同步接口。
+- 同时保留应用根目录与用户数据根目录的拆分：`APP_ROOT/BASE_DIR` 用于应用资源，`USER_DATA_ROOT` 用于用户文件。
 - 如果上游改了 `normalize_provider()`，必须确认 `video_request_mode`、`rh_apps`、`rh_workflows`、`video_models`、云同步导入的 provider 字段没有丢。
 - 如果上游改了异步图片或视频任务逻辑，必须确认本地视频任务持久化和恢复仍在。
+- 如果上游改了路径常量，必须确认 `API/.env`、`data/`、`assets/`、`output/`、`history.json`、`global_config.json` 没有重新指回 `BASE_DIR`。
+- 如果上游改了工作流管理，必须确认内置工作流从 `WORKFLOW_DIR` 读取，自定义工作流从 `USER_WORKFLOW_DIR` 写入。
 
 检查关键词：
 
@@ -175,6 +225,12 @@ cloud-sync
 CLOUD_SYNC_SCHEMA
 apply_cloud_sync_payload
 public_cloud_sync_config
+USER_DATA_ROOT
+INFINITE_CANVAS_USER_DATA_DIR
+migrate_user_data_from_app_root
+USER_WORKFLOW_DIR
+workflow_path_for_write
+INFINITE_CANVAS_SKIP_STATIC_SYNC
 ```
 
 ### 3.2 `static/js/canvas.js`
@@ -276,14 +332,76 @@ PAGE_IDS
 - 解决冲突后，相关 HTML、JS、CSS、i18n 的 `?v=` 应统一刷新到当前版本。
 - 不要因为版本号冲突删掉本地 iframe 或脚本引用。
 
+### 3.7 `electron/main.js`
+
+保护桌面端用户数据目录选择、旧目录补拷和运行日志。
+
+保留原则：
+
+- `USER_DATA_DIR_NAME` 必须是 `InfiniteCanvas_Data`。
+- `installRoot()` 打包后应返回 `path.dirname(process.resourcesPath)`。
+- `userDataRoot()` 打包后优先返回 `path.join(path.dirname(installRoot()), USER_DATA_DIR_NAME)`。
+- 只有同级目录不可写时，才回退到 `path.join(app.getPath('userData'), USER_DATA_DIR_NAME)`。
+- `migrateLegacyInstallData()` 必须从旧的 `path.join(installRoot(), USER_DATA_DIR_NAME)` 非覆盖补拷。
+- `appendRuntimeLog()` 必须写入当前数据目录下的 `desktop.log`。
+- 后端环境变量必须包含 `INFINITE_CANVAS_USER_DATA_DIR`、兼容的 `INFINITE_CANVAS_BASE_DIR`、`INFINITE_CANVAS_SKIP_STATIC_SYNC=1`。
+
+检查关键词：
+
+```text
+USER_DATA_DIR_NAME
+InfiniteCanvas_Data
+installSiblingDataDir
+migrateLegacyInstallData
+appendRuntimeLog
+desktop.log
+INFINITE_CANVAS_USER_DATA_DIR
+INFINITE_CANVAS_SKIP_STATIC_SYNC
+```
+
+### 3.8 `package.json`
+
+保护打包和卸载行为。
+
+保留原则：
+
+- `build.nsis.deleteAppDataOnUninstall` 必须是 `false`。
+- `allowToChangeInstallationDirectory` 必须保留为 `true`，用户可以继续选择安装位置。
+- `extraResources` 必须继续把 `dist/infinite-canvas-backend` 打进 `resources/backend`。
+- 不要把 `InfiniteCanvas_Data` 放进 `files` 或 `extraResources`，它是运行时用户数据目录，不是打包资源。
+
+检查关键词：
+
+```text
+deleteAppDataOnUninstall
+allowToChangeInstallationDirectory
+extraResources
+dist/infinite-canvas-backend
+```
+
+### 3.9 `ELECTRON_DESKTOP.md`
+
+保护桌面端运行数据说明。
+
+保留原则：
+
+- 文档必须明确 `InfiniteCanvas_Data` 位于安装目录同级，不在安装目录内部。
+- 示例应保持类似 `D:\Apps\Infinite Canvas` -> `D:\Apps\InfiniteCanvas_Data`。
+- 文档必须说明系统 userData 回退条件。
+- 文档必须说明旧安装目录内部 `InfiniteCanvas_Data` 会非覆盖补拷。
+- 文档必须说明 `desktop.log` 的位置和用途。
+- 文档必须说明 NSIS `deleteAppDataOnUninstall: false`。
+
 ## 4. 推荐解冲突顺序
 
-1. 先解 `main.py`，确认后端接口和数据结构完整。
-2. 再解 `static/js/api-settings.js` 与 `static/api-settings.html`，确认配置字段仍会保存。
-3. 再解 `static/js/canvas.js`，确认普通画布视频 pending 逻辑。
-4. 再解 `static/js/smart-canvas.js`，确认智能画布视频和 RunningHub 模型 API 的分支选择。
-5. 再解 `static/index.html`，确认云同步入口不丢。
-6. 最后处理静态 HTML 的 `?v=` 版本号和样式冲突。
+1. 先解 `main.py`，确认后端接口、数据结构、用户数据根目录拆分完整。
+2. 再解 `electron/main.js`，确认打包版数据目录仍是安装目录同级 `InfiniteCanvas_Data`。
+3. 再解 `package.json`，确认 NSIS 卸载和打包资源策略不变。
+4. 再解 `static/js/api-settings.js` 与 `static/api-settings.html`，确认配置字段仍会保存。
+5. 再解 `static/js/canvas.js`，确认普通画布视频 pending 逻辑。
+6. 再解 `static/js/smart-canvas.js`，确认智能画布视频和 RunningHub 模型 API 的分支选择。
+7. 再解 `static/index.html`，确认云同步入口不丢。
+8. 最后处理 `ELECTRON_DESKTOP.md`、静态 HTML 的 `?v=` 版本号和样式冲突。
 
 ## 5. 合并后自动检查
 
@@ -335,6 +453,25 @@ Select-String -Path main.py,static\*.html,static\js\*.js,static\js\i18n\*.js,ele
 jianguoyun infinite-canvas-sync/default/api-settings.json False
 ```
 
+用户数据目录轻量检查：
+
+```powershell
+$env:INFINITE_CANVAS_USER_DATA_DIR = Join-Path $env:TEMP ("InfiniteCanvas_Data_merge_check_" + [guid]::NewGuid().ToString("N"))
+New-Item -ItemType Directory -Path $env:INFINITE_CANVAS_USER_DATA_DIR -Force | Out-Null
+Set-Content -LiteralPath (Join-Path $env:INFINITE_CANVAS_USER_DATA_DIR ".migration_complete.json") -Value "{}" -Encoding UTF8
+.\venv\Scripts\python.exe -c "import os, main; assert main.USER_DATA_ROOT == os.environ['INFINITE_CANVAS_USER_DATA_DIR']; assert main.DATA_DIR.startswith(main.USER_DATA_ROOT); assert main.API_ENV_FILE.startswith(main.USER_DATA_ROOT); assert main.STATIC_DIR.startswith(main.APP_ROOT); assert main.WORKFLOW_DIR.startswith(main.APP_ROOT); assert main.USER_WORKFLOW_DIR.startswith(main.USER_DATA_ROOT); print('user data paths ok')"
+Remove-Item -LiteralPath $env:INFINITE_CANVAS_USER_DATA_DIR -Recurse -Force
+Remove-Item Env:\INFINITE_CANVAS_USER_DATA_DIR -ErrorAction SilentlyContinue
+```
+
+Electron 和打包配置检查：
+
+```powershell
+node --check electron\main.js
+node -e "const p=require('./package.json'); if(p.build.nsis.deleteAppDataOnUninstall !== false) process.exit(1); console.log('nsis uninstall keeps app data')"
+Select-String -Path electron\main.js,ELECTRON_DESKTOP.md,package.json -Pattern "InfiniteCanvas_Data|INFINITE_CANVAS_USER_DATA_DIR|deleteAppDataOnUninstall|desktop.log"
+```
+
 ## 6. 手工功能验证清单
 
 ### 6.1 视频任务化
@@ -361,6 +498,20 @@ jianguoyun infinite-canvas-sync/default/api-settings.json False
 - 下载或导入后，API 设置页能收到 `providers-changed` 并刷新。
 - 导出 JSON 能正常下载。
 - 导入 JSON 后 API Key 和 provider 列表能生效。
+
+### 6.3 桌面端用户数据持久化
+
+- 安装到 `D:\Apps\Infinite Canvas` 后，首次启动应创建 `D:\Apps\InfiniteCanvas_Data`。
+- 不应创建或继续使用 `D:\Apps\Infinite Canvas\InfiniteCanvas_Data` 作为主数据目录。
+- 如果旧目录 `D:\Apps\Infinite Canvas\InfiniteCanvas_Data` 已存在，新版启动后应把缺失内容非覆盖补拷到 `D:\Apps\InfiniteCanvas_Data`。
+- `D:\Apps\InfiniteCanvas_Data\desktop.log` 应记录 `desktop-start`、`backend-spawn`，退出时记录 `backend-exit`。
+- `desktop.log` 中 `userDataRoot=` 应指向同级 `InfiniteCanvas_Data`。
+- API 配置保存后，应写入 `D:\Apps\InfiniteCanvas_Data\API\.env`。
+- 画布和素材应写入 `D:\Apps\InfiniteCanvas_Data\data`、`assets`、`output`。
+- 上传自定义工作流后，应写入 `D:\Apps\InfiniteCanvas_Data\workflows\custom`。
+- 内置工作流仍应从安装目录的 `resources/backend/workflows` 或后端应用资源目录读取。
+- 覆盖安装新版后，`D:\Apps\InfiniteCanvas_Data` 内容应保留。
+- 卸载客户端后，NSIS 不应删除 Electron 系统 appData；同级 `InfiniteCanvas_Data` 也不应被安装器删除。
 
 ## 7. 常见问题与处理
 
@@ -408,6 +559,24 @@ git config core.excludesfile "E:/Infinite-Canvas/.git/info/exclude"
 
 这只影响当前仓库，不改用户全局 Git 配置。
 
+### 7.6 打包版数据目录出现在安装目录内部
+
+这是需要立即修正的回归。重点检查：
+
+- `electron/main.js` 中 `userDataRoot()` 是否仍使用 `path.dirname(installRoot())`。
+- 是否误把目录改成 `path.join(installRoot(), USER_DATA_DIR_NAME)`。
+- `desktop.log` 中 `installRoot=` 和 `userDataRoot=` 是否只差一级目录。
+- 安装目录父级是否可写；不可写时才允许回退到 Electron 系统 userData。
+
+### 7.7 更新后 API 配置或画布丢失
+
+重点检查：
+
+- `main.py` 中 `API_ENV_FILE`、`DATA_DIR`、`ASSETS_DIR`、`OUTPUT_DIR` 是否仍从 `USER_DATA_ROOT` 派生。
+- `migrate_user_data_from_app_root()` 是否被删除或提前返回。
+- `.migration_complete.json` 是否在目标数据目录中。
+- `desktop.log` 是否显示本次启动使用了错误的数据目录。
+
 ## 8. 提交建议
 
 推荐提交拆分：
@@ -431,7 +600,10 @@ git config core.excludesfile "E:/Infinite-Canvas/.git/info/exclude"
 - `main.py` 可以 py_compile。
 - `static/js` 与 `electron` 下 JS 可以 `node --check`。
 - 视频任务化和 WebDAV 云同步关键关键词仍存在。
+- 用户数据持久化关键词仍存在：`InfiniteCanvas_Data`、`INFINITE_CANVAS_USER_DATA_DIR`、`USER_DATA_ROOT`、`USER_WORKFLOW_DIR`、`deleteAppDataOnUninstall`、`desktop.log`。
 - `static/index.html` 没有丢 `cloud-sync`。
 - `smart-canvas.js` 没有把视频任务对象当视频数组处理。
+- 打包版数据目录设计仍是安装目录同级，不是安装目录内部。
+- `ELECTRON_DESKTOP.md` 已同步任何新的桌面端数据目录策略。
 
 完成后记录本次合并中遇到的新坑，追加到本文档。

@@ -181,7 +181,8 @@ MODELSCOPE_TREE_URL = "https://www.modelscope.ai/api/v1/studio/daniel8152/Infini
 async def startup_event():
     global GLOBAL_LOOP
     GLOBAL_LOOP = asyncio.get_running_loop()
-    sync_static_html_versions()
+    if not env_truthy("INFINITE_CANVAS_SKIP_STATIC_SYNC"):
+        sync_static_html_versions()
     # 启动时整理资产库：给所有图片分组（含默认角色/场景）建好文件夹，并把根目录里的旧素材归整进去。
     try:
         await asyncio.to_thread(migrate_asset_library_into_dirs)
@@ -220,22 +221,48 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str = None):
 
 CLIENT_ID = str(uuid.uuid4())
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-WORKFLOW_DIR = os.path.join(BASE_DIR, "workflows")
+APP_ROOT = BASE_DIR
+USER_DATA_DIR_NAME = "InfiniteCanvas_Data"
+
+def env_truthy(name: str) -> bool:
+    return str(os.getenv(name, "")).strip().lower() in {"1", "true", "yes", "on"}
+
+def resolve_user_data_root() -> str:
+    configured = (
+        os.getenv("INFINITE_CANVAS_USER_DATA_DIR")
+        or os.getenv("INFINITE_CANVAS_BASE_DIR")
+        or ""
+    ).strip()
+    if configured:
+        return os.path.abspath(configured)
+    return APP_ROOT
+
+USER_DATA_ROOT = resolve_user_data_root()
+
+def app_path(*parts: str) -> str:
+    return os.path.join(APP_ROOT, *parts)
+
+def user_data_path(*parts: str) -> str:
+    return os.path.join(USER_DATA_ROOT, *parts)
+
+WORKFLOW_DIR = app_path("workflows")
+USER_WORKFLOW_DIR = user_data_path("workflows")
+CUSTOM_WORKFLOW_DIR = os.path.join(USER_WORKFLOW_DIR, "custom")
 WORKFLOW_PATH = os.path.join(WORKFLOW_DIR, "Z-Image.json")
-STATIC_DIR = os.path.join(BASE_DIR, "static")
+STATIC_DIR = app_path("static")
 STATIC_RUNNINGHUB_DIR = os.path.join(STATIC_DIR, "runninghub")
 STATIC_RUNNINGHUB_THUMBNAIL_DIR = os.path.join(STATIC_RUNNINGHUB_DIR, "thumbnails")
 STATIC_RUNNINGHUB_API_PROVIDERS_FILE = os.path.join(STATIC_RUNNINGHUB_DIR, "api_providers.json")
 STATIC_RUNNINGHUB_MODEL_REGISTRY_FILE = os.path.join(STATIC_RUNNINGHUB_DIR, "models_registry.json")
-OUTPUT_DIR = os.path.join(BASE_DIR, "output")
-ASSETS_DIR = os.path.join(BASE_DIR, "assets")
+OUTPUT_DIR = user_data_path("output")
+ASSETS_DIR = user_data_path("assets")
 OUTPUT_INPUT_DIR = os.path.join(ASSETS_DIR, "input")
 OUTPUT_OUTPUT_DIR = os.path.join(ASSETS_DIR, "output")
 ASSET_LIBRARY_DIR = os.path.join(ASSETS_DIR, "library")
 LOCAL_UPLOAD_DIR = os.path.join(ASSETS_DIR, "uploads")
-HISTORY_FILE = os.path.join(BASE_DIR, "history.json")
-API_ENV_FILE = os.path.join(BASE_DIR, "API", ".env")
-DATA_DIR = os.path.join(BASE_DIR, "data")
+HISTORY_FILE = user_data_path("history.json")
+API_ENV_FILE = user_data_path("API", ".env")
+DATA_DIR = user_data_path("data")
 CONVERSATION_DIR = os.path.join(DATA_DIR, "conversations")
 CANVAS_DIR = os.path.join(DATA_DIR, "canvases")
 MEDIA_PREVIEW_DIR = os.path.join(DATA_DIR, "media_previews")
@@ -247,11 +274,99 @@ CANVAS_VIDEO_TASKS_FILE = os.path.join(DATA_DIR, "canvas_video_tasks.json")
 SHARED_FOLDERS_FILE = os.path.join(DATA_DIR, "shared_folders.json")
 CLOUD_SYNC_CONFIG_FILE = os.path.join(DATA_DIR, "cloud_sync_config.json")
 CLOUD_SYNC_BACKUP_DIR = os.path.join(DATA_DIR, "cloud_sync_backups")
-GLOBAL_CONFIG_FILE = os.path.join(BASE_DIR, "global_config.json")
+GLOBAL_CONFIG_FILE = user_data_path("global_config.json")
 CANVAS_TRASH_RETENTION_MS = 30 * 24 * 60 * 60 * 1000
 LOCAL_IMAGE_IMPORT_MAX_BYTES = int(os.getenv("LOCAL_IMAGE_IMPORT_MAX_BYTES", str(50 * 1024 * 1024)))
 LOCAL_IMAGE_IMPORT_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 RUNNINGHUB_THUMBNAIL_EXTS = (".jpg",)
+USER_DATA_MIGRATION_MARKER = user_data_path(".migration_complete.json")
+
+def same_path(left: str, right: str) -> bool:
+    return os.path.normcase(os.path.abspath(left)) == os.path.normcase(os.path.abspath(right))
+
+def migrate_user_data_from_app_root():
+    if same_path(USER_DATA_ROOT, APP_ROOT):
+        return
+    os.makedirs(USER_DATA_ROOT, exist_ok=True)
+    if os.path.exists(USER_DATA_MIGRATION_MARKER):
+        return
+
+    report = {
+        "source": APP_ROOT,
+        "target": USER_DATA_ROOT,
+        "copied": [],
+        "skipped": [],
+        "errors": [],
+        "completed_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    }
+
+    def copy_missing_dir(source: str, target: str, label: str):
+        if not os.path.isdir(source):
+            report["skipped"].append({"path": label, "reason": "source_missing"})
+            return
+        try:
+            if os.path.exists(target) and not os.path.isdir(target):
+                report["skipped"].append({"path": label, "reason": "target_exists"})
+                return
+            if os.path.isdir(target):
+                copied_count = 0
+                skipped_count = 0
+                for root, _, files in os.walk(source):
+                    rel_dir = os.path.relpath(root, source)
+                    target_dir = target if rel_dir == "." else os.path.join(target, rel_dir)
+                    os.makedirs(target_dir, exist_ok=True)
+                    for filename in files:
+                        source_file = os.path.join(root, filename)
+                        target_file = os.path.join(target_dir, filename)
+                        if os.path.exists(target_file):
+                            skipped_count += 1
+                            continue
+                        shutil.copy2(source_file, target_file)
+                        copied_count += 1
+                if copied_count:
+                    report["copied"].append({"path": label, "missing_files": copied_count})
+                else:
+                    report["skipped"].append({"path": label, "reason": "target_exists", "files": skipped_count})
+                return
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            shutil.copytree(source, target)
+            report["copied"].append(label)
+        except Exception as exc:
+            report["errors"].append({"path": label, "error": str(exc)})
+
+    def copy_missing_file(source: str, target: str, label: str):
+        if not os.path.isfile(source):
+            report["skipped"].append({"path": label, "reason": "source_missing"})
+            return
+        if os.path.exists(target):
+            report["skipped"].append({"path": label, "reason": "target_exists"})
+            return
+        try:
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            shutil.copy2(source, target)
+            report["copied"].append(label)
+        except Exception as exc:
+            report["errors"].append({"path": label, "error": str(exc)})
+
+    for dirname in ("API", "data", "assets", "output"):
+        copy_missing_dir(app_path(dirname), user_data_path(dirname), dirname)
+    for filename in ("history.json", "global_config.json"):
+        copy_missing_file(app_path(filename), user_data_path(filename), filename)
+    for folder in ("custom", "自定义"):
+        copy_missing_dir(
+            os.path.join(WORKFLOW_DIR, folder),
+            os.path.join(USER_WORKFLOW_DIR, folder),
+            f"workflows/{folder}",
+        )
+
+    record_path = USER_DATA_MIGRATION_MARKER if not report["errors"] else user_data_path(".migration_failed.json")
+    try:
+        with open(record_path, "w", encoding="utf-8") as f:
+            json.dump(report, f, ensure_ascii=False, indent=2)
+    except Exception as exc:
+        print(f"写入用户数据迁移记录失败: {exc}")
+    if report["errors"]:
+        print(f"用户数据迁移有未完成项: {report['errors']}")
 
 QUEUE = []
 QUEUE_LOCK = Lock()
@@ -487,6 +602,7 @@ def load_env_file():
                 os.environ.setdefault(key, value)
     except Exception as e:
         print(f"加载 API/.env 失败: {e}")
+migrate_user_data_from_app_root()
 ensure_runtime_config_files()
 load_env_file()
 
@@ -1681,10 +1797,11 @@ os.makedirs(OUTPUT_INPUT_DIR, exist_ok=True)
 os.makedirs(OUTPUT_OUTPUT_DIR, exist_ok=True)
 os.makedirs(ASSET_LIBRARY_DIR, exist_ok=True)
 os.makedirs(LOCAL_UPLOAD_DIR, exist_ok=True)
-os.makedirs(STATIC_DIR, exist_ok=True)
-os.makedirs(WORKFLOW_DIR, exist_ok=True)
 os.makedirs(CONVERSATION_DIR, exist_ok=True)
 os.makedirs(CANVAS_DIR, exist_ok=True)
+os.makedirs(MEDIA_PREVIEW_DIR, exist_ok=True)
+os.makedirs(USER_WORKFLOW_DIR, exist_ok=True)
+os.makedirs(CUSTOM_WORKFLOW_DIR, exist_ok=True)
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 app.mount("/output", StaticFiles(directory=OUTPUT_DIR), name="output")
@@ -7257,24 +7374,24 @@ def shared_folder_by_id(folder_id):
 
 def shared_folder_abs(entry):
     rel = (entry or {}).get("rel") or ""
-    return os.path.normpath(os.path.join(BASE_DIR, rel))
+    return os.path.normpath(os.path.join(USER_DATA_ROOT, rel))
 
 def shared_resolve_register(path):
-    """校验 path 必须位于项目目录内、是一个存在的子目录（非项目根）。返回 (abs, rel)。"""
+    """校验 path 必须位于用户数据目录内、是一个存在的子目录（非用户数据根）。返回 (abs, rel)。"""
     raw = (path or "").strip().strip('"').strip("'")
     if not raw:
         raise HTTPException(status_code=400, detail="请提供文件夹路径")
-    candidate = raw if os.path.isabs(raw) else os.path.join(BASE_DIR, raw)
+    candidate = raw if os.path.isabs(raw) else os.path.join(USER_DATA_ROOT, raw)
     abs_path = os.path.normpath(os.path.abspath(candidate))
-    base = os.path.normpath(os.path.abspath(BASE_DIR))
+    base = os.path.normpath(os.path.abspath(USER_DATA_ROOT))
     try:
         common = os.path.commonpath([abs_path, base])
     except ValueError:
-        raise HTTPException(status_code=400, detail="只允许登记项目目录内的文件夹")
+        raise HTTPException(status_code=400, detail="只允许登记用户数据目录内的文件夹")
     if common != base:
-        raise HTTPException(status_code=400, detail="只允许登记项目目录内的文件夹")
+        raise HTTPException(status_code=400, detail="只允许登记用户数据目录内的文件夹")
     if abs_path == base:
-        raise HTTPException(status_code=400, detail="不能直接登记项目根目录，请选择子文件夹")
+        raise HTTPException(status_code=400, detail="不能直接登记用户数据根目录，请选择子文件夹")
     if not os.path.isdir(abs_path):
         raise HTTPException(status_code=400, detail="文件夹不存在")
     rel = os.path.relpath(abs_path, base)
@@ -17132,9 +17249,7 @@ def generate(req: GenerateRequest):
                     except Exception as e:
                         print(f"Sync upload failed: {e}")
 
-        workflow_path = os.path.join(WORKFLOW_DIR, req.workflow_json)
-        if not os.path.exists(workflow_path) and req.workflow_json == "Z-Image.json":
-            workflow_path = WORKFLOW_PATH
+        workflow_path = workflow_path_from_name(req.workflow_json)
         if not os.path.exists(workflow_path):
             raise Exception(f"Workflow file not found: {req.workflow_json}")
 
@@ -17341,13 +17456,32 @@ class WorkflowRunRequest(BaseModel):
 def workflow_path_from_name(name: str) -> str:
     if not WORKFLOW_NAME_RE.match(name):
         raise HTTPException(status_code=400, detail="Invalid workflow name")
-    path = os.path.abspath(os.path.join(WORKFLOW_DIR, *name.split("/")))
-    workflow_root = os.path.abspath(WORKFLOW_DIR)
+    user_path = workflow_path_under_root(USER_WORKFLOW_DIR, name)
+    app_workflow_path = workflow_path_under_root(WORKFLOW_DIR, name)
+    if is_builtin_workflow(name):
+        return app_workflow_path
+    if os.path.exists(user_path):
+        return user_path
+    if os.path.exists(app_workflow_path):
+        return app_workflow_path
+    return user_path
+
+def workflow_path_for_write(name: str) -> str:
+    if not WORKFLOW_NAME_RE.match(name):
+        raise HTTPException(status_code=400, detail="Invalid workflow name")
+    return workflow_path_under_root(USER_WORKFLOW_DIR, name)
+
+def workflow_path_under_root(root: str, name: str) -> str:
+    path = os.path.abspath(os.path.join(root, *name.split("/")))
+    workflow_root = os.path.abspath(root)
     if os.path.commonpath([workflow_root, path]) != workflow_root:
         raise HTTPException(status_code=400, detail="Invalid workflow name")
     return path
 
-def workflow_config_path(name: str) -> str:
+def workflow_config_path(name: str, for_write: bool = False) -> str:
+    user_cfg = workflow_path_for_write(name).replace(".json", ".config.json")
+    if for_write or os.path.exists(user_cfg):
+        return user_cfg
     return workflow_path_from_name(name).replace(".json", ".config.json")
 
 def is_builtin_workflow(name: str) -> bool:
@@ -17786,32 +17920,39 @@ def save_comfyui_instances(payload: ComfyInstancesPayload):
 
 @app.get("/api/workflows")
 def list_workflows():
-    if not os.path.isdir(WORKFLOW_DIR):
-        return {"workflows": []}
     items = []
-    for root, dirs, files in os.walk(WORKFLOW_DIR):
-        if os.path.abspath(root) == os.path.abspath(WORKFLOW_DIR):
-            dirs[:] = [d for d in dirs if d in {CUSTOM_WORKFLOW_FOLDER, LEGACY_CUSTOM_WORKFLOW_FOLDER}]
-        for fn in sorted(files):
-            if not fn.endswith(".json") or fn.endswith(".config.json"):
-                continue
-            rel = os.path.relpath(os.path.join(root, fn), WORKFLOW_DIR).replace("\\", "/")
-            if is_builtin_workflow(rel):
-                continue
-            cfg = {}
-            cfg_path = workflow_config_path(rel)
-            if os.path.exists(cfg_path):
-                try:
-                    with open(cfg_path, "r", encoding="utf-8") as f:
-                        cfg = json.load(f) or {}
-                except Exception:
-                    cfg = {}
-            items.append({
-                "name": rel,
-                "title": cfg.get("title") or fn.replace(".json", ""),
-                "builtin": False,
-                "field_count": len(cfg.get("fields") or []),
-            })
+    seen = set()
+
+    def collect_from(root_dir: str):
+        if not os.path.isdir(root_dir):
+            return
+        for root, dirs, files in os.walk(root_dir):
+            if os.path.abspath(root) == os.path.abspath(root_dir):
+                dirs[:] = [d for d in dirs if d in {CUSTOM_WORKFLOW_FOLDER, LEGACY_CUSTOM_WORKFLOW_FOLDER}]
+            for fn in sorted(files):
+                if not fn.endswith(".json") or fn.endswith(".config.json"):
+                    continue
+                rel = os.path.relpath(os.path.join(root, fn), root_dir).replace("\\", "/")
+                if is_builtin_workflow(rel) or rel in seen:
+                    continue
+                cfg = {}
+                cfg_path = workflow_config_path(rel)
+                if os.path.exists(cfg_path):
+                    try:
+                        with open(cfg_path, "r", encoding="utf-8") as f:
+                            cfg = json.load(f) or {}
+                    except Exception:
+                        cfg = {}
+                seen.add(rel)
+                items.append({
+                    "name": rel,
+                    "title": cfg.get("title") or fn.replace(".json", ""),
+                    "builtin": False,
+                    "field_count": len(cfg.get("fields") or []),
+                })
+
+    collect_from(USER_WORKFLOW_DIR)
+    collect_from(WORKFLOW_DIR)
     items.sort(key=lambda item: (0 if item["name"].startswith(f"{CUSTOM_WORKFLOW_FOLDER}/") else 1, item["title"]))
     return {"workflows": items}
 
@@ -17847,10 +17988,9 @@ def upload_workflow(payload: WorkflowUploadRequest):
     sample = next(iter(payload.workflow.values()), None)
     if not isinstance(sample, dict) or "class_type" not in sample:
         raise HTTPException(status_code=400, detail="不是有效的 ComfyUI API 工作流 JSON（需包含 class_type）")
-    custom_dir = os.path.join(WORKFLOW_DIR, CUSTOM_WORKFLOW_FOLDER)
-    os.makedirs(custom_dir, exist_ok=True)
+    os.makedirs(CUSTOM_WORKFLOW_DIR, exist_ok=True)
     stored_name = f"{CUSTOM_WORKFLOW_FOLDER}/{name}"
-    path = workflow_path_from_name(stored_name)
+    path = workflow_path_for_write(stored_name)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(payload.workflow, f, ensure_ascii=False, indent=2)
     return {"name": stored_name}
@@ -17862,7 +18002,8 @@ def save_workflow_config(name: str, payload: WorkflowConfig):
     workflow_path = workflow_path_from_name(name)
     if not os.path.exists(workflow_path):
         raise HTTPException(status_code=404, detail="Workflow not found")
-    cfg_path = workflow_config_path(name)
+    cfg_path = workflow_config_path(name, for_write=True)
+    os.makedirs(os.path.dirname(cfg_path), exist_ok=True)
     with open(cfg_path, "w", encoding="utf-8") as f:
         json.dump(payload.dict(), f, ensure_ascii=False, indent=2)
     return {"config": payload.dict()}

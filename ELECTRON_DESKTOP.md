@@ -23,7 +23,7 @@ Run:
 The build flow is:
 
 1. `npm run sync:desktop-version` reads the root `VERSION` file and updates the Electron package metadata before packaging.
-2. PyInstaller packages `main.py` plus `static/`, `workflows/`, and `VERSION` into `dist/infinite-canvas-backend/`.
+2. `npm run build:backend` runs `scripts/build-backend.cjs`, which uses the project `venv`, installs missing `requirements.txt` dependencies and PyInstaller there, then packages `main.py` plus `static/`, `workflows/`, and `VERSION` into `dist/infinite-canvas-backend/`.
 3. electron-builder packages the Electron shell and embeds the backend folder as an extra resource.
 4. The Windows installer is written to `release/`.
 
@@ -48,6 +48,16 @@ You can run the version sync step by itself to check the expected output before 
 ```bat
 npm run sync:desktop-version
 ```
+
+## Backend Build Environment
+
+The packaged backend must be built with the project virtual environment, not a global `pyinstaller` from `PATH`. The `build:backend` npm script runs:
+
+```bat
+node scripts/build-backend.cjs
+```
+
+That script creates `venv` if it is missing, ensures `requirements.txt` and PyInstaller are installed in that venv, verifies `httpx` can be imported, and then runs `venv\Scripts\python.exe -m PyInstaller`. This prevents a packaged client from starting with errors such as `ModuleNotFoundError: No module named 'httpx'`.
 
 ## Runtime Data
 

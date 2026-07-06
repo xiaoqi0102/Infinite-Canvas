@@ -161,6 +161,7 @@ git status
 - `electron/main.js`
 - `package.json`
 - `package-lock.json`
+- `scripts/build-backend.cjs`
 - `scripts/sync-electron-version.cjs`
 - `打包Electron桌面版.bat`
 - `ELECTRON_DESKTOP.md`
@@ -209,6 +210,7 @@ git status
 - `VERSION`
 - `package.json`
 - `package-lock.json`
+- `scripts/build-backend.cjs`
 - `scripts/sync-electron-version.cjs`
 - `打包Electron桌面版.bat`
 - `ELECTRON_DESKTOP.md`
@@ -216,6 +218,8 @@ git status
 必须保留的构建规则：
 
 - `npm run build:win` 和 `npm run pack:win` 必须先执行 `npm run sync:desktop-version`。
+- `npm run build:backend` 必须执行 `node scripts/build-backend.cjs`，不要改回裸 `pyinstaller`。
+- `scripts/build-backend.cjs` 必须优先使用项目 `venv\Scripts\python.exe`，并在构建前确认 `requirements.txt` 和 PyInstaller 已安装到该 venv。
 - `scripts/sync-electron-version.cjs` 必须读取根目录 `VERSION` 的第一行作为项目版本。
 - `package.json.version` 可以使用去掉前导零的 semver 兼容值，例如 `VERSION=2026.07.6` 时写入 `2026.7.6`。
 - Windows 安装包文件名必须保留原始 `VERSION` 文本，例如 `release/Infinite-Canvas-Setup-2026.07.6.exe`。
@@ -227,6 +231,7 @@ git status
 
 - 上游如果改了 `package.json.version`，合并后要重新运行 `npm run sync:desktop-version`。
 - 上游如果改了 `package.json` 的 `scripts` 或 `build.win`，不要丢掉 `sync:desktop-version` 和 `artifactName`。
+- 上游如果改了 `build:backend`，不要让后端打包重新使用全局 `pyinstaller`；全局 Python 缺依赖时会生成运行时缺 `httpx` 等模块的坏包。
 - 不要只在构建后手动重命名 `.exe`；这会让 `latest.yml` 或其他构建元数据和真实产物名失配。
 - 不要把 `artifactName` 改回带空格的安装包名，除非同时验证 `latest.yml` 也引用真实存在的同名文件。
 - 如果 `VERSION` 改成非 `MAJOR.MINOR.PATCH` 数字格式，必须先调整同步脚本规则，再打包。
@@ -402,6 +407,7 @@ INFINITE_CANVAS_SKIP_STATIC_SYNC
 
 - `scripts.sync:desktop-version` 必须存在。
 - `build:win` / `pack:win` 必须先执行 `npm run sync:desktop-version`。
+- `build:backend` 必须执行 `node scripts/build-backend.cjs`，确保 PyInstaller 使用项目 venv。
 - `build.win.artifactName` 必须由 `scripts/sync-electron-version.cjs` 写入并保留原始 `VERSION` 后缀。
 - `build.nsis.deleteAppDataOnUninstall` 必须是 `false`。
 - `allowToChangeInstallationDirectory` 必须保留为 `true`，用户可以继续选择安装位置。
@@ -416,6 +422,7 @@ allowToChangeInstallationDirectory
 extraResources
 dist/infinite-canvas-backend
 sync:desktop-version
+build-backend.cjs
 artifactName
 ```
 
@@ -427,6 +434,7 @@ artifactName
 
 - 文档必须说明安装包文件名后缀来自根目录 `VERSION`。
 - 文档必须说明 `npm run sync:desktop-version` 会同步 Electron 元数据和 `build.win.artifactName`。
+- 文档必须说明后端打包通过 `scripts/build-backend.cjs` 使用项目 `venv`，避免漏打 `httpx` 等 Python 依赖。
 - 示例应保持类似 `VERSION=2026.07.6` -> `release/Infinite-Canvas-Setup-2026.07.6.exe`。
 - 文档必须明确 `InfiniteCanvas_Data` 位于安装目录同级，不在安装目录内部。
 - 示例应保持类似 `D:\Apps\Infinite Canvas` -> `D:\Apps\InfiniteCanvas_Data`。
@@ -511,12 +519,14 @@ Electron 和打包配置检查：
 
 ```powershell
 node --check electron\main.js
+node --check scripts\build-backend.cjs
 node --check scripts\sync-electron-version.cjs
 npm run sync:desktop-version
+npm run build:backend
 node -e "const p=require('./package.json'); if(p.build.nsis.deleteAppDataOnUninstall !== false) process.exit(1); console.log('nsis uninstall keeps app data')"
 $v = (Get-Content -Raw VERSION).Trim()
 node -e "const fs=require('fs'); const p=require('./package.json'); const v=fs.readFileSync('VERSION','utf8').trim(); if(!p.build.win.artifactName.includes(v)) process.exit(1); console.log('installer suffix follows VERSION')"
-Select-String -Path electron\main.js,ELECTRON_DESKTOP.md,package.json,scripts\sync-electron-version.cjs -Pattern "InfiniteCanvas_Data|INFINITE_CANVAS_USER_DATA_DIR|deleteAppDataOnUninstall|desktop.log|sync:desktop-version|artifactName"
+Select-String -Path electron\main.js,ELECTRON_DESKTOP.md,package.json,scripts\build-backend.cjs,scripts\sync-electron-version.cjs -Pattern "InfiniteCanvas_Data|INFINITE_CANVAS_USER_DATA_DIR|deleteAppDataOnUninstall|desktop.log|sync:desktop-version|build-backend|artifactName|httpx"
 ```
 
 ## 6. 手工功能验证清单
@@ -652,6 +662,7 @@ git config core.excludesfile "E:/Infinite-Canvas/.git/info/exclude"
 - `smart-canvas.js` 没有把视频任务对象当视频数组处理。
 - 打包版数据目录设计仍是安装目录同级，不是安装目录内部。
 - Windows 安装包文件名后缀与根目录 `VERSION` 一致。
+- 后端打包使用项目 `venv`，不是全局 `pyinstaller`。
 - `ELECTRON_DESKTOP.md` 已同步任何新的桌面端数据目录策略。
 
 完成后记录本次合并中遇到的新坑，追加到本文档。

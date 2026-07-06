@@ -7,7 +7,7 @@
   "scripts": {
     "desktop": "electron .",
     "sync:desktop-version": "node scripts/sync-electron-version.cjs",
-    "build:backend": "pyinstaller --noconfirm build/backend.spec",
+    "build:backend": "node scripts/build-backend.cjs",
     "build:win": "npm run sync:desktop-version && npm run build:backend && electron-builder --win nsis",
     "pack:win": "npm run sync:desktop-version && npm run build:backend && electron-builder --win dir"
   },

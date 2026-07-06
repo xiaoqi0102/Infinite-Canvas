@@ -6,7 +6,7 @@
 2. WebDAV 云同步与 API 配置同步改动，详见 `WEBDAV_CLOUD_SYNC_CHANGES.md`。
 3. Electron 客户端用户数据持久化改动：所有 API 配置、画布、素材、输出、历史、自定义工作流等用户文件必须写入安装目录同级 `InfiniteCanvas_Data`，不能写入安装目录内部。
 4. Electron 客户端构建版本命名改动：Windows 安装包文件名后缀必须来自根目录 `VERSION`，不能回退到旧的 `package.json.version`。
-5. Electron 客户端安装包级自动更新改动：打包客户端从 GitHub Release 检查、下载并安装新版本；网页“一键更新”仍保留为源项目更新提醒。
+5. Electron 客户端安装包级自动更新改动：打包客户端优先从 GitHub Release 检查、下载并安装新版本，GitHub 不可用时自动切换 ModelScope 兜底；网页“一键更新”仍保留为源项目更新提醒。
 
 本文件不是用户使用说明，而是合并、解冲突、验证时的工程操作清单。
 
@@ -239,7 +239,7 @@ git status
 
 ### 2.5 桌面端安装包级自动更新补丁
 
-目标：打包版 Electron 客户端通过 GitHub Release 的 `latest.yml`、`.exe` 和 `.blockmap` 检查、下载并安装新客户端；网页内“一键更新”仍用于源项目 `main.py`、`VERSION`、`static` 更新提醒，不改成安装包更新。
+目标：打包版 Electron 客户端优先通过 GitHub Release 的 `latest.yml`、`.exe` 和 `.blockmap` 检查、下载并安装新客户端；当 GitHub 检查或下载失败时，自动切换 ModelScope 的同名发布文件兜底。网页内“一键更新”仍用于源项目 `main.py`、`VERSION`、`static` 更新提醒，不改成安装包更新。
 
 关键文件：
 
@@ -250,17 +250,23 @@ git status
 - `package.json`
 - `package-lock.json`
 - `ELECTRON_DESKTOP.md`
+- `UPSTREAM_MERGE_GUIDE.md`
 
 必须保留的客户端更新规则：
 
 - `electron-updater` 必须作为运行时依赖存在。
-- `build.publish` 必须指向 `provider=github`、`owner=xiaoqi0102`、`repo=Infinite-Canvas`。
+- `build.publish` 必须保留 GitHub 主发布配置：`provider=github`、`owner=xiaoqi0102`、`repo=Infinite-Canvas`。
+- Electron 主进程必须保留 GitHub 优先、ModelScope 兜底的源切换逻辑，不能退回只检查单一 GitHub 源。
+- ModelScope 兜底默认读取 `https://modelscope.cn/api/v1/studio/xiaoqi0102/Infinite-Canvas/repo?Revision=master&FilePath=desktop-release/<file>`，并允许通过 `INFINITE_CANVAS_CLIENT_UPDATE_MODELSCOPE_*` 环境变量覆盖。
 - Electron 自动更新只在 `app.isPackaged` 时启用，开发模式不检查。
 - 自动检查应在窗口打开后延迟执行，不阻塞后端启动和首屏。
 - 手动入口应保留在网页左侧底部版本号下方的 `检查客户端更新` 按钮中，通过 `electron/preload.js` 暴露的窄 IPC 调用 Electron 主进程。
 - 不要把客户端更新入口放回 Electron 原生菜单或 Windows 托盘菜单；用户入口应在 `static/index.html` 侧栏底部。
 - 不要复用网页里的 `update-now-btn`；它仍然只服务源项目更新提醒。
 - `update-available` 时先询问用户是否下载；`update-downloaded` 后再询问是否重启并安装。
+- GitHub 检查失败或 GitHub 下载失败时，应记录 `client-update-source-fallback` 并切换到 ModelScope 重新检查。
+- 检查失败处理必须保留 `activeClientUpdateAttemptId` / `stale-error-ignored` 这类 attempt 防抖，避免 `electron-updater` 同时触发 `error` 事件和 Promise `.catch()` 时重复切源或误伤备用源。
+- ModelScope 差分更新必须保留 `formatVersionLike()` / `versionTokenFromPath()`，避免 `package.json.version=2026.7.6` 与安装包文件名 `2026.07.6` 的前导零差异导致旧 `.blockmap` 路径推导错误。
 - 重启安装前必须调用 `stopBackend()`，再调用 `autoUpdater.quitAndInstall()`。
 - 更新事件必须写入当前 `InfiniteCanvas_Data/desktop.log`，事件名前缀为 `client-update-`。
 - `BrowserWindow.webPreferences` 必须保留 `preload: path.join(__dirname, 'preload.js')`、`contextIsolation: true` 和 `nodeIntegration: false`。
@@ -271,8 +277,12 @@ git status
 - 不要把 `static/index.html` 的“一键更新”改成客户端安装包更新；它是源项目更新提醒。
 - 不要删除 `static/index.html` 左侧底部 `client-update-btn`，它应位于 `project-version-badge` 之后、`author-box` 之前。
 - 不要删除 `autoUpdater.autoDownload = false`，否则会绕过“下载更新 / 稍后”的用户确认。
+- 不要删除 `ModelScopeClientUpdateProvider`、`clientUpdateSourceOrder()`、`setClientUpdateSource()`、`handleClientUpdateSourceFailure()` 或 `client-update-source-fallback` 日志；这些是双源兜底的关键保护点。
 - 不要让客户端更新写入或覆盖 `InfiniteCanvas_Data`。
-- 发布新客户端时必须上传 `Infinite-Canvas-Setup-<VERSION>.exe`、`.blockmap` 和 `latest.yml` 到同一个 GitHub Release tag。
+- 发布新客户端时必须上传 `Infinite-Canvas-Setup-<VERSION>.exe`、`.blockmap` 和 `latest.yml` 到同一个 GitHub Release tag，并把同一组三个文件上传到 ModelScope Studio 仓库 `xiaoqi0102/Infinite-Canvas` 的 `desktop-release/` 目录。
+- ModelScope 上传顺序必须是 `.exe`、`.blockmap`、最后 `latest.yml`；不要先上传 `latest.yml`，否则旧客户端可能看到新元数据但下载不到被引用的安装包。
+- 当前 `modelscope upload` 命令可能只支持 `model/dataset`，不要硬套 CLI 参数上传 Studio 仓库；可用 `modelscope.hub.api.HubApi().upload_file(..., repo_type='studio')`。
+- 验证 ModelScope 文件时使用 `GET https://modelscope.cn/api/v1/studio/xiaoqi0102/Infinite-Canvas/repo?Revision=master&FilePath=desktop-release/<file>`；不要用 `HEAD` 判断，ModelScope 文件 API 对 `HEAD` 可能返回 404。
 
 ## 3. 高风险冲突文件处理
 
@@ -415,7 +425,7 @@ checkClientUpdate
 
 ### 3.7 `electron/main.js`
 
-保护桌面端用户数据目录选择、旧目录补拷和运行日志。
+保护桌面端用户数据目录选择、旧目录补拷、运行日志和客户端安装包级自动更新兜底链路。
 
 保留原则：
 
@@ -427,6 +437,10 @@ checkClientUpdate
 - `appendRuntimeLog()` 必须写入当前数据目录下的 `desktop.log`。
 - 后端环境变量必须包含 `INFINITE_CANVAS_USER_DATA_DIR`、兼容的 `INFINITE_CANVAS_BASE_DIR`、`INFINITE_CANVAS_SKIP_STATIC_SYNC=1`。
 - `ipcMain.handle('client-update:check', ...)` 必须保留，且应校验调用方来自当前主窗口后再触发 `checkForClientUpdates({ manual: true })`。
+- `autoUpdater` 必须通过 `setClientUpdateSource()` 先使用 GitHub，再在检查或下载失败时通过 `handleClientUpdateSourceFailure()` 切到 ModelScope。
+- `ModelScopeClientUpdateProvider` 必须继续使用 ModelScope 文件 API 读取 `desktop-release/latest.yml`、安装包和 `.blockmap`，不要改成直接拼 raw 页面 URL。
+- `activeClientUpdateAttemptId` 必须继续用于忽略过期检查错误；不要让 `autoUpdater.on('error')` 和 `checkForUpdates().catch()` 同时处理同一次失败。
+- `formatVersionLike()` 和 `versionTokenFromPath()` 必须继续处理 Electron semver 与安装包文件名的前导零差异。
 - `BrowserWindow` 必须加载 `electron/preload.js`，不要关闭 `contextIsolation` 或打开 `nodeIntegration`。
 
 检查关键词：
@@ -441,12 +455,21 @@ desktop.log
 INFINITE_CANVAS_USER_DATA_DIR
 INFINITE_CANVAS_SKIP_STATIC_SYNC
 client-update:check
+ModelScopeClientUpdateProvider
+clientUpdateSourceOrder
+setClientUpdateSource
+handleClientUpdateSourceFailure
+client-update-source-fallback
+activeClientUpdateAttemptId
+stale-error-ignored
+formatVersionLike
+versionTokenFromPath
 preload.js
 ```
 
 ### 3.8 `package.json`
 
-保护打包、卸载行为和安装包版本命名。
+保护打包、卸载行为、安装包版本命名和 GitHub 主发布配置。
 
 保留原则：
 
@@ -456,6 +479,7 @@ preload.js
 - `build.win.artifactName` 必须由 `scripts/sync-electron-version.cjs` 写入并保留原始 `VERSION` 后缀。
 - `dependencies.electron-updater` 必须存在。
 - `build.publish` 必须指向 `xiaoqi0102/Infinite-Canvas` 的 GitHub Release。
+- ModelScope 是 `electron/main.js` 里的运行时兜底源，不要误以为 `package.json.build.publish` 也要改成双源。
 - `build.nsis.deleteAppDataOnUninstall` 必须是 `false`。
 - `allowToChangeInstallationDirectory` 必须保留为 `true`，用户可以继续选择安装位置。
 - `extraResources` 必须继续把 `dist/infinite-canvas-backend` 打进 `resources/backend`。
@@ -576,9 +600,37 @@ npm run sync:desktop-version
 npm run build:backend
 node -e "const p=require('./package.json'); if(p.build.nsis.deleteAppDataOnUninstall !== false) process.exit(1); console.log('nsis uninstall keeps app data')"
 node -e "const p=require('./package.json'); if(!p.dependencies || !p.dependencies['electron-updater']) process.exit(1); const pub=Array.isArray(p.build.publish)?p.build.publish[0]:p.build.publish; if(!pub || pub.provider!=='github' || pub.owner!=='xiaoqi0102' || pub.repo!=='Infinite-Canvas') process.exit(1); console.log('electron updater publish config ok')"
+node -e "const fs=require('fs'); const s=fs.readFileSync('electron/main.js','utf8'); for(const k of ['ModelScopeClientUpdateProvider','clientUpdateSourceOrder','setClientUpdateSource','handleClientUpdateSourceFailure','source-fallback','activeClientUpdateAttemptId','stale-error-ignored','formatVersionLike','versionTokenFromPath']) if(!s.includes(k)) process.exit(1); console.log('electron updater fallback source chain ok')"
 $v = (Get-Content -Raw VERSION).Trim()
 node -e "const fs=require('fs'); const p=require('./package.json'); const v=fs.readFileSync('VERSION','utf8').trim(); if(!p.build.win.artifactName.includes(v)) process.exit(1); console.log('installer suffix follows VERSION')"
-Select-String -Path electron\main.js,ELECTRON_DESKTOP.md,package.json,scripts\build-backend.cjs,scripts\sync-electron-version.cjs -Pattern "InfiniteCanvas_Data|INFINITE_CANVAS_USER_DATA_DIR|deleteAppDataOnUninstall|desktop.log|sync:desktop-version|build-backend|artifactName|httpx|electron-updater|autoUpdater|client-update"
+node -e "const fs=require('fs'), yaml=require('js-yaml'), path=require('path'); const y=yaml.load(fs.readFileSync('release/latest.yml','utf8')); const files=[y.path,...(y.files||[]).map(f=>f.url)].filter(Boolean); for(const f of files){ if(!fs.existsSync(path.join('release',f))) process.exit(1); } console.log('latest.yml references local release files')"
+Select-String -Path electron\main.js,ELECTRON_DESKTOP.md,UPSTREAM_MERGE_GUIDE.md,package.json,scripts\build-backend.cjs,scripts\sync-electron-version.cjs -Pattern "InfiniteCanvas_Data|INFINITE_CANVAS_USER_DATA_DIR|deleteAppDataOnUninstall|desktop.log|sync:desktop-version|build-backend|artifactName|httpx|electron-updater|autoUpdater|client-update|ModelScope|source-fallback|stale-error-ignored|formatVersionLike|desktop-release"
+```
+
+桌面客户端发布到 GitHub 和 ModelScope 后，额外验证发布文件：
+
+```powershell
+$v = (Get-Content -Raw VERSION).Trim()
+Test-Path "release\Infinite-Canvas-Setup-$v.exe"
+Test-Path "release\Infinite-Canvas-Setup-$v.exe.blockmap"
+Test-Path "release\latest.yml"
+
+@'
+from urllib.request import Request, urlopen
+from pathlib import Path
+
+base = 'https://modelscope.cn/api/v1/studio/xiaoqi0102/Infinite-Canvas/repo?Revision=master&FilePath='
+version = Path('VERSION').read_text(encoding='utf-8').strip()
+files = [
+    'desktop-release/latest.yml',
+    f'desktop-release/Infinite-Canvas-Setup-{version}.exe.blockmap',
+    f'desktop-release/Infinite-Canvas-Setup-{version}.exe',
+]
+for file_path in files:
+    with urlopen(Request(base + file_path, headers={'User-Agent': 'InfiniteCanvasReleaseProbe/1.0'}), timeout=60) as response:
+        response.read(32)
+        print(f'{file_path}: status={response.status} length={response.headers.get("Content-Length")}')
+'@ | python -
 ```
 
 ## 6. 手工功能验证清单
@@ -621,6 +673,20 @@ Select-String -Path electron\main.js,ELECTRON_DESKTOP.md,package.json,scripts\bu
 - 内置工作流仍应从安装目录的 `resources/backend/workflows` 或后端应用资源目录读取。
 - 覆盖安装新版后，`D:\Apps\InfiniteCanvas_Data` 内容应保留。
 - 卸载客户端后，NSIS 不应删除 Electron 系统 appData；同级 `InfiniteCanvas_Data` 也不应被安装器删除。
+
+### 6.4 桌面端客户端自动更新
+
+- 发布新客户端时，GitHub Release 中应有 `latest.yml`、`Infinite-Canvas-Setup-<VERSION>.exe`、`Infinite-Canvas-Setup-<VERSION>.exe.blockmap`。
+- ModelScope 的 `desktop-release/` 目录中应有同名三件套，文件名必须和 `latest.yml` 引用一致。
+- ModelScope Studio 仓库上传应使用 `HubApi.upload_file(repo_type='studio')` 或等价能力；如果 CLI 仍只支持 `model/dataset`，不要用 CLI 强行传。
+- ModelScope 上传时应先传安装包和 `.blockmap`，最后传 `latest.yml`。
+- ModelScope 文件 API 用 GET 验证三件套应返回 200；不要把 HEAD 返回 404 当作文件缺失。
+- 旧版打包客户端启动后，GitHub 可用时应优先弹出客户端更新提示。
+- 临时阻断 GitHub 或让 GitHub Release 不可达时，`desktop.log` 应记录 `client-update-source-fallback from=github to=modelscope`，随后尝试 ModelScope。
+- 如果 GitHub 失败后 ModelScope 返回无新版本，手动检查弹窗应提示备用源未发现新版本，并在 `desktop.log` 里保留上一个源的错误。
+- 网页左侧底部 `检查客户端更新` 按钮应触发同一套客户端安装包更新检查。
+- 网页里的 `一键更新` 按钮仍应走源项目更新提醒，不应触发 Electron 安装包下载。
+- 选择“重启并安装”后，Electron 应先停止后端进程，再执行安装；更新后 `InfiniteCanvas_Data` 内容应保留。
 
 ## 7. 常见问题与处理
 
@@ -715,7 +781,9 @@ git config core.excludesfile "E:/Infinite-Canvas/.git/info/exclude"
 - 打包版数据目录设计仍是安装目录同级，不是安装目录内部。
 - Windows 安装包文件名后缀与根目录 `VERSION` 一致。
 - 后端打包使用项目 `venv`，不是全局 `pyinstaller`。
-- Electron 安装包级自动更新仍只在打包版启用，并保留网页“一键更新”的源项目更新用途。
+- Electron 安装包级自动更新仍只在打包版启用，保留 GitHub 优先、ModelScope 兜底，并保留网页“一键更新”的源项目更新用途。
+- GitHub Release 和 ModelScope `desktop-release/` 中的 `latest.yml`、安装包、`.blockmap` 三件套均已验证可访问。
+- ModelScope 上传/验证步骤已同步到 `ELECTRON_DESKTOP.md` 和本文档。
 - `ELECTRON_DESKTOP.md` 已同步任何新的桌面端数据目录策略。
 
 完成后记录本次合并中遇到的新坑，追加到本文档。

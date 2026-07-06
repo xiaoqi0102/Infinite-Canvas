@@ -1,5 +1,6 @@
 const { app, BrowserWindow, dialog, ipcMain, shell } = require('electron');
 const { autoUpdater } = require('electron-updater');
+const { Provider, parseUpdateInfo, resolveFiles } = require('electron-updater/out/providers/Provider');
 const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const net = require('node:net');
@@ -9,6 +10,12 @@ const PORT = Number(process.env.INFINITE_CANVAS_PORT || 3000);
 const HOST = '127.0.0.1';
 const USER_DATA_DIR_NAME = 'InfiniteCanvas_Data';
 const CLIENT_UPDATE_CHECK_DELAY_MS = Number(process.env.INFINITE_CANVAS_UPDATE_DELAY_MS || 15000);
+const CLIENT_UPDATE_GITHUB_CONFIG = {
+  provider: 'github',
+  owner: 'xiaoqi0102',
+  repo: 'Infinite-Canvas',
+  releaseType: 'release',
+};
 
 let mainWindow = null;
 let backendProcess = null;
@@ -17,6 +24,148 @@ let manualUpdateCheckPending = false;
 let installPromptVisible = false;
 let lastDownloadProgressLog = 0;
 let downloadedUpdateInfo = null;
+let downloadedUpdateSource = 'github';
+let activeClientUpdateSource = 'github';
+let activeClientUpdateAttemptId = 0;
+let clientUpdateFallbackSources = [];
+let clientUpdateFailureHandled = false;
+let clientUpdateReportFailures = false;
+let lastClientUpdateError = null;
+
+function trimSlashes(value) {
+  return String(value || '').replace(/^\/+|\/+$/g, '');
+}
+
+function joinUrlPath(...parts) {
+  return parts
+    .map((part) => trimSlashes(part))
+    .filter(Boolean)
+    .join('/');
+}
+
+function formatVersionLike(version, template) {
+  const versionParts = String(version || '').split('.');
+  const templateParts = String(template || '').split('.');
+  if (versionParts.length !== templateParts.length) return String(version || '');
+  return templateParts
+    .map((part, index) => {
+      const value = versionParts[index] || '';
+      if (/^\d+$/.test(value) && /^\d+$/.test(part) && part.length > value.length) {
+        return value.padStart(part.length, '0');
+      }
+      return value;
+    })
+    .join('.');
+}
+
+function versionTokenFromPath(filePath) {
+  const matches = String(filePath || '').match(/\d+(?:\.\d+){2}/g);
+  return matches ? matches[matches.length - 1] : '';
+}
+
+class ModelScopeClientUpdateProvider extends Provider {
+  constructor(configuration, updater, runtimeOptions) {
+    super({ ...runtimeOptions, isUseMultipleRangeRequest: false });
+    this.configuration = configuration;
+    this.baseUrl = new URL('https://modelscope.cn/');
+    this.apiBaseUrl = trimSlashes(configuration.apiBaseUrl || 'https://modelscope.cn/api/v1/studio');
+    this.owner = trimSlashes(configuration.owner || 'xiaoqi0102');
+    this.repo = trimSlashes(configuration.repo || 'Infinite-Canvas');
+    this.revision = String(configuration.revision || 'master');
+    this.directory = trimSlashes(configuration.directory || 'desktop-release');
+  }
+
+  get channel() {
+    return this.getDefaultChannelName();
+  }
+
+  get isUseMultipleRangeRequest() {
+    return false;
+  }
+
+  modelScopeFileUrl(relativePath) {
+    const filePath = joinUrlPath(this.directory, relativePath);
+    const url = new URL(`${this.apiBaseUrl}/${this.owner}/${this.repo}/repo`);
+    url.searchParams.set('Revision', this.revision);
+    url.searchParams.set('FilePath', filePath);
+    return url;
+  }
+
+  pathToModelScopeUrl(filePath) {
+    const value = String(filePath || '').trim();
+    if (/^https?:\/\//i.test(value)) return value;
+    return this.modelScopeFileUrl(value).toString();
+  }
+
+  async getLatestVersion() {
+    const channelFile = `${this.channel}.yml`;
+    const channelUrl = this.modelScopeFileUrl(channelFile);
+    return parseUpdateInfo(await this.httpRequest(channelUrl), channelFile, channelUrl);
+  }
+
+  resolveFiles(updateInfo) {
+    return resolveFiles(updateInfo, this.baseUrl, (filePath) => this.pathToModelScopeUrl(filePath));
+  }
+
+  getBlockMapFiles(baseUrl, oldVersion, newVersion) {
+    const filePath = baseUrl.searchParams.get('FilePath') || '';
+    const newPath = filePath ? `${filePath}.blockmap` : '';
+    const versionToken = versionTokenFromPath(filePath);
+    const newToken = versionToken || newVersion;
+    const oldToken = versionToken ? formatVersionLike(oldVersion, versionToken) : oldVersion;
+    const oldPath = filePath ? `${filePath.split(newToken).join(oldToken)}.blockmap` : '';
+    return [
+      oldPath ? this.modelScopeFileUrl(oldPath) : baseUrl,
+      newPath ? this.modelScopeFileUrl(newPath) : baseUrl,
+    ];
+  }
+}
+
+function clientUpdateModelScopeConfig() {
+  return {
+    provider: 'custom',
+    updateProvider: ModelScopeClientUpdateProvider,
+    apiBaseUrl: process.env.INFINITE_CANVAS_CLIENT_UPDATE_MODELSCOPE_API_ROOT || 'https://modelscope.cn/api/v1/studio',
+    owner: process.env.INFINITE_CANVAS_CLIENT_UPDATE_MODELSCOPE_OWNER || 'xiaoqi0102',
+    repo: process.env.INFINITE_CANVAS_CLIENT_UPDATE_MODELSCOPE_REPO || 'Infinite-Canvas',
+    revision: process.env.INFINITE_CANVAS_CLIENT_UPDATE_MODELSCOPE_REVISION || 'master',
+    directory: process.env.INFINITE_CANVAS_CLIENT_UPDATE_MODELSCOPE_DIR || 'desktop-release',
+  };
+}
+
+function clientUpdateSourceLabel(source) {
+  return source === 'modelscope' ? 'ModelScope' : 'GitHub';
+}
+
+function clientUpdateSourceConfig(source) {
+  return source === 'modelscope' ? clientUpdateModelScopeConfig() : CLIENT_UPDATE_GITHUB_CONFIG;
+}
+
+function clientUpdateSourceOrder(preferred = 'github') {
+  const sources = ['github', 'modelscope'];
+  return [preferred, ...sources.filter((source) => source !== preferred)];
+}
+
+function setClientUpdateSource(source) {
+  activeClientUpdateSource = source;
+  autoUpdater.setFeedURL(clientUpdateSourceConfig(source));
+  appendClientUpdateLog('source-selected', {
+    source,
+    label: clientUpdateSourceLabel(source),
+  });
+}
+
+function clientUpdateErrorMessage(error) {
+  return error && error.message ? error.message : String(error || 'Unknown update error');
+}
+
+function resetClientUpdateFallbackState() {
+  clientUpdateFallbackSources = [];
+  clientUpdateFailureHandled = false;
+  clientUpdateReportFailures = false;
+  lastClientUpdateError = null;
+  activeClientUpdateAttemptId = 0;
+}
 
 function appRoot() {
   return app.isPackaged ? process.resourcesPath : path.join(__dirname, '..');
@@ -212,19 +361,33 @@ function startBackend() {
   });
 }
 
-function installDownloadedClientUpdate(info) {
-  appendClientUpdateLog('install-now', { version: updateVersion(info) });
+function showClientUpdateFailureDialog(error, phase = 'check') {
+  const message = clientUpdateErrorMessage(error);
+  const attemptedSources = clientUpdateSourceOrder('github').map(clientUpdateSourceLabel).join('、');
+  const isDownload = phase === 'download';
+  return showDesktopDialog({
+    type: 'error',
+    buttons: ['知道了'],
+    title: isDownload ? '客户端下载失败' : '客户端更新检查失败',
+    message: isDownload ? '无法下载客户端更新。' : '无法检查客户端更新。',
+    detail: `已尝试更新源：${attemptedSources}\n最后错误：${message}`,
+  });
+}
+
+function installDownloadedClientUpdate(info, source = downloadedUpdateSource) {
+  appendClientUpdateLog('install-now', { version: updateVersion(info), source });
   stopBackend();
   setTimeout(() => {
     autoUpdater.quitAndInstall(false, true);
   }, 300);
 }
 
-async function promptInstallDownloadedClientUpdate(info) {
+async function promptInstallDownloadedClientUpdate(info, source = downloadedUpdateSource) {
   if (installPromptVisible) return;
   installPromptVisible = true;
   try {
     const version = updateVersion(info);
+    const sourceLabel = clientUpdateSourceLabel(source);
     const result = await showDesktopDialog({
       type: 'info',
       buttons: ['重启并安装', '稍后'],
@@ -232,20 +395,100 @@ async function promptInstallDownloadedClientUpdate(info) {
       cancelId: 1,
       title: '客户端更新已下载',
       message: version ? `Infinite Canvas ${version} 已下载完成。` : 'Infinite Canvas 客户端更新已下载完成。',
-      detail: '重启后会安装新版客户端。用户数据保存在安装目录同级的 InfiniteCanvas_Data，不会被安装包覆盖。',
+      detail: `下载源：${sourceLabel}\n重启后会安装新版客户端。用户数据保存在安装目录同级的 InfiniteCanvas_Data，不会被安装包覆盖。`,
     });
     if (result.response === 0) {
-      installDownloadedClientUpdate(info);
+      installDownloadedClientUpdate(info, source);
     } else {
-      appendClientUpdateLog('install-deferred', { version });
+      appendClientUpdateLog('install-deferred', { version, source });
     }
   } finally {
     installPromptVisible = false;
   }
 }
 
-async function promptDownloadClientUpdate(info) {
+function checkNextClientUpdateSource() {
+  const source = clientUpdateFallbackSources.shift();
+  if (!source) {
+    const shouldReport = manualUpdateCheckPending || clientUpdateReportFailures;
+    const error = lastClientUpdateError || new Error('All client update sources failed.');
+    clientUpdateState = 'idle';
+    manualUpdateCheckPending = false;
+    resetClientUpdateFallbackState();
+    if (shouldReport) {
+      showClientUpdateFailureDialog(error).catch(() => {});
+    }
+    return;
+  }
+
+  setClientUpdateSource(source);
+  clientUpdateState = 'checking';
+  clientUpdateFailureHandled = false;
+  activeClientUpdateAttemptId += 1;
+  const attemptId = activeClientUpdateAttemptId;
+  appendClientUpdateLog('check-start', {
+    source,
+    attemptId,
+    version: app.getVersion(),
+    fallbackSources: clientUpdateFallbackSources.join(','),
+  });
+  autoUpdater.checkForUpdates().catch((error) => {
+    handleClientUpdateSourceFailure(error, 'check', source, attemptId);
+  });
+}
+
+function handleClientUpdateSourceFailure(
+  error,
+  phase = 'check',
+  expectedSource = activeClientUpdateSource,
+  expectedAttemptId = activeClientUpdateAttemptId,
+) {
+  if (
+    phase === 'check' &&
+    (expectedSource !== activeClientUpdateSource || expectedAttemptId !== activeClientUpdateAttemptId)
+  ) {
+    appendClientUpdateLog('stale-error-ignored', {
+      source: expectedSource,
+      activeSource: activeClientUpdateSource,
+      attemptId: expectedAttemptId,
+      activeAttemptId: activeClientUpdateAttemptId,
+      message: clientUpdateErrorMessage(error),
+    });
+    return true;
+  }
+  if (phase === 'check' && clientUpdateFailureHandled) return true;
+  if (phase === 'check') clientUpdateFailureHandled = true;
+
+  const source = activeClientUpdateSource;
+  const message = clientUpdateErrorMessage(error);
+  lastClientUpdateError = error;
+  appendClientUpdateLog('source-error', { source, phase, message });
+
+  if (clientUpdateFallbackSources.length > 0) {
+    const nextSource = clientUpdateFallbackSources[0];
+    appendClientUpdateLog('source-fallback', {
+      from: source,
+      to: nextSource,
+      phase,
+      message,
+    });
+    checkNextClientUpdateSource();
+    return true;
+  }
+
+  const shouldReport = manualUpdateCheckPending || clientUpdateReportFailures || phase === 'download';
+  clientUpdateState = 'idle';
+  manualUpdateCheckPending = false;
+  resetClientUpdateFallbackState();
+  if (shouldReport) {
+    showClientUpdateFailureDialog(error, phase).catch(() => {});
+  }
+  return false;
+}
+
+async function promptDownloadClientUpdate(info, source = activeClientUpdateSource) {
   const version = updateVersion(info);
+  const sourceLabel = clientUpdateSourceLabel(source);
   const result = await showDesktopDialog({
     type: 'info',
     buttons: ['下载更新', '稍后'],
@@ -253,62 +496,69 @@ async function promptDownloadClientUpdate(info) {
     cancelId: 1,
     title: '发现客户端更新',
     message: version ? `发现 Infinite Canvas 客户端新版本 ${version}。` : '发现 Infinite Canvas 客户端新版本。',
-    detail: '这会从 GitHub Release 下载桌面安装包。网页里的“一键更新”仍保留用于源项目 main.py、VERSION 和 static 更新提醒。',
+    detail: `这会从 ${sourceLabel} 下载桌面安装包。网页里的“一键更新”仍保留用于源项目 main.py、VERSION 和 static 更新提醒。`,
   });
   if (result.response !== 0) {
     clientUpdateState = 'idle';
-    appendClientUpdateLog('download-deferred', { version });
+    manualUpdateCheckPending = false;
+    resetClientUpdateFallbackState();
+    appendClientUpdateLog('download-deferred', { version, source });
     return;
   }
   clientUpdateState = 'downloading';
+  clientUpdateReportFailures = true;
+  downloadedUpdateSource = source;
   lastDownloadProgressLog = 0;
-  appendClientUpdateLog('download-start', { version });
+  appendClientUpdateLog('download-start', { version, source });
   try {
     await autoUpdater.downloadUpdate();
   } catch (error) {
-    clientUpdateState = 'idle';
-    appendClientUpdateLog('download-error', { message: error.message });
-    await showDesktopDialog({
-      type: 'error',
-      buttons: ['知道了'],
-      title: '客户端下载失败',
-      message: '无法下载客户端更新。',
-      detail: error.message,
-    });
+    appendClientUpdateLog('download-error', { source, message: error.message });
+    handleClientUpdateSourceFailure(error, 'download');
   }
 }
 
 function configureClientUpdater() {
   autoUpdater.autoDownload = false;
   autoUpdater.autoInstallOnAppQuit = false;
+  setClientUpdateSource('github');
 
   autoUpdater.on('checking-for-update', () => {
-    appendClientUpdateLog('checking-for-update', { version: app.getVersion() });
+    appendClientUpdateLog('checking-for-update', { source: activeClientUpdateSource, version: app.getVersion() });
   });
 
   autoUpdater.on('update-available', (info) => {
+    const source = activeClientUpdateSource;
     clientUpdateState = 'prompting-download';
     manualUpdateCheckPending = false;
-    appendClientUpdateLog('update-available', { version: updateVersion(info) });
-    promptDownloadClientUpdate(info).catch((error) => {
+    clientUpdateFailureHandled = false;
+    appendClientUpdateLog('update-available', { source, version: updateVersion(info) });
+    promptDownloadClientUpdate(info, source).catch((error) => {
       clientUpdateState = 'idle';
+      resetClientUpdateFallbackState();
       appendClientUpdateLog('prompt-error', { message: error.message });
     });
   });
 
   autoUpdater.on('update-not-available', (info) => {
+    const source = activeClientUpdateSource;
+    const previousError = lastClientUpdateError;
+    const shouldReport = manualUpdateCheckPending || clientUpdateReportFailures;
     clientUpdateState = 'idle';
-    appendClientUpdateLog('update-not-available', { version: updateVersion(info) });
-    if (manualUpdateCheckPending) {
+    appendClientUpdateLog('update-not-available', { source, version: updateVersion(info) });
+    if (shouldReport) {
       showDesktopDialog({
         type: 'info',
         buttons: ['知道了'],
-        title: '客户端已是最新',
-        message: '当前客户端已是最新版本。',
-        detail: `当前版本：${app.getVersion()}`,
+        title: previousError ? '备用更新源未发现新版本' : '客户端已是最新',
+        message: previousError ? '备用更新源当前没有可下载的新客户端版本。' : '当前客户端已是最新版本。',
+        detail: `当前版本：${app.getVersion()}\n检查源：${clientUpdateSourceLabel(source)}${
+          previousError ? `\n上一个源错误：${clientUpdateErrorMessage(previousError)}` : ''
+        }`,
       }).catch(() => {});
     }
     manualUpdateCheckPending = false;
+    resetClientUpdateFallbackState();
   });
 
   autoUpdater.on('download-progress', (progress) => {
@@ -317,6 +567,7 @@ function configureClientUpdater() {
     if (percent >= 100 || now - lastDownloadProgressLog > 30000) {
       lastDownloadProgressLog = now;
       appendClientUpdateLog('download-progress', {
+        source: downloadedUpdateSource,
         percent,
         transferred: progress.transferred,
         total: progress.total,
@@ -328,25 +579,32 @@ function configureClientUpdater() {
     clientUpdateState = 'downloaded';
     manualUpdateCheckPending = false;
     downloadedUpdateInfo = info;
-    appendClientUpdateLog('update-downloaded', { version: updateVersion(info) });
-    promptInstallDownloadedClientUpdate(info).catch((error) => {
+    downloadedUpdateSource = activeClientUpdateSource;
+    const source = downloadedUpdateSource;
+    resetClientUpdateFallbackState();
+    appendClientUpdateLog('update-downloaded', { source, version: updateVersion(info) });
+    promptInstallDownloadedClientUpdate(info, source).catch((error) => {
       appendClientUpdateLog('install-prompt-error', { message: error.message });
     });
   });
 
   autoUpdater.on('error', (error) => {
-    const wasManual = manualUpdateCheckPending;
-    clientUpdateState = 'idle';
-    manualUpdateCheckPending = false;
-    appendClientUpdateLog('update-error', { message: error.message });
-    if (wasManual) {
-      showDesktopDialog({
-        type: 'error',
-        buttons: ['知道了'],
-        title: '客户端更新检查失败',
-        message: '无法检查客户端更新。',
-        detail: error.message,
-      }).catch(() => {});
+    appendClientUpdateLog('update-error', {
+      source: activeClientUpdateSource,
+      state: clientUpdateState,
+      message: clientUpdateErrorMessage(error),
+    });
+    if (clientUpdateState === 'checking') {
+      return;
+    }
+    if (clientUpdateState !== 'downloading') {
+      const shouldReport = manualUpdateCheckPending || clientUpdateReportFailures;
+      clientUpdateState = 'idle';
+      manualUpdateCheckPending = false;
+      resetClientUpdateFallbackState();
+      if (shouldReport) {
+        showClientUpdateFailureDialog(error).catch(() => {});
+      }
     }
   });
 }
@@ -389,23 +647,13 @@ function checkForClientUpdates(options = {}) {
     return;
   }
 
-  clientUpdateState = 'checking';
+  const [firstSource, ...fallbackSources] = clientUpdateSourceOrder('github');
+  clientUpdateFallbackSources = fallbackSources;
+  clientUpdateReportFailures = manual;
+  lastClientUpdateError = null;
   manualUpdateCheckPending = manual;
-  autoUpdater.checkForUpdates().catch((error) => {
-    const wasManual = manualUpdateCheckPending;
-    clientUpdateState = 'idle';
-    manualUpdateCheckPending = false;
-    appendClientUpdateLog('check-error', { message: error.message });
-    if (wasManual) {
-      showDesktopDialog({
-        type: 'error',
-        buttons: ['知道了'],
-        title: '客户端更新检查失败',
-        message: '无法检查客户端更新。',
-        detail: error.message,
-      }).catch(() => {});
-    }
-  });
+  clientUpdateFallbackSources.unshift(firstSource);
+  checkNextClientUpdateSource();
 }
 
 function scheduleClientUpdateCheck() {

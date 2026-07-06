@@ -1712,7 +1712,7 @@
                     <span id="update-now-text" class="update-now-text" data-i18n="update.oneClick">一键更新</span>
                 </button>
                 <div id="project-version-badge" class="project-version-badge" title="点击检测更新" role="button" tabindex="0" onclick="checkForUpdates(true)" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();checkForUpdates(true);}">v-</div>
-                <button id="client-update-btn" class="client-update-btn" onclick="checkClientUpdate()" type="button" title="检查客户端更新" hidden>
+                <button id="client-update-btn" class="client-update-btn" onclick="checkClientUpdate()" type="button" title="检查客户端更新，GitHub 不可用时自动切换 ModelScope" hidden>
                     <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                         <path d="M21 12a9 9 0 1 1-2.64-6.36"></path>
                         <path d="M21 3v6h-6"></path>
@@ -2308,7 +2308,7 @@
             if(!api) return;
             const checking = btn.classList.contains('is-checking');
             text.textContent = checking ? (isEn ? 'Checking...' : '检查中...') : (isEn ? 'Client update' : '检查客户端更新');
-            btn.title = isEn ? 'Check desktop client updates' : '检查桌面客户端更新';
+            btn.title = isEn ? 'Check desktop client updates; falls back to ModelScope if GitHub is unavailable' : '检查桌面客户端更新，GitHub 不可用时自动切换 ModelScope';
             btn.setAttribute('aria-label', btn.title);
         }
 

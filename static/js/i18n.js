@@ -1,5 +1,5 @@
 (function(){
-    const VERSION = '2026.07.6.cloud-sync.2';
+    const VERSION = '2026.07.6.cloud-sync.3';
     const scripts = [
         '/static/js/i18n-core.js',
         '/static/js/i18n/common.js',

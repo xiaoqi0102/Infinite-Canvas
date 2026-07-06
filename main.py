@@ -12318,6 +12318,28 @@ async def upload_cloud_sync_config():
         "config": public_cloud_sync_config(config),
     }
 
+@app.get("/api/cloud-sync/export")
+async def export_cloud_sync_config():
+    payload = make_cloud_sync_payload()
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    return JSONResponse(
+        content=payload,
+        media_type="application/json; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="infinite-canvas-api-settings-{stamp}.json"'},
+    )
+
+@app.post("/api/cloud-sync/import")
+async def import_cloud_sync_config(payload: Dict[str, Any]):
+    result = apply_cloud_sync_payload(payload)
+    return {
+        "ok": True,
+        "imported_at": cloud_sync_now_ms(),
+        "backup_dir": result["backup_dir"],
+        "env_count": result["env_count"],
+        "provider_count": len(result["providers"]),
+        "providers": public_api_providers(),
+    }
+
 @app.post("/api/cloud-sync/download")
 async def download_cloud_sync_config():
     config = require_cloud_sync_config(load_cloud_sync_config())

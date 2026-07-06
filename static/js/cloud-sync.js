@@ -15,6 +15,9 @@ const cloudSyncTestBtn = document.getElementById('cloudSyncTestBtn');
 const cloudSyncSaveBtn = document.getElementById('cloudSyncSaveBtn');
 const cloudSyncUploadBtn = document.getElementById('cloudSyncUploadBtn');
 const cloudSyncDownloadBtn = document.getElementById('cloudSyncDownloadBtn');
+const cloudSyncImportFile = document.getElementById('cloudSyncImportFile');
+const cloudSyncImportBtn = document.getElementById('cloudSyncImportBtn');
+const cloudSyncExportBtn = document.getElementById('cloudSyncExportBtn');
 
 let cloudSyncConfig = null;
 let cloudSyncBusy = false;
@@ -50,7 +53,7 @@ function cloudSyncSetStatus(text = '', type = ''){
 
 function cloudSyncSetBusy(busy){
     cloudSyncBusy = Boolean(busy);
-    [cloudSyncTestBtn, cloudSyncSaveBtn, cloudSyncUploadBtn, cloudSyncDownloadBtn].forEach(btn => {
+    [cloudSyncTestBtn, cloudSyncSaveBtn, cloudSyncUploadBtn, cloudSyncDownloadBtn, cloudSyncImportBtn, cloudSyncExportBtn].forEach(btn => {
         if(btn) btn.disabled = cloudSyncBusy;
     });
 }
@@ -192,6 +195,82 @@ async function downloadCloudSync(){
     }
 }
 
+function chooseCloudSyncImport(){
+    if(cloudSyncBusy || !cloudSyncImportFile) return;
+    cloudSyncImportFile.value = '';
+    cloudSyncImportFile.click();
+}
+
+function cloudSyncExportFilename(res){
+    const fallback = 'infinite-canvas-api-settings.json';
+    const header = res.headers.get('Content-Disposition') || '';
+    const match = header.match(/filename\*=UTF-8''([^;]+)|filename="?([^"]+)"?/i);
+    const rawName = match ? (match[1] || match[2] || '') : '';
+    if(!rawName) return fallback;
+    try { return decodeURIComponent(rawName); } catch(e) { return rawName; }
+}
+
+async function exportCloudSyncFile(){
+    if(cloudSyncBusy) return;
+    cloudSyncSetBusy(true);
+    cloudSyncSetStatus(tr('api.cloudSyncManualExporting'));
+    try {
+        const res = await fetch('/api/cloud-sync/export');
+        if(!res.ok) {
+            const data = await res.json().catch(() => ({}));
+            throw new Error(data.detail || data.message || `${res.status} ${res.statusText}`);
+        }
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = cloudSyncExportFilename(res);
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+        cloudSyncSetStatus(tr('api.cloudSyncManualExportOk'), 'ok');
+    } catch(err) {
+        cloudSyncSetStatus(err.message || tr('api.cloudSyncManualExportFailed'), 'error');
+    } finally {
+        cloudSyncSetBusy(false);
+    }
+}
+
+async function importCloudSyncFile(event){
+    const file = event.target?.files?.[0];
+    if(!file) return;
+    if(!confirm(tr('api.cloudSyncManualImportConfirm'))) {
+        event.target.value = '';
+        return;
+    }
+    cloudSyncSetBusy(true);
+    cloudSyncSetStatus(tr('api.cloudSyncManualImporting'));
+    try {
+        const text = await file.text();
+        let payload = null;
+        try {
+            payload = JSON.parse(text);
+        } catch(e) {
+            throw new Error(tr('api.cloudSyncManualInvalid'));
+        }
+        const data = await cloudSyncJson('/api/cloud-sync/import', {
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body:JSON.stringify(payload)
+        });
+        broadcastStudioApiChange('providers-changed');
+        const count = Number(data.provider_count || 0);
+        const suffix = count ? ` (${count})` : '';
+        cloudSyncSetStatus(`${tr('api.cloudSyncManualImportOk')}${suffix}`, 'ok');
+    } catch(err) {
+        cloudSyncSetStatus(err.message || tr('api.cloudSyncManualImportFailed'), 'error');
+    } finally {
+        cloudSyncSetBusy(false);
+        event.target.value = '';
+    }
+}
+
 function updateCloudSyncProviderDefaults(){
     if(!cloudSyncProviderInput || !cloudSyncBaseInput) return;
     if(cloudSyncProviderInput.value === 'jianguoyun' && !cloudSyncBaseInput.value.trim()){
@@ -208,6 +287,7 @@ function initializeCloudSyncPage(){
     if(window.StudioTheme) window.StudioTheme.apply();
     if(window.StudioI18n) window.StudioI18n.apply();
     cloudSyncProviderInput?.addEventListener('change', updateCloudSyncProviderDefaults);
+    cloudSyncImportFile?.addEventListener('change', importCloudSyncFile);
     loadCloudSyncConfig();
     refreshIcons();
 }
@@ -227,3 +307,5 @@ window.testCloudSync = testCloudSync;
 window.saveCloudSyncConfig = saveCloudSyncConfig;
 window.uploadCloudSync = uploadCloudSync;
 window.downloadCloudSync = downloadCloudSync;
+window.chooseCloudSyncImport = chooseCloudSyncImport;
+window.exportCloudSyncFile = exportCloudSyncFile;

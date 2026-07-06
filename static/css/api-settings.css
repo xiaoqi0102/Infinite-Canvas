@@ -170,9 +170,20 @@ body.studio-theme-dark .cloud-sync-warning,
 html.studio-theme-dark body .cloud-sync-warning { background:rgba(154,52,18,.16); border-color:rgba(251,146,60,.26); color:#fdba74; }
 .cloud-sync-actions { grid-column:1/-1; display:flex; flex-wrap:wrap; gap:8px; align-items:center; padding-top:2px; }
 .cloud-sync-actions .action-btn[disabled] { opacity:.58; cursor:not-allowed; transform:none; box-shadow:none; }
+.cloud-sync-manual-block { margin-top:18px; }
+.cloud-sync-import-input { display:none; }
+.cloud-sync-manual-card { display:grid; grid-template-columns:1fr 1fr; gap:14px; padding:24px; border:1px solid var(--line); border-radius:14px; background:var(--soft); }
+.cloud-sync-file-btn { min-width:0; min-height:44px; padding:0 18px; border-radius:12px; border:1px solid rgba(37,99,235,.12); background:#1683f7; color:#fff; display:inline-flex; align-items:center; justify-content:center; gap:8px; font-size:13px; line-height:1.2; font-weight:900; transition:all .16s ease; box-shadow:0 12px 24px rgba(22,131,247,.18); }
+.cloud-sync-file-btn:hover { background:#0f73df; transform:translateY(-1px); box-shadow:0 16px 28px rgba(22,131,247,.24); }
+.cloud-sync-file-btn:disabled { opacity:.58; cursor:not-allowed; transform:none; box-shadow:none; }
+.cloud-sync-file-btn i,
+.cloud-sync-file-btn svg { flex:0 0 auto; color:currentColor; }
+body.studio-theme-dark .cloud-sync-manual-card,
+html.studio-theme-dark body .cloud-sync-manual-card { background:var(--soft); border-color:var(--line-strong); }
 @media (max-width:760px) {
     .cloud-sync-form { grid-template-columns:1fr; }
     .cloud-sync-actions .action-btn { flex:1 1 150px; }
+    .cloud-sync-manual-card { grid-template-columns:1fr; padding:16px; }
 }
 /* Key row */
 .key-row { display:grid; grid-template-columns:minmax(0,1fr) auto auto; gap:8px; align-items:center; }

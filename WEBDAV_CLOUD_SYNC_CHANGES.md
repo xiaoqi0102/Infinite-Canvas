@@ -1,6 +1,6 @@
 # WebDAV 云同步 API 配置改动详解
 
-本文档记录当前项目中“WebDAV 云同步、API 平台配置同步、API Key 明文同步、手动上传/下载、自动上传、本地备份恢复”相关改动。目标是方便多设备使用 Infinite Canvas 时，不必在每台设备上重复填写 API Key、模型列表、RunningHub/火山等平台配置。
+本文档记录当前项目中“WebDAV 云同步、API 平台配置同步、API Key 明文同步、手动上传/下载、自动上传、本地备份恢复、本地 JSON 手动导入/导出”相关改动。目标是方便多设备使用 Infinite Canvas 时，不必在每台设备上重复填写 API Key、模型列表、RunningHub/火山等平台配置。
 
 ## 1. 背景与目标
 
@@ -17,6 +17,7 @@
 - 默认支持坚果云 WebDAV，也支持自定义 WebDAV。
 - 同步范围限定为 API 平台配置、模型列表和 API 设置相关 Key，不同步画布、素材、历史记录或完整数据库。
 - 上传/下载均由用户手动触发；可选开启“保存 API 配置后自动上传”。
+- 独立提供本地 JSON 手动导入/导出，方便不用 WebDAV 时做离线备份或迁移。
 - 云端文件按用户选择使用明文 JSON，界面显示明确风险提示。
 - 从云端下载覆盖本机配置前，自动备份本机 `data/api_providers.json` 和 `API/.env`。
 
@@ -24,10 +25,10 @@
 
 | 文件 | 作用 |
 | --- | --- |
-| `main.py` | 新增云同步配置读写、WebDAV 请求、同步包导出/导入、本地备份和 `/api/cloud-sync/*` 接口。 |
+| `main.py` | 新增云同步配置读写、WebDAV 请求、同步包导出/导入、本地备份、WebDAV 同步和本地 JSON 导入/导出接口。 |
 | `static/index.html` | 在“更多设置”中新增 `云同步` 入口，注册 `cloud-sync` iframe 路由，并更新相关页面版本号。 |
-| `static/cloud-sync.html` | 独立 WebDAV 云同步页面，承载同步配置、测试连接、上传和下载操作。 |
-| `static/js/cloud-sync.js` | 读取/保存同步配置、测试连接、上传、下载、下载后广播平台配置刷新。 |
+| `static/cloud-sync.html` | 独立 WebDAV 云同步页面，承载同步配置、测试连接、上传/下载和本地手动导入/导出操作。 |
+| `static/js/cloud-sync.js` | 读取/保存同步配置、测试连接、上传、下载、本地 JSON 导入/导出、下载/导入后广播平台配置刷新。 |
 | `static/api-settings.html` | 移除嵌入式云同步面板，保留 API 平台添加/编辑的纯净界面。 |
 | `static/js/api-settings.js` | API 保存成功后读取云同步自动上传开关，必要时后台触发上传；收到云同步下载广播后刷新平台配置。 |
 | `static/css/api-settings.css` | 云同步面板样式、状态提示、开关、明暗主题和响应式布局。 |
@@ -209,6 +210,57 @@ data/cloud_sync_backups/{YYYYMMDD-HHMMSS}/.env
 }
 ```
 
+### 3.6 导出本地 API 备份 JSON
+
+```http
+GET /api/cloud-sync/export
+```
+
+行为：
+
+1. 读取本机 `data/api_providers.json`。
+2. 读取本机 `API/.env` 中属于 API 设置范围的 env key。
+3. 生成与 WebDAV 云端文件相同 schema 的 JSON。
+4. 通过 `Content-Disposition` 作为附件下载。
+
+默认文件名：
+
+```text
+infinite-canvas-api-settings-{YYYYMMDD-HHMMSS}.json
+```
+
+导出的 JSON 同样明文包含完整 API Key，只适合保存在可信位置。
+
+### 3.7 导入本地 API 备份 JSON
+
+```http
+POST /api/cloud-sync/import
+Content-Type: application/json
+```
+
+请求体就是 `GET /api/cloud-sync/export` 或 WebDAV 云端 `api-settings.json` 的完整 JSON 内容。
+
+行为：
+
+1. 校验 `schema` 必须为 `infinite-canvas.api-sync.v1`。
+2. 覆盖前自动备份当前 `data/api_providers.json` 和 `API/.env`。
+3. 导入 `providers` 到本机 API 平台配置。
+4. 导入 `env` 到 API 设置同步范围内的 env key。
+5. 调用 `reload_env_globals()`，让新 Key 不重启也生效。
+
+成功响应：
+
+```json
+{
+  "ok": true,
+  "imported_at": 1783310000000,
+  "backup_dir": "D:/canvas/Infinite-Canvas/data/cloud_sync_backups/20260706-160500",
+  "env_count": 6,
+  "provider_count": 4,
+  "providers": []
+}
+```
+
 ## 4. 云端同步包格式
 
 云端文件固定名：
@@ -333,6 +385,8 @@ API_PROVIDER_CUSTOM_API_KEY
 | 保存配置 | 保存 WebDAV 地址、账号、密码、目录和自动上传开关。 |
 | 上传到云端 | 先保存同步配置，再上传当前 API 设置快照。 |
 | 从云端下载 | 二次确认后下载并覆盖本机 API 配置和 Key。 |
+| 选择备份 JSON | 手动选择本地备份 JSON，确认后导入并覆盖本机 API 配置和 Key。 |
+| 导出 API 备份 | 手动导出当前 API 设置快照到本地 JSON 文件。 |
 
 ### 6.1 自动上传
 
@@ -358,6 +412,15 @@ queueCloudSyncAutoUpload();
 2. 主页面把变更广播给画布、API 设置等 iframe。
 3. 已打开的 API 设置页收到来自云同步的广播后重新调用 `loadProviders()`。
 4. 云同步页显示“云端 API 配置已恢复”。
+
+### 6.3 手动导入/导出
+
+云同步页下方新增“手动导入导出”模块：
+
+- `导出 API 备份`：调用 `/api/cloud-sync/export`，下载当前本机 API 设置快照。
+- `选择备份 JSON`：读取用户选择的 JSON 文件，二次确认后调用 `/api/cloud-sync/import`。
+- 导入成功后同样广播 `providers-changed`，让画布和 API 设置页重新读取平台配置。
+- 导入前后端会自动备份当前配置，备份目录仍是 `data/cloud_sync_backups/{YYYYMMDD-HHMMSS}/`。
 
 ## 7. WebDAV 请求细节
 

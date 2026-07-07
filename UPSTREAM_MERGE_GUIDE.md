@@ -359,10 +359,21 @@ runRhModelNode
 - `resumeSmartPendingNode()` 必须按 `task.kind === 'video'` 调用 `pollSmartCanvasVideoTask()`。
 - `querySmartImageTaskNow()` 虽然名字含 Image，但要保留视频手动查询分支。
 - 如果上游新增 RunningHub 模型 API，要保留 `runningHubSelectedModel()` 和 `runningHubModelApiSettings()`，并让它走图片任务路径。
+- 智能画布循环节点的提示词列表必须在节点内部滚动，不能让长列表无限撑高节点或把底部操作区挤出节点。
+- 手动缩放循环节点时必须保留内容感知的最小宽高，不能回退到过小的固定最小值。
+- `loopManualSize` 只表示用户手动调过尺寸；自动适配只能把手动尺寸抬到可用最小值，不能覆盖用户主动放大的尺寸。
 
 检查关键词：
 
 ```text
+SMART_LOOP_AUTO_MAX_HEIGHT
+smartLoopMinWidth
+smartLoopMinHeight
+smartLoopHeight
+fitSmartLoopNode
+loopManualSize
+loop-smart-prompt-list
+loop-smart-footer
 createSmartCanvasVideoTask
 runApiVideoGeneration
 pollSmartCanvasVideoTask
@@ -690,7 +701,15 @@ for file_path in files:
 - 后端重启后，已有上游任务 ID 的任务可继续查询。
 - 没有上游任务 ID 的任务不要自动重提。
 
-### 6.2 WebDAV 云同步
+### 6.2 智能画布循环节点 UI
+
+- 智能画布循环节点添加 8 条以上变化提示词后，节点高度不应无限增长。
+- 提示词列表应在节点内部滚动，底部次数、并发和运行按钮应保持可见。
+- 开启图片输入或显示上游提示词预览后，节点仍应保留足够的最小高度。
+- 手动把循环节点缩小到极限时，底部操作区不应跑到节点边框外。
+- 手动把循环节点放大后，再运行、刷新或重新渲染时，不应被自动高度覆盖回较小尺寸。
+
+### 6.3 WebDAV 云同步
 
 - 左侧 “更多设置” 中能看到 “云同步”。
 - 点击后能加载 `static/cloud-sync.html`。
@@ -702,7 +721,7 @@ for file_path in files:
 - 导出 JSON 能正常下载。
 - 导入 JSON 后 API Key 和 provider 列表能生效。
 
-### 6.3 桌面端用户数据持久化
+### 6.4 桌面端用户数据持久化
 
 - 安装到 `D:\Apps\Infinite Canvas` 后，首次启动应创建 `D:\Apps\InfiniteCanvas_Data`。
 - 不应创建或继续使用 `D:\Apps\Infinite Canvas\InfiniteCanvas_Data` 作为主数据目录。
@@ -716,7 +735,7 @@ for file_path in files:
 - 覆盖安装新版后，`D:\Apps\InfiniteCanvas_Data` 内容应保留。
 - 卸载客户端后，NSIS 不应删除 Electron 系统 appData；同级 `InfiniteCanvas_Data` 也不应被安装器删除。
 
-### 6.4 桌面端客户端自动更新
+### 6.5 桌面端客户端自动更新
 
 - 发布新客户端时，GitHub Release 中应有 `latest.yml`、`Infinite-Canvas-Setup-<VERSION>.exe`、`Infinite-Canvas-Setup-<VERSION>.exe.blockmap`。
 - ModelScope 的 `desktop-release/` 目录中应有同名三件套，文件名必须和 `latest.yml` 引用一致。

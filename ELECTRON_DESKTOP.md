@@ -213,6 +213,7 @@ $v
 Run lightweight syntax checks before building:
 
 ```powershell
+node --check static\js\smart-canvas.js
 node --check electron\main.js
 node --check scripts\build-backend.cjs
 node --check scripts\sync-electron-version.cjs
@@ -351,6 +352,8 @@ for file_path in files:
 After publishing, install the generated package on a test machine or clean test directory.
 
 Check that the desktop client starts, the backend launches, `InfiniteCanvas_Data\desktop.log` is written, the `检查客户端更新` button is visible, and user data is created outside the installation directory.
+
+Also smoke test the smart canvas loop node after UI changes: create a loop node with many prompt variants, confirm the prompt list scrolls inside the node, resize the node manually, and verify the footer controls stay visible and clickable.
 
 ## Runtime Data
 

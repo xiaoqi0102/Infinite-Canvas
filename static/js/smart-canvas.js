@@ -18,6 +18,7 @@ const apiKindToggle = document.getElementById('apiKindToggle');
 const inputThumbsRow = document.getElementById('inputThumbsRow');
 const SMART_UPLOAD_MAX = 20;
 const SMART_REFERENCE_IMAGE_MAX = 20;
+const SMART_LOOP_AUTO_MAX_HEIGHT = 456;
 const inputPromptPreview = document.getElementById('inputPromptPreview');
 const minimap = document.getElementById('minimap');
 const minimapContent = document.getElementById('minimapContent');
@@ -1862,7 +1863,17 @@ function imageLayout(images, scale=1, node=null){
         if(isSmartGroupCompactMember(node) && Number.isFinite(explicitW) && explicitW > 24 && Number.isFinite(explicitH) && explicitH > 24){
             return {cols:1, rows:1, width:Math.round(explicitW), height:Math.round(explicitH), thumb:96, single:true};
         }
-        return {cols:1, rows:1, width:Math.round(Number(node.w) || smartLoopWidth(node)), height:Math.round(Math.max(Number(node.h) || 0, smartLoopHeight(node))), thumb:96, single:true};
+        const manualSize = node.loopManualSize === true;
+        const minW = smartLoopMinWidth(node);
+        const minH = smartLoopMinHeight(node);
+        return {
+            cols:1,
+            rows:1,
+            width:Math.round(manualSize && Number.isFinite(explicitW) && explicitW > 24 ? Math.max(explicitW, minW) : smartLoopWidth(node)),
+            height:Math.round(manualSize && Number.isFinite(explicitH) && explicitH > 24 ? Math.max(explicitH, minH) : smartLoopHeight(node)),
+            thumb:96,
+            single:true
+        };
     }
     const count = (images || []).length;
     const s = node?.type === 'smart-image' || !node?.type ? mediaNodeDefaultScale(node) : (Number.isFinite(scale) && scale > 0 ? scale : 1);
@@ -1915,6 +1926,16 @@ function smartLoopCount(node){
 function smartLoopWidth(node){
     return 340;
 }
+function smartLoopMinWidth(node){
+    return node?.imageInput || node?.showPrompt ? smartLoopWidth(node) : 300;
+}
+function smartLoopMinHeight(node){
+    let h = 168;
+    if(node?.imageInput) h += 72;
+    if(node?.showPrompt) h += 72 + smartLoopUpstreamPromptPreviewHeight(node);
+    h += smartNodeInputThumbsHeight(smartLoopPreviewImages(node));
+    return Math.min(h, SMART_LOOP_AUTO_MAX_HEIGHT);
+}
 function smartLoopHeight(node){
     let h = 168;
     if(node?.imageInput) h += 72;
@@ -1923,10 +1944,15 @@ function smartLoopHeight(node){
         h += 94 + promptCount * 58 + smartLoopUpstreamPromptPreviewHeight(node);
     }
     h += smartNodeInputThumbsHeight(smartLoopPreviewImages(node));
-    return h;
+    return Math.min(h, SMART_LOOP_AUTO_MAX_HEIGHT);
 }
 function fitSmartLoopNode(node){
     if(!node || node.type !== 'smart-loop') return;
+    if(node.loopManualSize === true){
+        node.w = Math.max(Number(node.w) || 0, smartLoopMinWidth(node));
+        node.h = Math.max(Number(node.h) || 0, smartLoopMinHeight(node));
+        return;
+    }
     node.w = smartLoopWidth(node);
     node.h = smartLoopHeight(node);
 }
@@ -15722,8 +15748,8 @@ window.onmousemove = e => {
         if(!node) return;
         const dx = (e.clientX - resizeState.startX) / viewport.scale;
         const dy = (e.clientY - resizeState.startY) / viewport.scale;
-        const minW = node.type === 'smart-prompt' ? 260 : node.type === 'smart-loop' ? 252 : node.type === 'smart-group' ? SMART_GROUP_MIN_WIDTH : 48;
-        const minH = node.type === 'smart-prompt' ? 170 : node.type === 'smart-loop' ? 132 : node.type === 'smart-group' ? SMART_GROUP_MIN_HEIGHT : 48;
+        const minW = node.type === 'smart-prompt' ? 260 : node.type === 'smart-loop' ? smartLoopMinWidth(node) : node.type === 'smart-group' ? SMART_GROUP_MIN_WIDTH : 48;
+        const minH = node.type === 'smart-prompt' ? 170 : node.type === 'smart-loop' ? smartLoopMinHeight(node) : node.type === 'smart-group' ? SMART_GROUP_MIN_HEIGHT : 48;
         if(node.type === 'smart-group' && smartGroupImageRefs(node).some(ref => ref.item?.url)){
             // 图片分组：和普通节点一样直接改 w/h，缩略图网格按新尺寸实时重排。不要走下面的“成员缩放”那套，
             // 否则拖动过程里会按成员包围盒/缩放比例收缩，松手才回到拖动宽度（用户反馈的“变宽时先缩小”）。
@@ -15782,6 +15808,7 @@ window.onmousemove = e => {
         }
         node.w = Math.max(minW, Math.round(resizeState.startW + dx));
         node.h = Math.max(minH, Math.round(resizeState.startH + dy));
+        if(node.type === 'smart-loop') node.loopManualSize = true;
         node.scale = 1;
         updateNodeElementDuringResize(node);
         return;

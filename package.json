@@ -1,6 +1,6 @@
 {
   "name": "infinite-canvas-desktop",
-  "version": "2026.7.6",
+  "version": "2026.7.7",
   "description": "Infinite Canvas desktop client powered by Electron and FastAPI.",
   "main": "electron/main.js",
   "private": true,
@@ -40,7 +40,7 @@
       }
     ],
     "win": {
-      "artifactName": "Infinite-Canvas-Setup-2026.07.6.${ext}",
+      "artifactName": "Infinite-Canvas-Setup-2026.07.7.${ext}",
       "target": [
         {
           "target": "nsis",

@@ -31,6 +31,12 @@ let clientUpdateFallbackSources = [];
 let clientUpdateFailureHandled = false;
 let clientUpdateReportFailures = false;
 let lastClientUpdateError = null;
+let clientUpdateProgressWindow = null;
+let latestClientUpdateProgressPayload = null;
+let clientUpdateProgressVersion = '';
+let clientUpdateProgressWindowReady = false;
+let clientUpdateDownloadFailureHandled = false;
+let lastDownloadProgressUiUpdate = 0;
 
 function trimSlashes(value) {
   return String(value || '').replace(/^\/+|\/+$/g, '');
@@ -250,6 +256,335 @@ function updateVersion(info) {
   return info && info.version ? String(info.version) : '';
 }
 
+function clampProgressPercent(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return 0;
+  return Math.max(0, Math.min(100, number));
+}
+
+function formatClientUpdateBytes(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let size = number;
+  let unitIndex = 0;
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024;
+    unitIndex += 1;
+  }
+  const digits = unitIndex === 0 || size >= 100 ? 0 : size >= 10 ? 1 : 2;
+  return `${size.toFixed(digits)} ${units[unitIndex]}`;
+}
+
+function clientUpdateProgressHtml() {
+  return `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>正在下载客户端更新</title>
+  <style>
+    :root { color-scheme: light; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: #f8fafc;
+      color: #111827;
+      font-family: "Segoe UI", "Microsoft YaHei", Arial, sans-serif;
+      overflow: hidden;
+      user-select: none;
+    }
+    .wrap {
+      min-height: 100vh;
+      padding: 20px 22px 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 16px;
+    }
+    .status {
+      margin: 0 0 5px;
+      font-size: 15px;
+      line-height: 1.35;
+      font-weight: 800;
+      color: #0f172a;
+    }
+    .source,
+    .detail {
+      margin: 0;
+      color: #64748b;
+      font-size: 12px;
+      line-height: 1.45;
+      font-weight: 650;
+    }
+    .percent {
+      flex: 0 0 auto;
+      min-width: 58px;
+      text-align: right;
+      color: #2563eb;
+      font-size: 22px;
+      line-height: 1;
+      font-weight: 900;
+      font-variant-numeric: tabular-nums;
+    }
+    .track {
+      width: 100%;
+      height: 10px;
+      overflow: hidden;
+      border-radius: 999px;
+      background: #e2e8f0;
+      box-shadow: inset 0 1px 2px rgba(15, 23, 42, .12);
+    }
+    .bar {
+      width: 0%;
+      height: 100%;
+      border-radius: inherit;
+      background: linear-gradient(90deg, #2563eb, #38bdf8);
+      transition: width .18s ease-out;
+    }
+    .meta {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      color: #475569;
+      font-size: 12px;
+      line-height: 1.45;
+      font-weight: 750;
+      font-variant-numeric: tabular-nums;
+    }
+    .speed {
+      flex: 0 0 auto;
+      color: #2563eb;
+    }
+    body.is-indeterminate .bar {
+      width: 46%;
+      animation: indeterminate 1.15s ease-in-out infinite alternate;
+    }
+    body.is-done .bar {
+      background: linear-gradient(90deg, #16a34a, #22c55e);
+    }
+    body.is-done .percent,
+    body.is-done .speed {
+      color: #16a34a;
+    }
+    @keyframes indeterminate {
+      from { transform: translateX(-70%); }
+      to { transform: translateX(126%); }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .bar { transition: none; animation: none !important; transform: none !important; }
+    }
+  </style>
+</head>
+<body class="is-indeterminate">
+  <div class="wrap">
+    <div class="head">
+      <div>
+        <p class="status" id="status">正在准备下载客户端更新</p>
+        <p class="source" id="source">下载源：-</p>
+      </div>
+      <div class="percent" id="percent">--%</div>
+    </div>
+    <div class="track" aria-hidden="true">
+      <div class="bar" id="bar"></div>
+    </div>
+    <div class="meta">
+      <span id="size">正在连接下载源...</span>
+      <span class="speed" id="speed">正在获取速度...</span>
+    </div>
+    <p class="detail" id="detail">可关闭此窗口，下载会继续；完成后会再次询问是否重启并安装。</p>
+  </div>
+  <script>
+    function setText(id, value) {
+      var element = document.getElementById(id);
+      if (element) element.textContent = value || '';
+    }
+    window.__setClientUpdateProgress = function(payload) {
+      payload = payload || {};
+      var percent = Math.max(0, Math.min(100, Number(payload.percent) || 0));
+      var indeterminate = !!payload.indeterminate;
+      var done = payload.status === 'done';
+      document.body.classList.toggle('is-indeterminate', indeterminate && !done);
+      document.body.classList.toggle('is-done', done);
+      setText('status', payload.statusText || '正在下载客户端更新');
+      setText('source', payload.sourceText || '下载源：-');
+      setText('percent', indeterminate && !done ? '--%' : (payload.percentText || Math.round(percent) + '%'));
+      setText('size', payload.sizeText || '');
+      setText('speed', payload.speedText || '');
+      setText('detail', payload.detailText || '可关闭此窗口，下载会继续；完成后会再次询问是否重启并安装。');
+      var bar = document.getElementById('bar');
+      if (bar && !indeterminate) bar.style.width = percent + '%';
+    };
+  </script>
+</body>
+</html>`;
+}
+
+function clientUpdateProgressDataUrl() {
+  return `data:text/html;charset=utf-8,${encodeURIComponent(clientUpdateProgressHtml())}`;
+}
+
+function buildClientUpdateProgressPayload(progress = {}, options = {}) {
+  const source = options.source || downloadedUpdateSource || activeClientUpdateSource;
+  const version = options.version !== undefined ? options.version : clientUpdateProgressVersion;
+  const percent = clampProgressPercent(progress.percent);
+  const total = Number(progress.total) || 0;
+  const transferred = Number(progress.transferred) || 0;
+  const bytesPerSecond = Number(progress.bytesPerSecond) || 0;
+  const totalKnown = total > 0;
+  const done = options.status === 'done';
+  const indeterminate = !done && !totalKnown && percent <= 0;
+  const statusText =
+    options.statusText ||
+    (done
+      ? '客户端下载完成'
+      : version
+        ? `正在下载 Infinite Canvas ${version}`
+        : '正在下载 Infinite Canvas 客户端更新');
+  const sizeText = totalKnown
+    ? `${formatClientUpdateBytes(transferred)} / ${formatClientUpdateBytes(total)}`
+    : transferred > 0
+      ? `已下载 ${formatClientUpdateBytes(transferred)}`
+      : '正在连接下载源...';
+
+  return {
+    status: options.status || 'downloading',
+    statusText,
+    sourceText: `下载源：${clientUpdateSourceLabel(source)}`,
+    percent: done ? 100 : percent,
+    percentText: done ? '100%' : `${Math.round(percent)}%`,
+    sizeText: done ? '下载已完成' : sizeText,
+    speedText: done ? '完成' : bytesPerSecond > 0 ? `${formatClientUpdateBytes(bytesPerSecond)}/s` : '正在获取速度...',
+    detailText: options.detailText || '可关闭此窗口，下载会继续；完成后会再次询问是否重启并安装。',
+    indeterminate,
+  };
+}
+
+function setClientUpdateTaskbarProgress(payload) {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (!payload || payload.status === 'done') {
+    mainWindow.setProgressBar(-1);
+    return;
+  }
+  if (payload.indeterminate) {
+    mainWindow.setProgressBar(2);
+    return;
+  }
+  mainWindow.setProgressBar(payload.percent / 100);
+}
+
+function sendClientUpdateProgressToWindow(force = false) {
+  const target = clientUpdateProgressWindow;
+  if (!target || target.isDestroyed() || !latestClientUpdateProgressPayload) return;
+  if (!clientUpdateProgressWindowReady) return;
+  const now = Date.now();
+  const complete =
+    latestClientUpdateProgressPayload.percent >= 100 || latestClientUpdateProgressPayload.status === 'done';
+  if (!force && !complete && now - lastDownloadProgressUiUpdate < 180) return;
+  lastDownloadProgressUiUpdate = now;
+  const script = `window.__setClientUpdateProgress(${JSON.stringify(latestClientUpdateProgressPayload)});`;
+  target.webContents.executeJavaScript(script).catch(() => {});
+}
+
+function updateClientUpdateProgressWindow(progress = {}, options = {}) {
+  latestClientUpdateProgressPayload = buildClientUpdateProgressPayload(progress, options);
+  setClientUpdateTaskbarProgress(latestClientUpdateProgressPayload);
+  sendClientUpdateProgressToWindow(!!options.force);
+}
+
+function showClientUpdateProgressWindow(info, source = activeClientUpdateSource) {
+  clientUpdateProgressVersion = updateVersion(info);
+  if (clientUpdateProgressWindow && !clientUpdateProgressWindow.isDestroyed()) {
+    clientUpdateProgressWindow.focus();
+    updateClientUpdateProgressWindow({ percent: 0, transferred: 0, total: 0 }, { source, force: true });
+    return;
+  }
+
+  clientUpdateProgressWindow = new BrowserWindow({
+    width: 480,
+    height: 230,
+    resizable: false,
+    maximizable: false,
+    minimizable: false,
+    closable: true,
+    fullscreenable: false,
+    parent: dialogParentWindow(),
+    modal: false,
+    show: false,
+    title: '正在下载客户端更新',
+    backgroundColor: '#f8fafc',
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+    },
+  });
+  const progressWindow = clientUpdateProgressWindow;
+  clientUpdateProgressWindowReady = false;
+
+  progressWindow.on('closed', () => {
+    if (clientUpdateState === 'downloading') {
+      appendClientUpdateLog('progress-window-closed', { source });
+    }
+    if (clientUpdateProgressWindow === progressWindow) {
+      clientUpdateProgressWindow = null;
+      clientUpdateProgressWindowReady = false;
+    }
+  });
+  progressWindow.webContents.once('did-finish-load', () => {
+    if (clientUpdateProgressWindow !== progressWindow) return;
+    clientUpdateProgressWindowReady = true;
+    sendClientUpdateProgressToWindow(true);
+  });
+  progressWindow.once('ready-to-show', () => {
+    if (clientUpdateProgressWindow === progressWindow && !progressWindow.isDestroyed()) {
+      progressWindow.show();
+    }
+  });
+  progressWindow.loadURL(clientUpdateProgressDataUrl()).catch(() => {});
+  updateClientUpdateProgressWindow({ percent: 0, transferred: 0, total: 0 }, { source, force: true });
+}
+
+function closeClientUpdateProgressWindow(delayMs = 0) {
+  setClientUpdateTaskbarProgress(null);
+  const target = clientUpdateProgressWindow;
+  clientUpdateProgressWindow = null;
+  clientUpdateProgressWindowReady = false;
+  latestClientUpdateProgressPayload = null;
+  clientUpdateProgressVersion = '';
+  lastDownloadProgressUiUpdate = 0;
+  if (!target || target.isDestroyed()) {
+    return;
+  }
+  const close = () => {
+    if (!target.isDestroyed()) target.destroy();
+  };
+  if (delayMs > 0) {
+    setTimeout(close, delayMs);
+  } else {
+    close();
+  }
+}
+
+function completeClientUpdateProgressWindow(info, source = downloadedUpdateSource) {
+  clientUpdateProgressVersion = updateVersion(info) || clientUpdateProgressVersion;
+  updateClientUpdateProgressWindow(
+    { percent: 100, transferred: 1, total: 1 },
+    {
+      source,
+      status: 'done',
+      statusText: '客户端下载完成',
+      detailText: '正在准备安装确认窗口...',
+      force: true,
+    },
+  );
+  closeClientUpdateProgressWindow(650);
+}
+
 function userDataRoot() {
   if (!app.isPackaged) {
     return appRoot();
@@ -461,8 +796,16 @@ function handleClientUpdateSourceFailure(
 
   const source = activeClientUpdateSource;
   const message = clientUpdateErrorMessage(error);
+  if (phase === 'download' && clientUpdateDownloadFailureHandled) {
+    appendClientUpdateLog('duplicate-download-error-ignored', { source, phase, message });
+    return true;
+  }
   lastClientUpdateError = error;
   appendClientUpdateLog('source-error', { source, phase, message });
+  if (phase === 'download') {
+    clientUpdateDownloadFailureHandled = true;
+    closeClientUpdateProgressWindow();
+  }
 
   if (clientUpdateFallbackSources.length > 0) {
     const nextSource = clientUpdateFallbackSources[0];
@@ -508,8 +851,10 @@ async function promptDownloadClientUpdate(info, source = activeClientUpdateSourc
   clientUpdateState = 'downloading';
   clientUpdateReportFailures = true;
   downloadedUpdateSource = source;
+  clientUpdateDownloadFailureHandled = false;
   lastDownloadProgressLog = 0;
   appendClientUpdateLog('download-start', { version, source });
+  showClientUpdateProgressWindow(info, source);
   try {
     await autoUpdater.downloadUpdate();
   } catch (error) {
@@ -562,6 +907,8 @@ function configureClientUpdater() {
   });
 
   autoUpdater.on('download-progress', (progress) => {
+    if (clientUpdateState !== 'downloading') return;
+    updateClientUpdateProgressWindow(progress, { source: downloadedUpdateSource });
     const now = Date.now();
     const percent = Math.round(progress.percent || 0);
     if (percent >= 100 || now - lastDownloadProgressLog > 30000) {
@@ -580,8 +927,10 @@ function configureClientUpdater() {
     manualUpdateCheckPending = false;
     downloadedUpdateInfo = info;
     downloadedUpdateSource = activeClientUpdateSource;
+    clientUpdateDownloadFailureHandled = false;
     const source = downloadedUpdateSource;
     resetClientUpdateFallbackState();
+    completeClientUpdateProgressWindow(info, source);
     appendClientUpdateLog('update-downloaded', { source, version: updateVersion(info) });
     promptInstallDownloadedClientUpdate(info, source).catch((error) => {
       appendClientUpdateLog('install-prompt-error', { message: error.message });
@@ -597,14 +946,16 @@ function configureClientUpdater() {
     if (clientUpdateState === 'checking') {
       return;
     }
-    if (clientUpdateState !== 'downloading') {
-      const shouldReport = manualUpdateCheckPending || clientUpdateReportFailures;
-      clientUpdateState = 'idle';
-      manualUpdateCheckPending = false;
-      resetClientUpdateFallbackState();
-      if (shouldReport) {
-        showClientUpdateFailureDialog(error).catch(() => {});
-      }
+    if (clientUpdateState === 'downloading') {
+      handleClientUpdateSourceFailure(error, 'download');
+      return;
+    }
+    const shouldReport = manualUpdateCheckPending || clientUpdateReportFailures;
+    clientUpdateState = 'idle';
+    manualUpdateCheckPending = false;
+    resetClientUpdateFallbackState();
+    if (shouldReport) {
+      showClientUpdateFailureDialog(error).catch(() => {});
     }
   });
 }
@@ -633,12 +984,7 @@ function checkForClientUpdates(options = {}) {
   }
   if (clientUpdateState === 'downloading') {
     if (manual) {
-      showDesktopDialog({
-        type: 'info',
-        buttons: ['知道了'],
-        title: '客户端更新下载中',
-        message: '客户端更新正在下载，请稍候。',
-      }).catch(() => {});
+      showClientUpdateProgressWindow({ version: clientUpdateProgressVersion }, downloadedUpdateSource);
     }
     return;
   }

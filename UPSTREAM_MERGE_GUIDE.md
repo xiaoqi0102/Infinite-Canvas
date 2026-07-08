@@ -266,12 +266,14 @@ git status
 - 不要把客户端更新入口放回 Electron 原生菜单或 Windows 托盘菜单；用户入口应在 `static/index.html` 侧栏底部。
 - 不要复用网页里的 `update-now-btn`；它仍然只服务源项目更新提醒。
 - `update-available` 时先询问用户是否下载；`update-downloaded` 后再询问是否重启并安装。
+- 用户点击 `下载更新` 后必须显示 Electron 主进程管理的下载进度窗口，并同步 Windows 任务栏进度；进度窗口显示下载源、百分比、已下载/总大小和速度。
+- 进度窗口可以被用户关闭，但关闭不取消安装包下载；下载中再次点击 `检查客户端更新` 应恢复进度窗口。
 - GitHub 检查失败或 GitHub 下载失败时，应记录 `client-update-source-fallback` 并切换到 ModelScope 重新检查。
-- 检查失败处理必须保留 `activeClientUpdateAttemptId` / `stale-error-ignored` 这类 attempt 防抖，避免 `electron-updater` 同时触发 `error` 事件和 Promise `.catch()` 时重复切源或误伤备用源。
+- 检查/下载失败处理必须保留 `activeClientUpdateAttemptId` / `stale-error-ignored` / `duplicate-download-error-ignored` 这类防抖，避免 `electron-updater` 同时触发 `error` 事件和 Promise `.catch()` 时重复切源或误伤备用源。
 - ModelScope 差分更新必须保留 `formatVersionLike()` / `versionTokenFromPath()`，避免 `package.json.version=2026.7.6` 与安装包文件名 `2026.07.6` 的前导零差异导致旧 `.blockmap` 路径推导错误。
 - 重启安装前必须调用 `stopBackend()`，再调用 `autoUpdater.quitAndInstall()`。
 - 更新事件必须写入当前 `InfiniteCanvas_Data/desktop.log`，事件名前缀为 `client-update-`，并记录当前源 `github` / `modelscope`。
-- 必须保留关键更新日志事件：`client-update-source-selected`、`client-update-checking-for-update`、`client-update-source-fallback`、`client-update-update-available`、`client-update-download-progress`、`client-update-update-downloaded`、`client-update-update-error`。
+- 必须保留关键更新日志事件：`client-update-source-selected`、`client-update-checking-for-update`、`client-update-source-fallback`、`client-update-update-available`、`client-update-download-progress`、`client-update-progress-window-closed`、`client-update-duplicate-download-error-ignored`、`client-update-update-downloaded`、`client-update-update-error`。
 - `BrowserWindow.webPreferences` 必须保留 `preload: path.join(__dirname, 'preload.js')`、`contextIsolation: true` 和 `nodeIntegration: false`。
 - preload 只能暴露 `window.InfiniteCanvasDesktop.checkClientUpdate()` 这类窄接口，不要把通用 `ipcRenderer` 暴露给网页。
 
@@ -280,6 +282,7 @@ git status
 - 不要把 `static/index.html` 的“一键更新”改成客户端安装包更新；它是源项目更新提醒。
 - 不要删除 `static/index.html` 左侧底部 `client-update-btn`，它应位于 `project-version-badge` 之后、`author-box` 之前。
 - 不要删除 `autoUpdater.autoDownload = false`，否则会绕过“下载更新 / 稍后”的用户确认。
+- 不要删除 `showClientUpdateProgressWindow()` / `updateClientUpdateProgressWindow()` / `completeClientUpdateProgressWindow()`，否则点击“下载更新”后用户看不到实时下载进度。
 - 不要删除 `ModelScopeClientUpdateProvider`、`clientUpdateSourceOrder()`、`setClientUpdateSource()`、`handleClientUpdateSourceFailure()` 或 `client-update-source-fallback` 日志；这些是双源兜底的关键保护点。
 - 不要让客户端更新写入或覆盖 `InfiniteCanvas_Data`。
 - 发布新客户端时必须上传 `Infinite-Canvas-Setup-<VERSION>.exe`、`.blockmap` 和 `latest.yml` 到同一个 GitHub Release tag，并把同一组三个文件上传到 ModelScope Studio 仓库 `xiaoqi0102/Infinite-Canvas` 的 `desktop-release/` 目录。
@@ -744,7 +747,7 @@ for file_path in files:
 - ModelScope 上传时应先传安装包和 `.blockmap`，最后传 `latest.yml`。
 - ModelScope 文件 API 用 GET 验证三件套应返回 200；不要把 HEAD 返回 404 当作文件缺失。
 - 大安装包可用流式 GET 验证 `Content-Length` 和首个数据块，不必完整下载。
-- 发布后的安装包应做冒烟验证：启动客户端、后端启动、`desktop.log` 写入、`检查客户端更新` 入口可见、用户数据创建在安装目录外。
+- 发布后的安装包应做冒烟验证：启动客户端、后端启动、`desktop.log` 写入、`检查客户端更新` 入口可见、点击 `下载更新` 后出现实时下载进度窗口和任务栏进度、用户数据创建在安装目录外。
 - 旧版打包客户端启动后，GitHub 可用时应优先弹出客户端更新提示。
 - 临时阻断 GitHub 或让 GitHub Release 不可达时，`desktop.log` 应记录 `client-update-source-fallback from=github to=modelscope`，随后尝试 ModelScope。
 - 如果 GitHub 失败后 ModelScope 返回无新版本，手动检查弹窗应提示备用源未发现新版本，并在 `desktop.log` 里保留上一个源的错误。

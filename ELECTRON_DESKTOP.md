@@ -122,6 +122,8 @@ This protects packaged clients from starting with missing backend dependencies s
 
 Packaged Electron clients use `electron-updater` for installer-level updates. When an update is available, the client asks the user before downloading. After download, it asks again before restarting and installing.
 
+After the user chooses `下载更新`, Electron opens a small main-process progress window and updates the Windows taskbar progress indicator. The progress window shows the active source, percentage, transferred size, total size when available, and download speed. Closing that progress window does not cancel the installer download; the download continues in the background and the window can be restored by clicking the sidebar `检查客户端更新` entry while the state is still downloading.
+
 Before installation, Electron stops the local backend process and then calls `autoUpdater.quitAndInstall()`.
 
 ### GitHub Primary Source
@@ -190,11 +192,13 @@ client-update-checking-for-update
 client-update-source-fallback
 client-update-update-available
 client-update-download-progress
+client-update-progress-window-closed
+client-update-duplicate-download-error-ignored
 client-update-update-downloaded
 client-update-update-error
 ```
 
-Logs include the active source, either `github` or `modelscope`, whenever source-specific behavior matters.
+Logs include the active source, either `github` or `modelscope`, whenever source-specific behavior matters. Download progress is logged periodically rather than on every raw progress event, while the visible progress window is refreshed more frequently.
 
 See `Runtime Data` for how `InfiniteCanvas_Data` is selected and where `desktop.log` is written.
 
@@ -382,4 +386,5 @@ Keep these points intact when changing the desktop packaging or update flow:
 7. `formatVersionLike()` and `versionTokenFromPath()` protect `.blockmap` paths when `package.json.version` omits leading zeros but installer filenames keep them.
 8. Electron installer updates only run in packaged clients, not development mode.
 9. The web page "one-click update" is still for source-project updates, not installer-level updates.
-10. User data must stay outside the installation directory and survive uninstall/reinstall cycles.
+10. The visible installer download progress belongs to the Electron main-process update flow. Do not move it into the in-page source update flow or require broad renderer IPC exposure.
+11. User data must stay outside the installation directory and survive uninstall/reinstall cycles.

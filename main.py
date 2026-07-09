@@ -5689,6 +5689,11 @@ def is_yuli_provider(provider):
     base_url = str((provider or {}).get("base_url") or "").lower()
     return "yuli.host" in base_url
 
+def is_lingjing_provider(provider):
+    base_url = str((provider or {}).get("base_url") or "").lower()
+    provider_id = str((provider or {}).get("id") or "").strip().lower()
+    return provider_id == "lingjing" or "apistudio.vip" in base_url
+
 def is_agnes_provider(provider, model=""):
     base_url = str((provider or {}).get("base_url") or "").lower()
     model_id = str(model or "").strip().lower()
@@ -6357,12 +6362,15 @@ async def generate_jimeng_provider_image(prompt, size, model, reference_images=N
     try:
         args = []
         if refs:
-            image_path, created = await jimeng_prepare_local_media(refs[0].get("url"), "image")
-            temp_paths.extend(created)
+            image_paths = []
+            for ref in refs[:10]:
+                image_path, created = await jimeng_prepare_local_media(ref.get("url"), "image")
+                image_paths.append(jimeng_cli_path_arg(image_path))
+                temp_paths.extend(created)
             model_version = jimeng_image_model_version(model, "image2image")
             args = [
                 "image2image",
-                f"--images={jimeng_cli_path_arg(image_path)}",
+                f"--images={','.join(image_paths)}",
                 f"--prompt={prompt}",
                 f"--resolution_type={jimeng_image_resolution(model, size, 'image2image')}",
                 f"--poll={jimeng_poll_seconds()}",
@@ -13786,7 +13794,7 @@ def _collect_video_url(value, urls):
             _collect_video_url(item, urls)
         return
     if isinstance(value, dict):
-        for key in ("videos", "outputs", "data", "result", "content"):
+        for key in ("videos", "outputs", "data", "detail", "result", "content"):
             if key in value:
                 _collect_video_url(value.get(key), urls)
         for key in VIDEO_URL_KEYS:
@@ -13799,11 +13807,18 @@ def video_output_urls(raw):
         return urls
     candidates = [raw]
     data = raw.get("data")
+    detail = raw.get("detail")
     content = raw.get("content")
     if isinstance(data, dict):
         candidates.append(data)
     elif isinstance(data, list):
         for item in data:
+            if isinstance(item, dict):
+                candidates.append(item)
+    if isinstance(detail, dict):
+        candidates.append(detail)
+    elif isinstance(detail, list):
+        for item in detail:
             if isinstance(item, dict):
                 candidates.append(item)
     if isinstance(content, dict):
@@ -13853,6 +13868,8 @@ def looks_like_html_response(text: str) -> bool:
 def video_submit_url_candidates(provider, base_url):
     if is_agnes_provider(provider):
         return [f"{base_url}/v1/videos"]
+    if is_lingjing_provider(provider):
+        return [f"{base_url}/v1/videos"]
     video_request_mode = effective_video_request_mode(provider)
     if video_request_mode == "openai-video-generations":
         return [f"{base_url}/v1/video/generations"]
@@ -13873,6 +13890,11 @@ def video_task_url_candidates(provider, base_url, task_id, submit_url=""):
         return [
             f"{base_url}/agnesapi?{urllib.parse.urlencode({'video_id': task_id})}",
             f"{base_url}/v1/videos/{quoted_id}",
+        ]
+    if is_lingjing_provider(provider):
+        return [
+            f"{base_url}/v1/videos/{quoted_id}",
+            f"{base_url}/v1/video/query?{urllib.parse.urlencode({'id': task_id})}",
         ]
     video_request_mode = effective_video_request_mode(provider)
     if video_request_mode == "openai-video-generations":
@@ -14184,7 +14206,11 @@ async def wait_for_video_task(client, provider, task_id, submit_url="", on_progr
         report_canvas_video_progress(on_progress, {"status": "polling", "raw_last": raw})
         if not isinstance(raw, dict):
             raise HTTPException(status_code=502, detail=f"视频任务查询返回非 JSON 对象：{raw}")
-        task_data = raw.get("data") if isinstance(raw.get("data"), dict) else raw
+        task_data = (
+            raw.get("data") if isinstance(raw.get("data"), dict)
+            else raw.get("detail") if isinstance(raw.get("detail"), dict)
+            else raw
+        )
         if is_video_terminal_error(raw):
             raise HTTPException(status_code=502, detail=humanize_video_task_failure(video_task_failure_reason(raw)))
         status = str(task_data.get("status") or task_data.get("task_status") or raw.get("status") or raw.get("task_status") or "").upper()
@@ -14400,6 +14426,17 @@ def yuli_openai_size(aspect_ratio: str) -> str:
         return "9x16"
     return "16x9"
 
+def lingjing_openai_video_model(model: str) -> str:
+    value = str(model or "").strip() or "veo_3_1-fast"
+    lower = value.lower()
+    if lower.startswith("veo3.1"):
+        value = "veo_3_1" + value[len("veo3.1"):]
+    elif lower.startswith("veo3_1"):
+        value = "veo_3_1" + value[len("veo3_1"):]
+    if value.lower().endswith("-4k"):
+        value = value[:-2] + "4K"
+    return value
+
 def yuli_video_seconds(duration) -> str:
     try:
         value = int(duration)
@@ -14444,6 +14481,51 @@ async def yuli_fetch_reference_bytes(client, ref_url):
         ext = (mime.split("/")[-1] or "png").split("+")[0]
         return (f"input_reference.{ext}", raw, mime)
     return None
+
+async def generate_lingjing_openai_video(client, payload, provider, base_url, requested_model, progress=None):
+    """灵境 API OpenAI 视频格式：POST /v1/videos，参考图走 multipart input_reference。"""
+    submit_url = f"{base_url}/v1/videos"
+    data = {
+        "model": lingjing_openai_video_model(selected_model(requested_model, "veo_3_1-fast")),
+        "prompt": str(payload.prompt or ""),
+        "seconds": yuli_video_seconds(payload.duration),
+        "size": yuli_openai_size(payload.aspect_ratio or payload.size),
+        "watermark": "true" if payload.watermark else "false",
+    }
+    files = []
+    for ref in (payload.images or [])[:3]:
+        ref_file = await yuli_fetch_reference_bytes(client, getattr(ref, "url", ""))
+        if ref_file:
+            files.append(("input_reference", ref_file))
+    headers = api_headers(json_body=False, provider=provider)
+    if files:
+        response = await client.post(submit_url, headers=headers, data=data, files=files)
+    else:
+        multipart_fields = [(key, (None, value)) for key, value in data.items()]
+        response = await client.post(submit_url, headers=headers, files=multipart_fields)
+    response.raise_for_status()
+    try:
+        raw = response.json()
+    except Exception as exc:
+        resp_text = (response.text or "")[:500]
+        raise HTTPException(status_code=502, detail=f"灵境 API 视频接口返回非 JSON 响应（状态 {response.status_code}）：{resp_text}") from exc
+    task_id = str(raw.get("id") or extract_task_id(raw) or raw.get("task_id") or "").strip()
+    if task_id:
+        report_canvas_video_progress(progress, {
+            "status": "polling",
+            "upstream_task_id": task_id,
+            "task_id": task_id,
+            "submit_url": submit_url,
+            "raw_submit": raw,
+        })
+    result = raw
+    if task_id and not video_output_urls(raw):
+        result = await wait_for_video_task(client, provider, task_id, submit_url, progress)
+    urls = video_output_urls(result)
+    if not urls:
+        raise HTTPException(status_code=502, detail=f"灵境 API 视频生成成功但没有返回视频：{result}")
+    local_urls = [await save_remote_video_to_output(url) for url in urls]
+    return {"videos": local_urls, "task_id": task_id, "raw": result}
 
 async def generate_yuli_openai_video(client, payload, provider, base_url, requested_model, progress=None):
     """玉玉API veo3.1 走 OpenAI multipart 格式 /v1/videos，支持 seconds 时长控制。"""
@@ -14527,6 +14609,7 @@ async def build_canvas_video_result(payload: CanvasVideoRequest, progress=None):
     is_apimart = is_apimart_provider(provider) and not is_single_video_generations
     is_volcengine = is_volcengine_provider(provider)
     is_yuli = is_yuli_provider(provider)
+    is_lingjing = is_lingjing_provider(provider)
     is_agnes = is_agnes_provider(provider, payload.model)
     volc_is_proxy = bool(is_volcengine and urllib.parse.urlparse(base_url).path.rstrip("/"))
     submit_urls = video_submit_url_candidates(provider, base_url)
@@ -14543,6 +14626,16 @@ async def build_canvas_video_result(payload: CanvasVideoRequest, progress=None):
         except httpx.HTTPError as exc:
             log_net_error(f"视频(Agnes) 网络/TLS错误 model={requested_model}", exc)
             raise HTTPException(status_code=502, detail=f"请求 Agnes 视频接口失败：{exc}") from exc
+    if is_lingjing:
+        try:
+            async with httpx.AsyncClient(timeout=VIDEO_POLL_TIMEOUT) as lingjing_client:
+                return await generate_lingjing_openai_video(lingjing_client, payload, provider, base_url, requested_model, progress)
+        except httpx.HTTPStatusError as exc:
+            text = exc.response.text
+            raise HTTPException(status_code=exc.response.status_code, detail=f"灵境 API 视频接口错误：{text}") from exc
+        except httpx.HTTPError as exc:
+            log_net_error(f"视频(灵境) 网络/TLS错误 model={requested_model}", exc)
+            raise HTTPException(status_code=502, detail=f"请求灵境 API 视频接口失败：{exc}") from exc
     # 玉玉API veo3.1 走 OpenAI multipart 格式（支持 seconds 时长）；其余模型（doubao 等）
     # 沿用下方原生 /v1/video/create JSON 流程。
     if is_yuli and yuli_is_veo_openai_model(requested_model):

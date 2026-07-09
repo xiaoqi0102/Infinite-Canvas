@@ -1501,7 +1501,7 @@
                 document.getElementById('messages').innerHTML = '';
             }
             addMessageBubble({role:'user', content:message, attachments:pendingRefs});
-            const useStreaming = mode !== 'image';
+            const useStreaming = mode === 'chat';
             const pendingText = mode === 'image' ? tr('chat.generatingImage') : (useStreaming ? '' : (mode === 'agent' ? tr('chat.agentWorking') : ''));
             const assistantBubble = addMessageBubble({role:'assistant', content: pendingText});
             if(useStreaming || mode === 'agent') assistantBubble.bubble.classList.add('streaming');

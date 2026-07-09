@@ -3209,10 +3209,13 @@ function sizePickerLabel(prefix=''){
 function renderSizePickerControl(prefix='', includeSource=false){
     const ratioKey = prefix ? `${prefix}Ratio` : 'ratio';
     const resKey = prefix ? `${prefix}Resolution` : 'resolution';
+    const customRatioKey = prefix ? `${prefix}CustomRatio` : 'customRatio';
+    if(settings[ratioKey] === 'source') applySourceRatioToSettings(prefix);
     const scope = sizePickerScope(prefix);
     const options = (!prefix && settings.engine === 'api') ? ['auto','1k','2k','4k'] : ['1k','2k','4k'];
     const currentRes = settings[resKey] || ((!prefix && settings.engine === 'api') ? defaultSmartApiResolution(settings.model) : '1k');
     const currentRatio = settings[ratioKey] || 'square';
+    const currentCustomRatio = settings[customRatioKey] || (currentRatio === 'source' ? sourceImageRatioLabel(prefix) : '');
     const allowAuto = !prefix && settings.engine === 'api' && settings.apiKind !== 'video' && isGptImageAutoSizeModel(settings.model);
     const ratios = [
         ['square','1:1','正方形'], ['portrait','2:3','竖图'], ['landscape','3:2','横图'], ['portrait43','3:4','竖图'], ['landscape43','4:3','横图'],
@@ -3238,7 +3241,7 @@ function renderSizePickerControl(prefix='', includeSource=false){
                     ${ratios.map(([value, label, sub]) => `<button type="button" class="size-picker-option ${value === currentRatio ? 'active' : ''}" data-smart-param="${ratioKey}" data-smart-value="${escapeHtml(value)}"><span>${escapeHtml(label)}</span><small>${escapeHtml(sub)}</small></button>`).join('')}
                 </div>
                 <div class="size-picker-list">
-                    ${options.filter(v => v !== 'auto').map(value => `<button type="button" class="size-picker-option ${value === currentRes ? 'active' : ''}" data-smart-param="${resKey}" data-smart-value="${value}"><span>${value.toUpperCase()}</span><small>${escapeHtml(apiImageSize(currentRatio === 'source' ? 'square' : currentRatio, value, settings[prefix ? `${prefix}CustomRatio` : 'customRatio'] || '', '') || '')}</small></button>`).join('')}
+                    ${options.filter(v => v !== 'auto').map(value => `<button type="button" class="size-picker-option ${value === currentRes ? 'active' : ''}" data-smart-param="${resKey}" data-smart-value="${value}"><span>${value.toUpperCase()}</span><small>${escapeHtml(apiImageSize(currentRatio, value, currentCustomRatio, '') || '')}</small></button>`).join('')}
                 </div>
             </div>` : ''}
             ${scope === 'custom' ? `<div class="size-picker-pane size-picker-custom">

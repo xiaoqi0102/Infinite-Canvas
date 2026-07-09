@@ -50,10 +50,11 @@
 - 校验 `release/Infinite-Canvas-Setup-<VERSION>.exe`、`.blockmap` 和 `latest.yml`。
 - 按确认后的发布策略上传产物。
 
-### 待确认事项
+### 已确认发布策略
 
-- 当前 `v2026.07.8` GitHub Release 已存在；需要确认是升版发布新 tag，还是覆盖已有 `v2026.07.8` 资产。
-- 需要确认发布目标是仅 GitHub Release，还是 GitHub Release 与 ModelScope 兜底源都上传。
+- 采用方案一：升版发布新 tag `v2026.07.9`，不覆盖已有 `v2026.07.8` 资产。
+- 发布目标包含 GitHub Release 与 ModelScope 兜底源，两个渠道必须上传同名三件套。
+- GitHub Release 创建成功后再上传 ModelScope；若 GitHub 发布失败，不继续上传兜底源。
 
 ### 验收标准
 

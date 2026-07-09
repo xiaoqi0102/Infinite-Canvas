@@ -146,6 +146,8 @@ flowchart LR
 
 基于当前 `main` 发布新的 Windows Electron 客户端版本 `2026.07.9`，使已安装客户端可以通过安装包级自动更新获取新版本。
 
+本次采用方案一：创建新的 `v2026.07.9` GitHub Release，并同步发布到 ModelScope `desktop-release/` 兜底目录。
+
 ### 发布架构
 
 ```mermaid
@@ -179,13 +181,14 @@ flowchart LR
 
 ### 发布顺序
 
-1. 准备版本文件并提交。
-2. 推送 `main` 到 `origin/main`。
-3. 构建 Windows 客户端。
-4. 校验本地 `release/` 三件套。
-5. 创建 GitHub Release 并上传三件套。
-6. 按顺序上传 ModelScope：安装包、`.blockmap`、`latest.yml`。
-7. 校验 GitHub Release 资产和 ModelScope 文件 API。
+1. 确认工作区干净、`VERSION` 为 `2026.07.9`、远端不存在 `v2026.07.9`。
+2. 执行构建前语法检查和 `npm run sync:desktop-version`，确认版本元数据一致。
+3. 如版本元数据或发布说明有变化，先提交并推送 `main` 到 `origin/main`。
+4. 构建 Windows 客户端。
+5. 校验本地 `release/` 三件套。
+6. 创建 GitHub Release 并上传三件套。
+7. 按顺序上传 ModelScope：安装包、`.blockmap`、`latest.yml`。
+8. 校验 GitHub Release 资产和 ModelScope 文件 API。
 
 ### 风险控制
 

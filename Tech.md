@@ -191,13 +191,13 @@ Select-String -Path electron\main.js,package.json -Pattern "electron-updater|Mod
 
 ### 需要修改的文件
 
-- `VERSION`：更新为 `2026.07.9`。
-- `package.json`：由 `npm run sync:desktop-version` 更新 Electron semver 和 `build.win.artifactName`。
-- `package-lock.json`：由 `npm run sync:desktop-version` 同步包版本。
-- `static/update-notes.json`：更新客户端发布说明。
-- `prd.md`：记录客户端构建发布需求。
-- `Design.md`：记录客户端发布设计。
-- `Tech.md`：记录客户端发布技术规格。
+- `VERSION`：保持为 `2026.07.9`。
+- `package.json`：由 `npm run sync:desktop-version` 校验或更新 Electron semver 和 `build.win.artifactName`。
+- `package-lock.json`：由 `npm run sync:desktop-version` 校验或同步包版本。
+- `static/update-notes.json`：保持客户端发布说明为 `2026.07.09`。
+- `prd.md`：记录已选择方案一。
+- `Design.md`：记录方案一的发布顺序和风险控制。
+- `Tech.md`：记录执行阶段命令、验证标准和回滚策略。
 
 ### 命令计划
 
@@ -205,11 +205,13 @@ Select-String -Path electron\main.js,package.json -Pattern "electron-updater|Mod
 
 ```powershell
 git status --short --branch
-Set-Content -LiteralPath VERSION -Value "2026.07.9" -Encoding UTF8
+$v = (Get-Content -LiteralPath VERSION -TotalCount 1).Trim()
+if ($v -ne "2026.07.9") { throw "VERSION 必须为 2026.07.9，当前为 $v" }
 npm run sync:desktop-version
+gh release view "v$v" --repo xiaoqi0102/Infinite-Canvas --json tagName
 ```
 
-更新 `static/update-notes.json` 后提交并推送：
+如果 `gh release view` 返回 `release not found`，说明可以创建新 Release。若 `npm run sync:desktop-version` 或文档细化产生文件变更，提交并推送：
 
 ```powershell
 git add VERSION package.json package-lock.json static/update-notes.json prd.md Design.md Tech.md

@@ -1,22 +1,22 @@
 {
-  "version": "2026.07.08",
-  "updated_at": "2026-07-08T18:49:36+08:00",
+  "version": "2026.07.09",
+  "updated_at": "2026-07-09T13:09:52+08:00",
   "items": [
     {
       "type": "feature",
-      "text": "修复即梦CLI只参考第一张图bug"
+      "text": "合并源项目最新修复并发布新版桌面客户端"
     },
     {
       "type": "feature",
-      "text": "修复GPT对话生成图片失败bug"
+      "text": "修复即梦CLI多参考图、GPT对话图片生成和智能画布来源比例尺寸适配问题"
     },
     {
       "type": "feature",
-      "text": "修复智能画布匹配图片比例后，1k/2k/4k尺寸没有自动适配bug"
+      "text": "保留 GitHub 优先、ModelScope 兜底的客户端安装包更新链路"
     },
     {
       "type": "feature",
-      "text": "modelscope更新源暂不可用"
+      "text": "版本升级到 2026.07.9"
     }
   ]
 }

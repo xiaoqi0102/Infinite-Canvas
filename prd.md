@@ -31,3 +31,33 @@
 - 不直接丢弃用户未提交改动。
 - 不未经用户确认在 `main` 上直接解冲突。
 - 不提交或推送代码，除非用户另行明确要求。
+
+## 客户端构建发布需求
+
+### 业务背景
+
+合并源项目更新后，需要构建新的 Electron Windows 客户端，并将客户端更新产物发布到维护仓库对应的分发渠道。
+
+### 用户故事
+
+- 作为维护者，我希望基于最新 `main` 构建新的 Windows 安装包。
+- 作为维护者，我希望发布产物可被已安装客户端的自动更新机制检测到。
+- 作为维护者，我希望 GitHub Release 与 ModelScope 兜底源中的安装包、`.blockmap` 和 `latest.yml` 保持一致。
+
+### 核心范围
+
+- 使用项目既定 `npm run build:win` 构建客户端。
+- 校验 `release/Infinite-Canvas-Setup-<VERSION>.exe`、`.blockmap` 和 `latest.yml`。
+- 按确认后的发布策略上传产物。
+
+### 待确认事项
+
+- 当前 `v2026.07.8` GitHub Release 已存在；需要确认是升版发布新 tag，还是覆盖已有 `v2026.07.8` 资产。
+- 需要确认发布目标是仅 GitHub Release，还是 GitHub Release 与 ModelScope 兜底源都上传。
+
+### 验收标准
+
+- 本地构建命令成功完成。
+- 三个客户端更新产物存在且 `latest.yml` 引用真实安装包。
+- 远程发布渠道可看到同名三件套。
+- 如发布到 ModelScope，必须先传安装包，再传 `.blockmap`，最后传 `latest.yml`。

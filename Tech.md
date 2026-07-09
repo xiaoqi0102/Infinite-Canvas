@@ -178,3 +178,116 @@ Select-String -Path electron\main.js,package.json -Pattern "electron-updater|Mod
 - 静态 HTML 里大量 `?v=` 缓存版本号容易造成重复冲突，后续可考虑统一生成或集中管理缓存版本。
 - 上游和本地长期在 `main.py` 中叠加视频 provider 逻辑，后续可拆分 provider 适配层，降低每次合并冲突成本。
 - `UPSTREAM_MERGE_GUIDE.md` 内容较长，后续可将高风险文件检查拆成脚本化验证，减少人工漏检。
+
+## 客户端构建发布技术规格
+
+### 目标版本
+
+- 项目版本：`2026.07.9`
+- GitHub tag：`v2026.07.9`
+- 安装包：`release/Infinite-Canvas-Setup-2026.07.9.exe`
+- blockmap：`release/Infinite-Canvas-Setup-2026.07.9.exe.blockmap`
+- 更新元数据：`release/latest.yml`
+
+### 需要修改的文件
+
+- `VERSION`：更新为 `2026.07.9`。
+- `package.json`：由 `npm run sync:desktop-version` 更新 Electron semver 和 `build.win.artifactName`。
+- `package-lock.json`：由 `npm run sync:desktop-version` 同步包版本。
+- `static/update-notes.json`：更新客户端发布说明。
+- `prd.md`：记录客户端构建发布需求。
+- `Design.md`：记录客户端发布设计。
+- `Tech.md`：记录客户端发布技术规格。
+
+### 命令计划
+
+#### 1. 版本准备
+
+```powershell
+git status --short --branch
+Set-Content -LiteralPath VERSION -Value "2026.07.9" -Encoding UTF8
+npm run sync:desktop-version
+```
+
+更新 `static/update-notes.json` 后提交并推送：
+
+```powershell
+git add VERSION package.json package-lock.json static/update-notes.json prd.md Design.md Tech.md
+git commit -m "chore: 发布桌面客户端 2026.07.9"
+git push origin main
+```
+
+#### 2. 构建
+
+```powershell
+npm run build:win
+```
+
+该命令会自动执行：
+
+- `npm run sync:desktop-version`
+- `npm run build:backend`
+- `electron-builder --win nsis`
+
+#### 3. 本地产物校验
+
+```powershell
+$v = (Get-Content -LiteralPath VERSION -TotalCount 1).Trim()
+Test-Path "release\Infinite-Canvas-Setup-$v.exe"
+Test-Path "release\Infinite-Canvas-Setup-$v.exe.blockmap"
+Test-Path "release\latest.yml"
+Get-Content "release\latest.yml"
+```
+
+`latest.yml` 必须引用 `Infinite-Canvas-Setup-2026.07.9.exe`。
+
+#### 4. GitHub Release 发布
+
+```powershell
+$v = (Get-Content -LiteralPath VERSION -TotalCount 1).Trim()
+gh release create "v$v" `
+  "release\Infinite-Canvas-Setup-$v.exe" `
+  "release\Infinite-Canvas-Setup-$v.exe.blockmap" `
+  "release\latest.yml" `
+  --repo xiaoqi0102/Infinite-Canvas `
+  --title "Infinite Canvas Desktop v$v" `
+  --latest
+```
+
+#### 5. ModelScope 上传
+
+使用项目 `venv` 中的 `modelscope` Python 包，通过 `HubApi.upload_file(repo_type='studio')` 上传。
+
+上传顺序固定为：
+
+1. `Infinite-Canvas-Setup-2026.07.9.exe`
+2. `Infinite-Canvas-Setup-2026.07.9.exe.blockmap`
+3. `latest.yml`
+
+### 验证标准
+
+#### GitHub Release
+
+```powershell
+gh release view "v2026.07.9" --repo xiaoqi0102/Infinite-Canvas --json tagName,name,url,assets
+```
+
+预期包含三个资产，且文件名为 `2026.07.9`。
+
+#### ModelScope
+
+使用 GET 校验以下路径返回 `200`：
+
+- `desktop-release/Infinite-Canvas-Setup-2026.07.9.exe`
+- `desktop-release/Infinite-Canvas-Setup-2026.07.9.exe.blockmap`
+- `desktop-release/latest.yml`
+
+`latest.yml` 内容必须引用 `Infinite-Canvas-Setup-2026.07.9.exe`。
+
+### 回滚策略
+
+- 如果版本准备提交失败，不构建。
+- 如果本地构建失败，不发布 Release。
+- 如果 GitHub Release 创建失败，不上传 ModelScope。
+- 如果 ModelScope 上传失败，保留 GitHub Release 并报告缺失兜底源；不得声称双源发布完成。
+- 如果远程校验失败，报告具体缺失资产或状态码。

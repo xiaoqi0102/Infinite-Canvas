@@ -139,3 +139,57 @@ flowchart LR
 - 静态 HTML 冲突看似只是缓存版本号，但 `static/index.html` 还涉及本地页面入口，不能机械取上游。
 - 当前静态 HTML 未提交改动会被 stash 保存，合并完成后不自动覆盖合并结果；如需恢复，需要单独审查后再应用。
 - 本次不提交、不推送，除非用户后续明确要求。
+
+## 客户端构建发布设计
+
+### 目标
+
+基于当前 `main` 发布新的 Windows Electron 客户端版本 `2026.07.9`，使已安装客户端可以通过安装包级自动更新获取新版本。
+
+### 发布架构
+
+```mermaid
+flowchart LR
+    A["main 最新代码"] --> B["版本准备提交"]
+    B --> C["npm run build:win"]
+    C --> D["release 三件套"]
+    D --> E["GitHub Release v2026.07.9"]
+    D --> F["ModelScope desktop-release/"]
+    E --> G["远程校验"]
+    F --> G
+```
+
+### 版本策略
+
+- 将 `VERSION` 从 `2026.07.8` 升到 `2026.07.9`。
+- 运行 `npm run sync:desktop-version` 同步 `package.json.version`、`package-lock.json` 和 `build.win.artifactName`。
+- `static/update-notes.json` 更新到 `2026.07.09`，说明本次客户端发布包含源项目更新合并与桌面客户端重建。
+- 使用 release tag `v2026.07.9`，不在 `VERSION` 中写前导 `v`。
+
+### 发布目标
+
+1. GitHub Release：`xiaoqi0102/Infinite-Canvas`，tag 为 `v2026.07.9`。
+2. ModelScope Studio：`xiaoqi0102/Infinite-Canvas`，目录为 `desktop-release/`。
+
+两个渠道必须上传同名三件套：
+
+- `Infinite-Canvas-Setup-2026.07.9.exe`
+- `Infinite-Canvas-Setup-2026.07.9.exe.blockmap`
+- `latest.yml`
+
+### 发布顺序
+
+1. 准备版本文件并提交。
+2. 推送 `main` 到 `origin/main`。
+3. 构建 Windows 客户端。
+4. 校验本地 `release/` 三件套。
+5. 创建 GitHub Release 并上传三件套。
+6. 按顺序上传 ModelScope：安装包、`.blockmap`、`latest.yml`。
+7. 校验 GitHub Release 资产和 ModelScope 文件 API。
+
+### 风险控制
+
+- 不复用 `v2026.07.8`，避免客户端自动更新无法识别同版本覆盖。
+- `latest.yml` 必须最后上传到 ModelScope，避免旧客户端提前看到新元数据。
+- 构建前保持工作区干净，构建产物位于被忽略的 `release/` 和 `dist/`。
+- 如果构建或上传任一步失败，停止发布并报告，不继续暴露不完整更新。

@@ -1,22 +1,14 @@
 {
-  "version": "2026.07.09",
-  "updated_at": "2026-07-09T13:09:52+08:00",
+  "version": "2026.07.12",
+  "updated_at": "2026-07-12T15:27:36+08:00",
   "items": [
     {
       "type": "feature",
-      "text": "合并源项目最新修复并发布新版桌面客户端"
+      "text": "修复自动尺寸无效bug"
     },
     {
       "type": "feature",
-      "text": "修复即梦CLI多参考图、GPT对话图片生成和智能画布来源比例尺寸适配问题"
-    },
-    {
-      "type": "feature",
-      "text": "保留 GitHub 优先、ModelScope 兜底的客户端安装包更新链路"
-    },
-    {
-      "type": "feature",
-      "text": "版本升级到 2026.07.9"
+      "text": "PS插件新增选区编辑"
     }
   ]
 }

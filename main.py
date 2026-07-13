@@ -4976,8 +4976,10 @@ def gpt_image_2_skill_auth_file():
     configured = str(codex_env_value("GPT_IMAGE_2_SKILL_AUTH_FILE") or codex_env_value("CODEX_AUTH_FILE") or "").strip()
     if configured:
         return configured
+    project_auth = os.path.join(BASE_DIR, "API", "openai-gpt-account-auth.json")
     user_profile = os.getenv("USERPROFILE", "").strip()
     candidates = [
+        project_auth,
         os.path.join(user_profile, ".codex", "auth.json") if user_profile else "",
         os.path.join(os.path.expanduser("~"), ".codex", "auth.json"),
     ]
@@ -5019,6 +5021,13 @@ def gpt_image_2_skill_api_key(auth_data=None):
             return value
     if isinstance(auth_data, dict):
         value = str(auth_data.get("OPENAI_API_KEY") or auth_data.get("api_key") or auth_data.get("apiKey") or "").strip()
+        if value:
+            return value
+    user_profile = os.getenv("USERPROFILE", "").strip()
+    user_auth = os.path.join(user_profile, ".codex", "auth.json") if user_profile else ""
+    if user_auth:
+        user_data = gpt_image_2_skill_auth_json(user_auth)
+        value = str(user_data.get("OPENAI_API_KEY") or user_data.get("api_key") or user_data.get("apiKey") or "").strip()
         if value:
             return value
     return ""
@@ -5154,6 +5163,57 @@ def parse_gpt_image_2_skill_output(stdout_text="", stderr_text=""):
     paths.extend(re.findall(pattern, text, flags=re.I))
     return items, paths
 
+def gpt_image_2_skill_failure_message(stdout_text="", stderr_text="", returncode=0):
+    combined = "\n".join([str(stdout_text or "").strip(), str(stderr_text or "").strip()]).strip()
+    if not combined:
+        return f"exit={returncode}"
+    objects = []
+    plain_lines = []
+    for line in combined.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            objects.append(json.loads(line))
+        except Exception:
+            plain_lines.append(line)
+    if not objects:
+        try:
+            parsed = json.loads(combined)
+            objects = parsed if isinstance(parsed, list) else [parsed]
+            plain_lines = []
+        except Exception:
+            pass
+    messages = []
+    progress = []
+    for item in objects:
+        if not isinstance(item, dict):
+            continue
+        error = item.get("error")
+        if isinstance(error, dict):
+            msg = error.get("message") or error.get("detail") or error.get("code")
+            if msg:
+                messages.append(str(msg))
+        elif isinstance(error, str) and error.strip():
+            messages.append(error.strip())
+        if item.get("ok") is False:
+            msg = item.get("message") or item.get("detail")
+            if msg:
+                messages.append(str(msg))
+        data = item.get("data")
+        if isinstance(data, dict):
+            msg = data.get("error") or data.get("message") or data.get("status")
+            event_type = str(item.get("type") or data.get("phase") or "").strip()
+            if msg and event_type not in {"request.started", "request_started"}:
+                progress.append(f"{event_type}: {msg}" if event_type else str(msg))
+    if messages:
+        return "；".join(dict.fromkeys(messages))[:1600]
+    if plain_lines:
+        return "\n".join(plain_lines)[:1600]
+    if progress:
+        return ("只收到了进度事件，没有收到最终错误详情：" + "；".join(dict.fromkeys(progress)))[:1600]
+    return combined[:1600]
+
 def codex_postprocess_image_to_requested_size(path="", requested_size="", provider=""):
     provider_text = str(provider or "").strip().lower()
     if provider_text not in {"codex", "gemini-cli"}:
@@ -5185,78 +5245,91 @@ async def generate_codex_provider_image_via_gpt_image_2_skill(prompt, size, mode
         return None
     ref_paths = [str(path) for path in (ref_paths or []) if path and os.path.isfile(str(path))]
     auth_file = gpt_image_2_skill_auth_file()
+    auth_data = gpt_image_2_skill_auth_json(auth_file)
     provider_args, tool_provider = gpt_image_2_skill_provider_args(auth_file)
-    out_path = os.path.join(OUTPUT_OUTPUT_DIR, f"gpt_image_2_{uuid.uuid4().hex}.png")
-    mode = "edit" if ref_paths else "generate"
-    args = [
-        exe,
-        "--json",
-        "--json-events",
-    ]
-    args.extend(provider_args)
-    args.extend([
-        "images",
-        mode,
-        "--prompt",
-        gpt_image_2_skill_prompt_arg(prompt, size, tool_provider),
-        "--out",
-        out_path,
-        "--model",
-        gpt_image_2_skill_model_arg(model, tool_provider),
-        "--format",
-        "png",
-        "--size",
-        gpt_image_2_skill_size_arg(size, model, prompt, tool_provider),
-        "--quality",
-        "high",
-    ])
-    for path in ref_paths:
-        args.extend(["--ref-image", path])
-    if ref_paths and tool_provider == "openai":
-        args.extend(["--input-fidelity", "high"])
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *args,
-            cwd=BASE_DIR,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=codex_timeout())
-    except asyncio.TimeoutError as exc:
+    attempts = [(provider_args, tool_provider)]
+    fallback_api_key = gpt_image_2_skill_api_key(auth_data)
+    if tool_provider == "codex" and fallback_api_key:
+        attempts.append((["--provider", "openai", "--api-key", fallback_api_key], "openai"))
+    last_message = ""
+    for attempt_index, (attempt_provider_args, attempt_provider) in enumerate(attempts):
+        out_path = os.path.join(OUTPUT_OUTPUT_DIR, f"gpt_image_2_{uuid.uuid4().hex}.png")
+        mode = "edit" if ref_paths else "generate"
+        args = [
+            exe,
+            "--json",
+        ]
+        args.extend(attempt_provider_args)
+        args.extend([
+            "images",
+            mode,
+            "--prompt",
+            gpt_image_2_skill_prompt_arg(prompt, size, attempt_provider),
+            "--out",
+            out_path,
+            "--model",
+            gpt_image_2_skill_model_arg(model, attempt_provider),
+            "--format",
+            "png",
+            "--size",
+            gpt_image_2_skill_size_arg(size, model, prompt, attempt_provider),
+            "--quality",
+            "high",
+        ])
+        for path in ref_paths:
+            args.extend(["--ref-image", path])
+        if ref_paths and attempt_provider == "openai":
+            args.extend(["--input-fidelity", "high"])
         try:
-            proc.kill()
-            await proc.wait()
-        except Exception:
-            pass
-        raise HTTPException(status_code=504, detail="GPT Image 2 Skill 执行超时。可设置 CODEX_CLI_TIMEOUT 增大等待时间。") from exc
-    except FileNotFoundError:
-        return None
-    out_text, err_text = codex_decode_output(stdout, stderr)
-    if proc.returncode != 0:
-        message = err_text or out_text or f"exit={proc.returncode}"
-        raise HTTPException(status_code=502, detail=f"GPT Image 2 Skill 调用失败：{message[:1200]}")
-    parsed, reported_paths = parse_gpt_image_2_skill_output(out_text, err_text)
-    candidate_paths = []
-    if os.path.isfile(out_path):
-        candidate_paths.append(out_path)
-    candidate_paths.extend([path for path in reported_paths if path and os.path.isfile(path)])
-    urls = []
-    for path in candidate_paths:
-        processed_path = codex_postprocess_image_to_requested_size(path, size, tool_provider)
-        url = codex_output_url_from_path(processed_path or path)
-        if url:
-            urls.append(url)
-    if not urls:
-        status_text = (out_text or err_text or "")[:1200]
-        raise HTTPException(status_code=502, detail=f"GPT Image 2 Skill 已返回，但没有在输出目录发现图片：{status_text}")
-    return {"type": "url", "value": urls[0]}, {
-        "images": urls,
-        "text": out_text,
-        "provider": "codex",
-        "tool": "gpt-image-2-skill",
-        "tool_provider": tool_provider,
-        "raw": parsed or {"stdout": out_text, "stderr": err_text},
-    }
+            proc = await asyncio.create_subprocess_exec(
+                *args,
+                cwd=BASE_DIR,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=codex_timeout())
+        except asyncio.TimeoutError as exc:
+            try:
+                proc.kill()
+                await proc.wait()
+            except Exception:
+                pass
+            raise HTTPException(status_code=504, detail="GPT Image 2 Skill 执行超时。可设置 CODEX_CLI_TIMEOUT 增大等待时间。") from exc
+        except FileNotFoundError:
+            return None
+        out_text, err_text = codex_decode_output(stdout, stderr)
+        if proc.returncode != 0:
+            message = gpt_image_2_skill_failure_message(out_text, err_text, proc.returncode)
+            last_message = f"{attempt_provider}: {message}"
+            auth_failed = bool(re.search(r"\b401\b|unauthori[sz]ed|access[_ -]?token|api[_ -]?key", message, re.I))
+            if attempt_provider == "codex" and attempt_index + 1 < len(attempts) and auth_failed:
+                continue
+            if auth_failed:
+                return None
+            raise HTTPException(status_code=502, detail=f"GPT Image 2 Skill 调用失败：{last_message[:1200]}")
+        parsed, reported_paths = parse_gpt_image_2_skill_output(out_text, err_text)
+        candidate_paths = []
+        if os.path.isfile(out_path):
+            candidate_paths.append(out_path)
+        candidate_paths.extend([path for path in reported_paths if path and os.path.isfile(path)])
+        urls = []
+        for path in candidate_paths:
+            processed_path = codex_postprocess_image_to_requested_size(path, size, attempt_provider)
+            url = codex_output_url_from_path(processed_path or path)
+            if url:
+                urls.append(url)
+        if not urls:
+            status_text = (out_text or err_text or "")[:1200]
+            raise HTTPException(status_code=502, detail=f"GPT Image 2 Skill 已返回，但没有在输出目录发现图片：{status_text}")
+        return {"type": "url", "value": urls[0]}, {
+            "images": urls,
+            "text": out_text,
+            "provider": "codex",
+            "tool": "gpt-image-2-skill",
+            "tool_provider": attempt_provider,
+            "raw": parsed or {"stdout": out_text, "stderr": err_text},
+        }
+    raise HTTPException(status_code=502, detail=f"GPT Image 2 Skill 调用失败：{last_message[:1200]}")
 
 async def codex_prepare_local_media(ref_url):
     text = str(ref_url or "").strip()
@@ -9121,6 +9194,15 @@ def parse_size_pair(size):
     if not match:
         return 0, 0
     return int(match.group(1)), int(match.group(2))
+
+def snap_size_to_multiple(size, multiple=16):
+    width, height = parse_size_pair(size)
+    if not width or not height:
+        return size
+    step = max(1, int(multiple or 16))
+    snapped_w = max(step, int(math.ceil(width / step) * step))
+    snapped_h = max(step, int(math.ceil(height / step) * step))
+    return f"{snapped_w}x{snapped_h}"
 
 CHAT_RATIO_SIZE_OPTIONS = {
     "1:1": ("1024x1024", "1536x1536", "2048x2048"),
@@ -13396,11 +13478,12 @@ async def build_online_image_result(payload: OnlineImageRequest):
     provider = get_api_provider(payload.provider_id)
     default_model = (provider.get("image_models") or [IMAGE_MODEL])[0]
     model = selected_model(payload.model, default_model)
+    request_size = snap_size_to_multiple(payload.size, 16)
     refs = [ref.dict() for ref in payload.reference_images if ref.url]
     image_refs = image_references(refs)
     count = max(1, min(8, int(payload.n or 1)))
     async def generate_one():
-        image_data, raw_item = await generate_ai_image(payload.prompt, payload.size, payload.quality, model, image_refs, provider["id"])
+        image_data, raw_item = await generate_ai_image(payload.prompt, request_size, payload.quality, model, image_refs, provider["id"])
         try:
             image_items = extract_images(raw_item) if isinstance(raw_item, dict) else [image_data]
         except HTTPException:
@@ -13416,9 +13499,9 @@ async def build_online_image_result(payload: OnlineImageRequest):
     try:
         generated = await asyncio.gather(*(generate_one() for _ in range(count)))
     except httpx.HTTPStatusError as exc:
-        log_net_error(f"生图 HTTP状态错误 provider={provider.get('id')} model={model} size={payload.size}", exc)
+        log_net_error(f"生图 HTTP状态错误 provider={provider.get('id')} model={model} size={request_size}", exc)
         text = exc.response.text or ''
-        friendly = friendly_image_error_detail(text, payload.size, model)
+        friendly = friendly_image_error_detail(text, request_size, model)
         detail = friendly or f"上游生图接口错误：{text[:300]}"
         raise HTTPException(status_code=exc.response.status_code, detail=detail) from exc
     except httpx.HTTPError as exc:
@@ -13443,7 +13526,7 @@ async def build_online_image_result(payload: OnlineImageRequest):
         "provider_name": provider.get("name") or provider["id"],
         "task_id": extract_task_id(raw) if isinstance(raw, dict) else None,
         "request_id": raw.get("id") if isinstance(raw, dict) else None,
-        "params": {"provider_id": provider["id"], "model": model, "size": payload.size, "quality": payload.quality, "n": count, "reference_images": refs},
+        "params": {"provider_id": provider["id"], "model": model, "size": request_size, "requested_size": payload.size, "quality": payload.quality, "n": count, "reference_images": refs},
         "raw_usage": raw.get("usage") if isinstance(raw, dict) else None,
     }
     save_to_history(result)
@@ -16665,7 +16748,7 @@ async def chat_agent(payload: ChatRequest, request: Request, x_user_id: str = He
         model = selected_model(payload.image_model or default_model, default_model)
         prompt = decision.get("prompt") or payload.message
         prompt_size = chat_prompt_size_override(payload.message, payload.size) or chat_prompt_size_override(prompt, payload.size)
-        image_size = prompt_size or inherited_size or payload.size
+        image_size = snap_size_to_multiple(prompt_size or inherited_size or payload.size, 16)
         requested_count = 1 if action == "edit_image" else chat_requested_image_count(payload.message)
         prompts = chat_split_parallel_prompts(prompt, requested_count)
         local_urls = []

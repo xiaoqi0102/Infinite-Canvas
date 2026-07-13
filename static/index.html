@@ -866,6 +866,30 @@
             border-color:var(--stage-border);
             color:var(--text);
         }
+        .client-update-btn.update-available {
+            border-color:rgba(34,197,94,.55);
+            background:rgba(34,197,94,.10);
+            color:#166534;
+            box-shadow:0 0 0 2px rgba(34,197,94,.08);
+        }
+        .client-update-btn.update-available:hover {
+            border-color:#15803d;
+            background:#15803d;
+            color:#fff;
+        }
+        html.theme-dark .client-update-btn.update-available,
+        body.theme-dark .client-update-btn.update-available {
+            border-color:rgba(134,239,172,.58);
+            background:rgba(74,222,128,.14);
+            color:#bbf7d0;
+            box-shadow:0 0 0 2px rgba(74,222,128,.08);
+        }
+        html.theme-dark .client-update-btn.update-available:hover,
+        body.theme-dark .client-update-btn.update-available:hover {
+            border-color:#86efac;
+            background:#86efac;
+            color:#052e16;
+        }
 
         @media (max-height: 760px) {
             .sidebar {
@@ -2473,6 +2497,13 @@
         function openClientUpdateModal(payload) {
             const modal = document.getElementById('client-update-modal');
             if(!modal) return;
+            const btn = document.getElementById('client-update-btn');
+            if(btn) {
+                btn.classList.add('update-available');
+                btn.dataset.availableVersion = String(payload?.version || '').trim();
+                btn.dataset.currentVersion = String(payload?.currentVersion || '').trim();
+                refreshClientUpdateButton();
+            }
             renderClientUpdatePrompt(payload);
             modal.hidden = false;
             document.getElementById('client-update-download-btn')?.focus?.();
@@ -2496,8 +2527,23 @@
             btn.classList.toggle('show', !!api);
             if(!api) return;
             const checking = btn.classList.contains('is-checking');
-            text.textContent = checking ? (isEn ? 'Checking...' : '检查中...') : (isEn ? 'Client update' : '检查客户端更新');
-            btn.title = isEn ? 'Check desktop client updates; falls back to ModelScope if GitHub is unavailable' : '检查桌面客户端更新，GitHub 不可用时自动切换 ModelScope';
+            const updateAvailable = btn.classList.contains('update-available');
+            const availableVersion = btn.dataset.availableVersion || '';
+            const currentVersion = btn.dataset.currentVersion || '';
+            if(checking) {
+                text.textContent = isEn ? 'Checking...' : '检查中...';
+            } else if(updateAvailable) {
+                text.textContent = availableVersion
+                    ? (isEn ? `Update to ${versionLabel(availableVersion)}` : `更新到 ${versionLabel(availableVersion)}`)
+                    : (isEn ? 'Update available' : '发现客户端更新');
+            } else {
+                text.textContent = isEn ? 'Client update' : '检查客户端更新';
+            }
+            btn.title = updateAvailable
+                ? (isEn
+                    ? `Client update available${currentVersion ? `: current ${versionLabel(currentVersion)}` : ''}${availableVersion ? `, latest ${versionLabel(availableVersion)}` : ''}`
+                    : `发现客户端新版本${currentVersion ? `：当前 ${versionLabel(currentVersion)}` : ''}${availableVersion ? `，最新 ${versionLabel(availableVersion)}` : ''}`)
+                : (isEn ? 'Check desktop client updates; falls back to ModelScope if GitHub is unavailable' : '检查桌面客户端更新，GitHub 不可用时自动切换 ModelScope');
             btn.setAttribute('aria-label', btn.title);
         }
 

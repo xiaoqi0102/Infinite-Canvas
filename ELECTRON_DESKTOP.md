@@ -176,6 +176,8 @@ Manual client update checks are available in the desktop web UI sidebar. The but
 
 The button calls a narrow Electron preload IPC bridge and triggers the same installer-level update flow as the delayed background check.
 
+当 Electron 报告 `client-update:available` 时，同一个侧栏按钮会切换为绿色更新提示并显示目标版本。选择“稍后”只关闭弹窗，视觉提醒会保留到客户端重启或完成更新。
+
 ### Difference From In-Page Source Update
 
 The web page "one-click update" flow is not the Electron installer update flow.

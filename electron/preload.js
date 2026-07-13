@@ -9,6 +9,8 @@ contextBridge.exposeInMainWorld('InfiniteCanvasDesktop', {
     ipcRenderer.on('client-update:available', listener);
     return () => ipcRenderer.removeListener('client-update:available', listener);
   },
-  respondToClientUpdate: (requestId, action) =>
-    ipcRenderer.invoke('client-update:respond', { requestId, action }),
+  respondToClientUpdate: (requestId, action, source) =>
+    ipcRenderer.invoke('client-update:respond', { requestId, action, source }),
+  probeClientUpdateConnectivity: (requestId, targetId) =>
+    ipcRenderer.invoke('client-update:probe-connectivity', { requestId, targetId }),
 });

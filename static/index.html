@@ -1128,14 +1128,7 @@
 
         /* 更新弹窗：双卡片需要更宽的面板，避免左右布局被裁剪 */
         #project-update-modal .studio-modal-panel { width:min(880px, 100%); max-height:min(840px, calc(100vh - 48px)); }
-        #client-update-modal .studio-modal-panel { width:min(880px, 100%); max-height:min(760px, calc(100vh - 48px)); }
-        .client-update-source-card { cursor:default; }
-        .client-update-source-card:hover { transform:none; box-shadow:none; }
-        .client-update-source-card.is-fallback { background:#fbfdff; }
-        .client-update-source-card.is-fallback .update-source-badge { background:#eff6ff; color:#2563eb; }
-        .client-update-source-card .connectivity-list { min-height:58px; }
-        .client-update-source-card .connectivity-row { min-height:58px; }
-        .client-update-source-card .connectivity-url { white-space:normal; line-height:1.45; }
+        #client-update-modal .studio-modal-panel { width:min(880px, 100%); max-height:min(840px, calc(100vh - 48px)); }
         .update-notes-box { margin:2px 0 14px; padding:12px; border:1px solid #e5e7eb; border-radius:8px; background:#fbfdff; }
         .update-notes-head { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:8px; }
         .update-notes-head strong { font-size:12px; color:#111827; font-weight:950; }
@@ -1259,14 +1252,16 @@
             border-color:#cbd5e1;
         }
 
-        #connectivity-test-btn {
+        #connectivity-test-btn,
+        #client-connectivity-test-btn {
             border-color:rgba(37,99,235,.24);
             background:#eff6ff;
             color:#1d4ed8;
             transition:transform .16s ease, background-color .18s ease, border-color .18s ease, color .18s ease, box-shadow .18s ease;
         }
 
-        #connectivity-test-btn:hover {
+        #connectivity-test-btn:hover,
+        #client-connectivity-test-btn:hover {
             transform:translateY(-1px);
             border-color:#2563eb;
             background:#2563eb;
@@ -1274,17 +1269,42 @@
             box-shadow:0 10px 22px rgba(37,99,235,.20);
         }
 
-        #connectivity-test-btn:hover svg {
+        #connectivity-test-btn:hover svg,
+        #client-connectivity-test-btn:hover svg {
             transform:rotate(24deg);
         }
 
-        #connectivity-test-btn:active {
+        #connectivity-test-btn:active,
+        #client-connectivity-test-btn:active {
             transform:translateY(0);
             box-shadow:0 5px 12px rgba(37,99,235,.16);
         }
 
-        #connectivity-test-btn svg {
+        #connectivity-test-btn svg,
+        #client-connectivity-test-btn svg {
             transition:transform .18s ease;
+        }
+
+        .studio-modal-close:focus-visible,
+        .studio-modal-btn:focus-visible,
+        .update-source-card:focus-visible {
+            outline:3px solid rgba(37,99,235,.35);
+            outline-offset:2px;
+        }
+
+        @media (max-width: 560px) {
+            .studio-modal { padding:12px; }
+            .studio-modal-actions { flex-wrap:wrap; }
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            .studio-modal-btn,
+            .update-source-card,
+            #connectivity-test-btn svg,
+            #client-connectivity-test-btn svg {
+                transition:none !important;
+            }
+            .connectivity-row.pending .connectivity-indicator { animation:none; }
         }
 
         .studio-modal-btn.primary {
@@ -1335,17 +1355,6 @@
             border-color:#22c55e;
             box-shadow:0 0 0 2px rgba(34,197,94,.35);
             background:rgba(34,197,94,.12);
-        }
-
-        html.theme-dark .client-update-source-card.is-fallback,
-        body.theme-dark .client-update-source-card.is-fallback {
-            background:#0c0d10;
-        }
-
-        html.theme-dark .client-update-source-card.is-fallback .update-source-badge,
-        body.theme-dark .client-update-source-card.is-fallback .update-source-badge {
-            background:rgba(96,165,250,.14);
-            color:#93c5fd;
         }
 
         html.theme-dark .studio-modal-head,
@@ -1408,14 +1417,18 @@
         }
 
         html.theme-dark #connectivity-test-btn,
-        body.theme-dark #connectivity-test-btn {
+        body.theme-dark #connectivity-test-btn,
+        html.theme-dark #client-connectivity-test-btn,
+        body.theme-dark #client-connectivity-test-btn {
             background:rgba(96,165,250,.12);
             border-color:rgba(96,165,250,.34);
             color:#93c5fd;
         }
 
         html.theme-dark #connectivity-test-btn:hover,
-        body.theme-dark #connectivity-test-btn:hover {
+        body.theme-dark #connectivity-test-btn:hover,
+        html.theme-dark #client-connectivity-test-btn:hover,
+        body.theme-dark #client-connectivity-test-btn:hover {
             background:#60a5fa;
             border-color:#60a5fa;
             color:#07111f;
@@ -1938,7 +1951,7 @@
                     <p id="client-update-notes-empty" class="update-notes-empty">暂未获取到这个版本的更新说明。</p>
                 </div>
                 <div class="update-source-list">
-                    <section id="client-update-source-github" class="update-source-card client-update-source-card">
+                    <button id="client-update-source-github" class="update-source-card client-update-source-card" type="button" data-client-update-source="github" onclick="setClientUpdateSourceChoice('github')">
                         <div class="update-source-head">
                             <div class="update-source-title"><strong>GitHub 下载源</strong><span>GitHub Release 安装包，适合可访问 GitHub 的网络。</span></div>
                             <div class="update-source-head-right">
@@ -1946,9 +1959,9 @@
                                 <span class="update-source-badge">自动备用</span>
                             </div>
                         </div>
-                        <div class="connectivity-list"><div class="connectivity-row"><span class="connectivity-indicator"></span><div><div class="connectivity-name">GitHub Release</div><div class="connectivity-url">下载失败时自动切换另一下载源</div></div><div class="connectivity-status">备用</div></div></div>
-                    </section>
-                    <section id="client-update-source-modelscope" class="update-source-card client-update-source-card">
+                        <div class="connectivity-list" data-client-connectivity-source="github"></div>
+                    </button>
+                    <button id="client-update-source-modelscope" class="update-source-card client-update-source-card" type="button" data-client-update-source="modelscope" onclick="setClientUpdateSourceChoice('modelscope')">
                         <div class="update-source-head">
                             <div class="update-source-title"><strong>ModelScope 下载源</strong><span>ModelScope 桌面安装包，适合国内网络。</span></div>
                             <div class="update-source-head-right">
@@ -1956,15 +1969,22 @@
                                 <span class="update-source-badge">自动备用</span>
                             </div>
                         </div>
-                        <div class="connectivity-list"><div class="connectivity-row"><span class="connectivity-indicator"></span><div><div class="connectivity-name">ModelScope 版本文件</div><div class="connectivity-url">下载失败时自动切换另一下载源</div></div><div class="connectivity-status">备用</div></div></div>
-                    </section>
+                        <div class="connectivity-list" data-client-connectivity-source="modelscope"></div>
+                    </button>
                 </div>
-                <div id="client-update-summary" class="update-modal-summary ok" role="status">
+                <div id="client-update-summary" class="update-modal-summary warn" role="status" aria-live="polite">
                     <span class="update-modal-dot" aria-hidden="true"></span>
-                    <div><strong id="client-update-summary-title">下载源可用</strong><span id="client-update-summary-text"></span></div>
+                    <div><strong id="client-update-summary-title">建议先测试连通性</strong><span id="client-update-summary-text"></span></div>
                 </div>
             </div>
             <div class="studio-modal-actions">
+                <button id="client-connectivity-test-btn" class="studio-modal-btn" type="button" onclick="runClientUpdateConnectivityTest()">
+                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <path d="M21 12a9 9 0 1 1-2.64-6.36"></path>
+                        <path d="M21 3v6h-6"></path>
+                    </svg>
+                    <span id="client-connectivity-test-text">测试连通性</span>
+                </button>
                 <button class="studio-modal-btn" type="button" onclick="closeClientUpdateModal()"><span id="client-update-later-text">稍后</span></button>
                 <button id="client-update-download-btn" class="studio-modal-btn primary" type="button" onclick="confirmClientUpdateDownload()">
                     <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12"></path><path d="m7 10 5 5 5-5"></path><path d="M5 21h14"></path></svg>
@@ -1999,6 +2019,11 @@
         let projectUpdateRunning = false;
         let projectUpdateAbort = null;  // 当前更新请求的 AbortController，便于用户中途取消
         let updateSource = localStorage.getItem('studio_update_source') || 'github';
+        const storedClientUpdateSource = localStorage.getItem('studio_client_update_source');
+        let clientUpdateSource = storedClientUpdateSource === 'modelscope' || storedClientUpdateSource === 'github' ? storedClientUpdateSource : '';
+        let clientUpdateConnectivityResult = null;
+        let clientUpdateConnectivityLiveResults = null;
+        let clientConnectivityTesting = false;
         let projectUpdateNotes = null;
 
         function setSidebarPinned(pinned, options = {}) {
@@ -2404,30 +2429,31 @@
 
         let pendingClientUpdatePrompt = null;
 
+        function clientUpdateConnectivityTargets() {
+            const targets = pendingClientUpdatePrompt?.connectivityTargets;
+            return Array.isArray(targets) ? targets : [];
+        }
+
+        function setClientUpdateSummary(kind, title, text) {
+            setModalUpdateSummary('client-update', kind, title, text);
+        }
+
+        function setClientUpdateSourceChoice(source) {
+            clientUpdateSource = source === 'modelscope' ? 'modelscope' : 'github';
+            localStorage.setItem('studio_client_update_source', clientUpdateSource);
+            refreshClientUpdateModalText();
+        }
+
         function renderClientUpdatePrompt(payload = {}) {
             pendingClientUpdatePrompt = payload;
             const isEn = window.StudioI18n?.lang?.() === 'en';
             const version = payload.version || '';
-            const currentVersion = payload.currentVersion || '';
             const source = payload.source === 'modelscope' ? 'modelscope' : 'github';
-            const sourceLabel = payload.sourceLabel || (source === 'modelscope' ? 'ModelScope' : 'GitHub');
-            const title = document.getElementById('client-update-title');
-            const kicker = document.getElementById('client-update-kicker');
-            const copy = document.getElementById('client-update-copy');
+            if(!clientUpdateSource) clientUpdateSource = source;
             const notesTitle = document.getElementById('client-update-notes-title');
             const notesVersion = document.getElementById('client-update-notes-version');
             const notesList = document.getElementById('client-update-notes-list');
             const notesEmpty = document.getElementById('client-update-notes-empty');
-            const summaryTitle = document.getElementById('client-update-summary-title');
-            const summaryText = document.getElementById('client-update-summary-text');
-            const laterText = document.getElementById('client-update-later-text');
-            const downloadText = document.getElementById('client-update-download-text');
-            const closeBtn = document.querySelector('#client-update-modal .studio-modal-close');
-            if(kicker) kicker.textContent = isEn ? 'CLIENT UPDATE AVAILABLE' : '发现客户端更新';
-            if(title) title.textContent = version ? (isEn ? `Update to ${versionLabel(version)}` : `更新到 ${versionLabel(version)}`) : (isEn ? 'Update client' : '更新客户端');
-            if(copy) copy.textContent = isEn
-                ? `Download the desktop installer from ${sourceLabel}. Current ${versionLabel(currentVersion)}, latest ${versionLabel(version || currentVersion)}. If this source fails, the client automatically switches to the fallback source.`
-                : `将从 ${sourceLabel} 下载桌面安装包。当前 ${versionLabel(currentVersion)}，最新 ${versionLabel(version || currentVersion)}；如果当前下载源失败，客户端会自动切换备用源。`;
             if(notesTitle) notesTitle.textContent = isEn ? 'What changed' : '本次更新内容';
             if(notesVersion) notesVersion.textContent = version ? versionLabel(version) : '';
             const notes = Array.isArray(payload.releaseNotes) ? payload.releaseNotes.filter(Boolean) : [];
@@ -2443,31 +2469,77 @@
                 notesEmpty.hidden = notes.length > 0;
                 notesEmpty.textContent = isEn ? 'No release notes were provided for this version.' : '暂未获取到这个版本的更新说明。';
             }
-            ['github', 'modelscope'].forEach(itemSource => {
-                const card = document.getElementById(`client-update-source-${itemSource}`);
-                const active = itemSource === source;
-                card?.classList.toggle('active', active);
-                card?.classList.toggle('is-fallback', !active);
-                const badge = card?.querySelector('.update-source-badge');
-                const row = card?.querySelector('.connectivity-row');
-                const url = card?.querySelector('.connectivity-url');
-                const status = card?.querySelector('.connectivity-status');
-                if(badge) {
-                    badge.classList.toggle('ok', active);
-                    badge.textContent = active ? (isEn ? 'Available' : '可用') : (isEn ? 'Fallback' : '自动备用');
+            refreshClientUpdateModalText();
+        }
+
+        function refreshClientUpdateModalText() {
+            const payload = pendingClientUpdatePrompt || {};
+            const isEn = window.StudioI18n?.lang?.() === 'en';
+            const version = payload.version || '';
+            const currentVersion = payload.currentVersion || '';
+            const sourceName = updateSourceLabel(clientUpdateSource);
+            const title = document.getElementById('client-update-title');
+            const kicker = document.getElementById('client-update-kicker');
+            const copy = document.getElementById('client-update-copy');
+            const laterText = document.getElementById('client-update-later-text');
+            const downloadText = document.getElementById('client-update-download-text');
+            const testText = document.getElementById('client-connectivity-test-text');
+            const closeBtn = document.querySelector('#client-update-modal .studio-modal-close');
+            if(kicker) kicker.textContent = isEn ? 'CLIENT UPDATE AVAILABLE' : '发现客户端更新';
+            if(title) title.textContent = version ? (isEn ? `Update to ${versionLabel(version)}` : `更新到 ${versionLabel(version)}`) : (isEn ? 'Update client' : '更新客户端');
+            if(copy) copy.textContent = isEn
+                ? `The desktop installer will be downloaded from ${sourceName} first. Current ${versionLabel(currentVersion)}, latest ${versionLabel(version || currentVersion)}. If the selected source fails, the client automatically switches to the other source.`
+                : `将优先从 ${sourceName} 下载桌面安装包。当前 ${versionLabel(currentVersion)}，最新 ${versionLabel(version || currentVersion)}；所选下载源失败时，客户端会自动切换另一下载源。`;
+            document.querySelectorAll('[data-client-update-source]').forEach(card => {
+                const source = card.dataset.clientUpdateSource || 'github';
+                const active = source === clientUpdateSource;
+                card.classList.toggle('active', active);
+                card.setAttribute('aria-pressed', active ? 'true' : 'false');
+                const badge = card.querySelector('.update-source-badge');
+                if(clientConnectivityTesting && clientUpdateConnectivityLiveResults) {
+                    return;
+                } else if(!clientUpdateConnectivityResult) {
+                    setSourceBadge(badge, '', updateUiText('待测试', 'Not tested'));
+                } else {
+                    const stats = sourceConnectivityStats(source, clientUpdateConnectivityResult.results || []);
+                    setSourceBadge(badge, stats.ok ? 'ok' : 'bad', stats.ok ? updateUiText('可用', 'Available') : updateUiText('不可用', 'Unavailable'));
                 }
-                row?.classList.toggle('ok', active);
-                if(url) url.textContent = active
-                    ? (isEn ? 'This source found the available client release.' : '已通过此下载源发现可用的客户端版本。')
-                    : (isEn ? 'Used automatically if the current download source fails.' : '当前下载源失败时自动切换到此源。');
-                if(status) status.textContent = active ? (isEn ? 'Ready' : '正常') : (isEn ? 'Standby' : '备用');
             });
-            if(summaryTitle) summaryTitle.textContent = isEn ? `${sourceLabel} source available` : `${sourceLabel} 下载源可用`;
-            if(summaryText) summaryText.textContent = isEn
-                ? `The update is ready to download. Your InfiniteCanvas_Data user data will not be overwritten.`
-                : `客户端安装包已可下载；InfiniteCanvas_Data 中的用户数据不会被安装包覆盖。`;
+            if(clientConnectivityTesting && clientUpdateConnectivityLiveResults) {
+                setClientUpdateSummary(
+                    'warn',
+                    updateUiText('正在测试连通性', 'Testing connectivity'),
+                    updateUiText('正在并发检测客户端安装包节点，结果会实时显示。', 'Installer endpoints are probed in parallel and update live.')
+                );
+                renderClientSourceBadgesLive(clientUpdateConnectivityLiveResults);
+            } else if(!clientUpdateConnectivityResult) {
+                setClientUpdateSummary(
+                    'warn',
+                    updateUiText('建议先测试连通性', 'Connectivity test recommended'),
+                    updateUiText('测试会测速客户端安装包的 GitHub 与 ModelScope 节点，你可以根据结果选择下载源。', 'The test checks the actual installer endpoints on GitHub and ModelScope so you can choose a source.')
+                );
+            } else if((clientUpdateConnectivityResult.sources || {})[clientUpdateSource]?.ok) {
+                const results = clientUpdateConnectivityResult.results || [];
+                const google = results.find(item => item.name === 'Google 连通性');
+                const fastest = results.filter(item => item.source === clientUpdateSource && item.ok).sort((a, b) => (a.elapsed_ms || 999999) - (b.elapsed_ms || 999999))[0];
+                setClientUpdateSummary(
+                    google?.ok ? 'ok' : 'warn',
+                    updateUiText(`${sourceName} 下载源可用`, `${sourceName} source reachable`),
+                    fastest
+                        ? updateUiText(`${sourceName} 安装包节点可访问，最快节点约 ${fastest.elapsed_ms || 0}ms；InfiniteCanvas_Data 用户数据不会被安装包覆盖。`, `${sourceName} installer endpoints are reachable; fastest is about ${fastest.elapsed_ms || 0}ms. InfiniteCanvas_Data will not be overwritten.`)
+                        : updateUiText(`${sourceName} 安装包节点可用，可以下载更新。`, `${sourceName} installer endpoints are reachable.`)
+                );
+            } else {
+                setClientUpdateSummary(
+                    'fail',
+                    updateUiText(`${sourceName} 下载源不可用`, `${sourceName} source unreachable`),
+                    updateUiText(`当前网络无法访问 ${sourceName} 的必需安装包节点。请切换下载源，或检查代理、DNS 后重试。`, `Required ${sourceName} installer endpoints are unreachable. Switch source, or check proxy/DNS and try again.`)
+                );
+            }
+            renderConnectivityListInto(clientUpdateConnectivityResult?.results || clientUpdateConnectivityLiveResults || [], clientUpdateConnectivityTargets(), 'data-client-connectivity-source');
             if(laterText) laterText.textContent = isEn ? 'Later' : '稍后';
             if(downloadText) downloadText.textContent = isEn ? 'Download update' : '下载更新';
+            if(testText && !clientConnectivityTesting) testText.textContent = clientUpdateConnectivityResult ? (isEn ? 'Retest' : '重新测试') : (isEn ? 'Test connectivity' : '测试连通性');
             if(closeBtn) {
                 closeBtn.title = isEn ? 'Update later' : '稍后更新';
                 closeBtn.setAttribute('aria-label', closeBtn.title);
@@ -2480,7 +2552,7 @@
             pendingClientUpdatePrompt = null;
             document.getElementById('client-update-modal').hidden = true;
             try {
-                await desktopClientApi()?.respondToClientUpdate?.(payload.requestId, action);
+                await desktopClientApi()?.respondToClientUpdate?.(payload.requestId, action, clientUpdateSource);
             } catch(e) {}
         }
 
@@ -2504,9 +2576,12 @@
                 btn.dataset.currentVersion = String(payload?.currentVersion || '').trim();
                 refreshClientUpdateButton();
             }
+            clientUpdateConnectivityResult = null;
+            clientUpdateConnectivityLiveResults = null;
+            if(!clientUpdateSource) clientUpdateSource = payload?.source === 'modelscope' ? 'modelscope' : 'github';
             renderClientUpdatePrompt(payload);
             modal.hidden = false;
-            document.getElementById('client-update-download-btn')?.focus?.();
+            document.getElementById('client-connectivity-test-btn')?.focus?.();
         }
 
         const desktopUpdateApi = desktopClientApi();
@@ -2674,14 +2749,14 @@
             return {source, ok:okRequired, avg, okItems:okItems.length, total:sourceItems.length};
         }
 
-        function bestUpdateSourceFromConnectivity(data) {
+        function bestUpdateSourceFromConnectivity(data, fallbackSource = updateSource) {
             const results = data?.results || [];
             const github = sourceConnectivityStats('github', results);
             const ms = sourceConnectivityStats('modelscope', results);
             if(github.ok && ms.ok) return ms.avg < github.avg ? 'modelscope' : 'github';
             if(ms.ok) return 'modelscope';
             if(github.ok) return 'github';
-            return updateSource;
+            return fallbackSource;
         }
 
         function updateTargetLabel(name) {
@@ -2689,8 +2764,12 @@
                 'GitHub 更新列表': ['GitHub 更新列表', 'GitHub update API'],
                 'GitHub 版本文件': ['GitHub 版本文件', 'GitHub version file'],
                 'GitHub 主页': ['GitHub 主页', 'GitHub home page'],
+                'GitHub Release 更新信息': ['GitHub Release 更新信息', 'GitHub Release metadata'],
+                'GitHub 安装包元数据': ['GitHub 安装包元数据', 'GitHub installer metadata'],
+                'GitHub Release 页面': ['GitHub Release 页面', 'GitHub Release page'],
                 'ModelScope 更新列表': ['ModelScope 更新列表', 'ModelScope update list'],
                 'ModelScope 版本文件': ['ModelScope 版本文件', 'ModelScope version file'],
+                'ModelScope 安装包元数据': ['ModelScope 安装包元数据', 'ModelScope installer metadata'],
                 'ModelScope 空间页面': ['ModelScope 空间页面', 'ModelScope space page'],
                 'ModelScope 主页': ['ModelScope 主页', 'ModelScope home page'],
                 'Google 连通性': ['Google 连通性', 'Google connectivity'],
@@ -2707,16 +2786,20 @@
             return updateUiText('失败', 'Failed');
         }
 
-        function setUpdateSummary(kind, title, text) {
-            const box = document.getElementById('project-update-summary');
-            const titleEl = document.getElementById('project-update-summary-title');
-            const textEl = document.getElementById('project-update-summary-text');
+        function setModalUpdateSummary(prefix, kind, title, text) {
+            const box = document.getElementById(`${prefix}-summary`);
+            const titleEl = document.getElementById(`${prefix}-summary-title`);
+            const textEl = document.getElementById(`${prefix}-summary-text`);
             if(box) {
                 box.classList.remove('ok', 'warn', 'fail');
                 box.classList.add(kind || 'warn');
             }
             if(titleEl) titleEl.textContent = title;
             if(textEl) textEl.textContent = text;
+        }
+
+        function setUpdateSummary(kind, title, text) {
+            setModalUpdateSummary('project-update', kind, title, text);
         }
 
         function updateConnectivityTargets() {
@@ -2734,8 +2817,8 @@
             ];
         }
 
-        function renderConnectivityList(results = []) {
-            const allItems = results.length ? results : updateConnectivityTargets().map(item => ({...item, pending:false, untouched:true}));
+        function renderConnectivityListInto(results = [], targets = [], attributeName = 'data-connectivity-source') {
+            const allItems = results.length ? results : targets.map(item => ({...item, pending:false, untouched:true}));
             const renderInto = (list, source) => {
                 if(!list) return;
                 list.replaceChildren();
@@ -2766,8 +2849,12 @@
                 list.append(row);
             });
             };
-            renderInto(document.querySelector('[data-connectivity-source="github"]'), 'github');
-            renderInto(document.querySelector('[data-connectivity-source="modelscope"]'), 'modelscope');
+            renderInto(document.querySelector(`[${attributeName}="github"]`), 'github');
+            renderInto(document.querySelector(`[${attributeName}="modelscope"]`), 'modelscope');
+        }
+
+        function renderConnectivityList(results = []) {
+            renderConnectivityListInto(results, updateConnectivityTargets(), 'data-connectivity-source');
         }
 
         function refreshProjectUpdateModalText() {
@@ -2909,9 +2996,9 @@
             badge.textContent = text;
         }
 
-        function renderSourceBadgesLive(results) {
-            document.querySelectorAll('[data-update-source]').forEach(card => {
-                const source = card.dataset.updateSource || 'github';
+        function renderSourceBadgesLiveInto(results, selector, sourceDataKey) {
+            document.querySelectorAll(selector).forEach(card => {
+                const source = card.dataset[sourceDataKey] || 'github';
                 const badge = card.querySelector('.update-source-badge');
                 if(!badge) return;
                 const items = (results || []).filter(it => it.source === source);
@@ -2925,6 +3012,79 @@
                 setSourceBadge(badge, stats.ok ? 'ok' : 'bad',
                     stats.ok ? updateUiText('可用', 'Available') : updateUiText('不可用', 'Unavailable'));
             });
+        }
+
+        function renderSourceBadgesLive(results) {
+            renderSourceBadgesLiveInto(results, '[data-update-source]', 'updateSource');
+        }
+
+        function renderClientSourceBadgesLive(results) {
+            renderSourceBadgesLiveInto(results, '[data-client-update-source]', 'clientUpdateSource');
+        }
+
+        async function runClientUpdateConnectivityTest() {
+            if(clientConnectivityTesting) return;
+            const api = desktopClientApi();
+            const payload = pendingClientUpdatePrompt;
+            const targets = clientUpdateConnectivityTargets();
+            const isEn = window.StudioI18n?.lang?.() === 'en';
+            const btn = document.getElementById('client-connectivity-test-btn');
+            const text = document.getElementById('client-connectivity-test-text');
+            if(!api?.probeClientUpdateConnectivity || !payload?.requestId || !targets.length) {
+                setClientUpdateSummary(
+                    'fail',
+                    isEn ? 'Connectivity test unavailable' : '无法测试连通性',
+                    isEn ? 'Restart the desktop client and try again.' : '请重启桌面客户端后再试。'
+                );
+                return;
+            }
+            clientConnectivityTesting = true;
+            clientUpdateConnectivityResult = null;
+            if(btn) {
+                btn.disabled = true;
+                btn.setAttribute('aria-busy', 'true');
+            }
+            if(text) text.textContent = isEn ? 'Testing...' : '检测中...';
+            const live = targets.map(item => ({...item, pending:true, untouched:false}));
+            clientUpdateConnectivityLiveResults = live;
+            const refreshLive = () => {
+                renderConnectivityListInto(live, targets, 'data-client-connectivity-source');
+                renderClientSourceBadgesLive(live);
+            };
+            const applyResult = (targetId, result) => {
+                const index = live.findIndex(item => item.id === targetId);
+                if(index < 0) return;
+                live[index] = {...live[index], ...result, pending:false, untouched:false};
+                refreshLive();
+            };
+            try {
+                setClientUpdateSummary(
+                    'warn',
+                    isEn ? 'Testing connectivity' : '正在测试连通性',
+                    isEn ? 'Installer endpoints are probed in parallel and update live.' : '正在并发检测客户端安装包节点，结果会实时显示。'
+                );
+                refreshLive();
+                await Promise.all(targets.map(async target => {
+                    try {
+                        const result = await api.probeClientUpdateConnectivity(payload.requestId, target.id);
+                        applyResult(target.id, result && typeof result === 'object' ? result : {ok:false, error:isEn ? 'Invalid response' : '无效响应'});
+                    } catch(error) {
+                        applyResult(target.id, {ok:false, error:describeNetworkError(error, isEn)});
+                    }
+                }));
+                const results = live.map(({pending, untouched, ...item}) => item);
+                const sources = computeConnectivitySources(results);
+                clientUpdateConnectivityResult = {results, sources, ok:sources.github.ok};
+                setClientUpdateSourceChoice(bestUpdateSourceFromConnectivity(clientUpdateConnectivityResult, clientUpdateSource));
+            } finally {
+                clientConnectivityTesting = false;
+                clientUpdateConnectivityLiveResults = null;
+                if(btn) {
+                    btn.disabled = false;
+                    btn.removeAttribute('aria-busy');
+                }
+                refreshClientUpdateModalText();
+            }
         }
 
         let connectivityTesting = false;

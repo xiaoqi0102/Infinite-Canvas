@@ -1,9 +1,9 @@
-const { app, BrowserWindow, dialog, ipcMain, shell } = require('electron');
+const { app, BrowserWindow, dialog, ipcMain, net: electronNet, shell } = require('electron');
 const { autoUpdater } = require('electron-updater');
 const { Provider, parseUpdateInfo, resolveFiles } = require('electron-updater/out/providers/Provider');
 const { spawn } = require('node:child_process');
 const fs = require('node:fs');
-const net = require('node:net');
+const nodeNet = require('node:net');
 const path = require('node:path');
 
 const PORT = Number(process.env.INFINITE_CANVAS_PORT || 3000);
@@ -38,6 +38,7 @@ let clientUpdateProgressWindowReady = false;
 let clientUpdateDownloadFailureHandled = false;
 let lastDownloadProgressUiUpdate = 0;
 let pendingClientUpdatePrompt = null;
+let clientUpdateDownloadApproved = false;
 
 function trimSlashes(value) {
   return String(value || '').replace(/^\/+|\/+$/g, '');
@@ -144,22 +145,142 @@ function clientUpdateSourceLabel(source) {
   return source === 'modelscope' ? 'ModelScope' : 'GitHub';
 }
 
+function normalizeClientUpdateSource(source) {
+  return source === 'modelscope' ? 'modelscope' : 'github';
+}
+
 function clientUpdateSourceConfig(source) {
   return source === 'modelscope' ? clientUpdateModelScopeConfig() : CLIENT_UPDATE_GITHUB_CONFIG;
 }
 
 function clientUpdateSourceOrder(preferred = 'github') {
+  preferred = normalizeClientUpdateSource(preferred);
   const sources = ['github', 'modelscope'];
   return [preferred, ...sources.filter((source) => source !== preferred)];
 }
 
 function setClientUpdateSource(source) {
+  source = normalizeClientUpdateSource(source);
   activeClientUpdateSource = source;
   autoUpdater.setFeedURL(clientUpdateSourceConfig(source));
   appendClientUpdateLog('source-selected', {
     source,
     label: clientUpdateSourceLabel(source),
   });
+}
+
+function clientUpdateModelScopeFileUrl(relativePath) {
+  const config = clientUpdateModelScopeConfig();
+  const apiBaseUrl = trimSlashes(config.apiBaseUrl || 'https://modelscope.cn/api/v1/studio');
+  const url = new URL(`${apiBaseUrl}/${trimSlashes(config.owner)}/${trimSlashes(config.repo)}/repo`);
+  url.searchParams.set('Revision', String(config.revision || 'master'));
+  url.searchParams.set('FilePath', joinUrlPath(config.directory, relativePath));
+  return url.toString();
+}
+
+function clientUpdateConnectivityTargets() {
+  const githubRepo = `${CLIENT_UPDATE_GITHUB_CONFIG.owner}/${CLIENT_UPDATE_GITHUB_CONFIG.repo}`;
+  const modelScopeConfig = clientUpdateModelScopeConfig();
+  const modelScopeRepo = `${trimSlashes(modelScopeConfig.owner)}/${trimSlashes(modelScopeConfig.repo)}`;
+  return [
+    {
+      id: 'github-release-api',
+      name: 'GitHub Release 更新信息',
+      url: `https://api.github.com/repos/${githubRepo}/releases/latest`,
+      source: 'github',
+      required: true,
+    },
+    {
+      id: 'github-latest-yml',
+      name: 'GitHub 安装包元数据',
+      url: `https://github.com/${githubRepo}/releases/latest/download/latest.yml`,
+      source: 'github',
+      required: true,
+    },
+    {
+      id: 'github-release-page',
+      name: 'GitHub Release 页面',
+      url: `https://github.com/${githubRepo}/releases/latest`,
+      source: 'github',
+      required: false,
+    },
+    {
+      id: 'modelscope-latest-yml',
+      name: 'ModelScope 安装包元数据',
+      url: clientUpdateModelScopeFileUrl('latest.yml'),
+      source: 'modelscope',
+      required: true,
+    },
+    {
+      id: 'modelscope-space-page',
+      name: 'ModelScope 空间页面',
+      url: `https://modelscope.cn/studios/${modelScopeRepo}`,
+      source: 'modelscope',
+      required: false,
+    },
+    {
+      id: 'modelscope-home',
+      name: 'ModelScope 主页',
+      url: 'https://modelscope.cn/',
+      source: 'modelscope',
+      required: false,
+    },
+    {
+      id: 'google-connectivity',
+      name: 'Google 连通性',
+      url: 'https://www.google.com/generate_204',
+      source: 'reference',
+      required: false,
+    },
+  ];
+}
+
+async function probeClientUpdateConnectivity(targetId) {
+  const target = clientUpdateConnectivityTargets().find((item) => item.id === targetId);
+  if (!target) throw new Error('unknown-target');
+  const startedAt = Date.now();
+  const result = {
+    ...target,
+    ok: false,
+    status: 0,
+    elapsed_ms: 0,
+    error: '',
+    timed_out: false,
+  };
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 6000);
+  try {
+    const response = await electronNet.fetch(target.url, {
+      method: 'GET',
+      redirect: 'follow',
+      signal: controller.signal,
+      headers: { 'User-Agent': 'Infinite-Canvas-Desktop-Updater' },
+    });
+    result.status = response.status;
+    result.ok = response.status >= 200 && response.status < 400;
+    if (!result.ok) result.error = `HTTP ${response.status} ${response.statusText || ''}`.trim();
+    try {
+      if (response.body) await response.body.cancel();
+    } catch (_) {}
+  } catch (error) {
+    if (error && error.name === 'AbortError') {
+      result.timed_out = true;
+      result.error = '连接超时（超过 6s）';
+    } else {
+      result.error = clientUpdateErrorMessage(error);
+    }
+  } finally {
+    clearTimeout(timeout);
+    result.elapsed_ms = Date.now() - startedAt;
+  }
+  appendClientUpdateLog('connectivity-probe', {
+    target: target.id,
+    source: target.source,
+    ok: result.ok,
+    status: result.status,
+    elapsedMs: result.elapsed_ms,
+  });
+  return result;
 }
 
 function clientUpdateErrorMessage(error) {
@@ -184,10 +305,15 @@ function clientUpdateReleaseNotes(info) {
   return [];
 }
 
-function resolveClientUpdatePrompt(action = 'later') {
+function resolveClientUpdatePrompt(action = 'later', source = '') {
   const pending = pendingClientUpdatePrompt;
   pendingClientUpdatePrompt = null;
-  if (pending) pending.resolve(action === 'download' ? 'download' : 'later');
+  if (pending) {
+    pending.resolve({
+      action: action === 'download' ? 'download' : 'later',
+      source: normalizeClientUpdateSource(source || pending.source),
+    });
+  }
 }
 
 function showClientUpdateAvailablePrompt(info, source) {
@@ -203,11 +329,12 @@ function showClientUpdateAvailablePrompt(info, source) {
     fallbackSource: source === 'github' ? 'modelscope' : 'github',
     fallbackSourceLabel: source === 'github' ? 'ModelScope' : 'GitHub',
     releaseNotes: clientUpdateReleaseNotes(info).slice(0, 8),
+    connectivityTargets: clientUpdateConnectivityTargets(),
   };
   mainWindow.show();
   mainWindow.focus();
   return new Promise((resolve) => {
-    pendingClientUpdatePrompt = { requestId, resolve };
+    pendingClientUpdatePrompt = { requestId, source, resolve };
     mainWindow.webContents.send('client-update:available', payload);
   });
 }
@@ -218,6 +345,7 @@ function resetClientUpdateFallbackState() {
   clientUpdateReportFailures = false;
   lastClientUpdateError = null;
   activeClientUpdateAttemptId = 0;
+  clientUpdateDownloadApproved = false;
 }
 
 function appRoot() {
@@ -663,7 +791,7 @@ function waitForServer(timeoutMs = 45000) {
 
   return new Promise((resolve, reject) => {
     const probe = () => {
-      const socket = net.createConnection({ host: HOST, port: PORT });
+      const socket = nodeNet.createConnection({ host: HOST, port: PORT });
       socket.once('connect', () => {
         socket.end();
         resolve();
@@ -876,16 +1004,8 @@ function handleClientUpdateSourceFailure(
   return false;
 }
 
-async function promptDownloadClientUpdate(info, source = activeClientUpdateSource) {
+async function startClientUpdateDownload(info, source = activeClientUpdateSource) {
   const version = updateVersion(info);
-  const action = await showClientUpdateAvailablePrompt(info, source);
-  if (action !== 'download') {
-    clientUpdateState = 'idle';
-    manualUpdateCheckPending = false;
-    resetClientUpdateFallbackState();
-    appendClientUpdateLog('download-deferred', { version, source });
-    return;
-  }
   clientUpdateState = 'downloading';
   clientUpdateReportFailures = true;
   downloadedUpdateSource = source;
@@ -899,6 +1019,34 @@ async function promptDownloadClientUpdate(info, source = activeClientUpdateSourc
     appendClientUpdateLog('download-error', { source, message: error.message });
     handleClientUpdateSourceFailure(error, 'download');
   }
+}
+
+async function promptDownloadClientUpdate(info, source = activeClientUpdateSource) {
+  const version = updateVersion(info);
+  const response = await showClientUpdateAvailablePrompt(info, source);
+  if (response.action !== 'download') {
+    clientUpdateState = 'idle';
+    manualUpdateCheckPending = false;
+    resetClientUpdateFallbackState();
+    appendClientUpdateLog('download-deferred', { version, source });
+    return;
+  }
+  const selectedSource = normalizeClientUpdateSource(response.source || source);
+  clientUpdateDownloadApproved = true;
+  clientUpdateReportFailures = true;
+  appendClientUpdateLog('source-user-selected', {
+    discoveredSource: source,
+    selectedSource,
+    version,
+  });
+  if (selectedSource !== source) {
+    clientUpdateState = 'idle';
+    lastClientUpdateError = null;
+    clientUpdateFallbackSources = clientUpdateSourceOrder(selectedSource);
+    checkNextClientUpdateSource();
+    return;
+  }
+  await startClientUpdateDownload(info, source);
 }
 
 function configureClientUpdater() {
@@ -916,7 +1064,10 @@ function configureClientUpdater() {
     manualUpdateCheckPending = false;
     clientUpdateFailureHandled = false;
     appendClientUpdateLog('update-available', { source, version: updateVersion(info) });
-    promptDownloadClientUpdate(info, source).catch((error) => {
+    const downloadFlow = clientUpdateDownloadApproved
+      ? startClientUpdateDownload(info, source)
+      : promptDownloadClientUpdate(info, source);
+    downloadFlow.catch((error) => {
       clientUpdateState = 'idle';
       resetClientUpdateFallbackState();
       appendClientUpdateLog('prompt-error', { message: error.message });
@@ -925,6 +1076,24 @@ function configureClientUpdater() {
 
   autoUpdater.on('update-not-available', (info) => {
     const source = activeClientUpdateSource;
+    if (clientUpdateDownloadApproved) {
+      appendClientUpdateLog('approved-source-update-not-available', {
+        source,
+        version: updateVersion(info),
+        fallbackSources: clientUpdateFallbackSources.join(','),
+      });
+      if (clientUpdateFallbackSources.length > 0) {
+        lastClientUpdateError = new Error(`${clientUpdateSourceLabel(source)} 未提供已发现的客户端版本。`);
+        checkNextClientUpdateSource();
+        return;
+      }
+      const error = new Error('用户选择的下载源及备用源均未提供已发现的客户端版本。');
+      clientUpdateState = 'idle';
+      manualUpdateCheckPending = false;
+      resetClientUpdateFallbackState();
+      showClientUpdateFailureDialog(error, 'download').catch(() => {});
+      return;
+    }
     const previousError = lastClientUpdateError;
     const shouldReport = manualUpdateCheckPending || clientUpdateReportFailures;
     clientUpdateState = 'idle';
@@ -1070,8 +1239,23 @@ function registerClientUpdateIpc() {
     if (!pendingClientUpdatePrompt || payload.requestId !== pendingClientUpdatePrompt.requestId) {
       return { ok: false, error: 'stale-request' };
     }
-    resolveClientUpdatePrompt(payload.action);
+    const source = normalizeClientUpdateSource(payload.source);
+    resolveClientUpdatePrompt(payload.action, source);
     return { ok: true };
+  });
+  ipcMain.handle('client-update:probe-connectivity', async (event, payload = {}) => {
+    if (!mainWindow || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents) {
+      appendClientUpdateLog('connectivity-ipc-denied');
+      return { ok: false, error: 'unauthorized' };
+    }
+    if (!pendingClientUpdatePrompt || payload.requestId !== pendingClientUpdatePrompt.requestId) {
+      return { ok: false, error: 'stale-request' };
+    }
+    try {
+      return await probeClientUpdateConnectivity(String(payload.targetId || ''));
+    } catch (error) {
+      return { ok: false, error: clientUpdateErrorMessage(error) };
+    }
   });
 }
 

@@ -120,9 +120,9 @@ This protects packaged clients from starting with missing backend dependencies s
 
 ### Installer-Level Updates
 
-打包后的 Electron 客户端使用 `electron-updater` 执行安装包级更新。发现新版本时，主进程通过 preload 桥接发送受限的 `client-update:available` 事件；桌面页面随后显示应用内更新弹窗，包含当前/最新版本、更新说明、当前下载源和自动备用源。渲染进程只能通过 `client-update:respond` 返回 `download` 或 `later`，不能直接调用更新器 API。下载完成后，Electron 会再次询问是否重启并安装。
+打包后的 Electron 客户端使用 `electron-updater` 执行安装包级更新。发现新版本时，主进程通过 preload 桥接发送受限的 `client-update:available` 事件；桌面页面随后显示与内置更新一致的应用内弹窗，包含当前/最新版本、更新说明、可选择的 GitHub / ModelScope 下载源、逐节点连通性结果和自动备用源说明。渲染进程只能通过 `client-update:respond` 返回 `download`、`later` 与白名单下载源，不能直接调用更新器 API。下载完成后，Electron 会再次询问是否重启并安装。
 
-下载源卡片展示更新器的真实状态，不在浏览器侧重复执行连通性测速：触发 `update-available` 的下载源标为可用，另一下载源标为自动备用。现有 GitHub 到 ModelScope 的重试逻辑仍由主进程负责。
+客户端连通性测试不复用源码更新的 `/api/update-connectivity`：主进程只接受弹窗当前 `requestId` 下的白名单目标 ID，并使用 Electron 网络栈探测 GitHub Release 元数据、GitHub `latest.yml`、ModelScope `desktop-release/latest.yml` 及辅助页面。渲染进程只负责展示状态和延迟。用户选择与发现更新时不同的下载源后，主进程会用该源重新执行更新检查，确保 `electron-updater` 的 provider、更新信息和文件 URL 一致；随后下载，失败时自动切换另一来源。
 
 After the user chooses `下载更新`, Electron opens a small main-process progress window and updates the Windows taskbar progress indicator. The progress window shows the active source, percentage, transferred size, total size when available, and download speed. Closing that progress window does not cancel the installer download; the download continues in the background and the window can be restored by clicking the sidebar `检查客户端更新` entry while the state is still downloading.
 
@@ -143,6 +143,8 @@ releaseType: release
 ### ModelScope Fallback Source
 
 If the GitHub update check or download fails, the client switches to ModelScope and retries the same installer-level update flow.
+
+The source selected in the update modal becomes the preferred source for that download. The other source remains the automatic fallback; changing the preferred source does not change `package.json` publish configuration.
 
 Default ModelScope target:
 
@@ -192,6 +194,8 @@ Important update events include:
 
 ```text
 client-update-source-selected
+client-update-source-user-selected
+client-update-connectivity-probe
 client-update-checking-for-update
 client-update-source-fallback
 client-update-update-available

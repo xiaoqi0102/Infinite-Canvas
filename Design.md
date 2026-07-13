@@ -208,3 +208,13 @@ flowchart LR
 **影响范围**：`electron/main.js` 的下载确认流程、`electron/preload.js` 的最小 IPC 桥接、`static/index.html` 的客户端更新模态框；下载进度窗口、失败自动切源、下载后安装确认和用户数据保护逻辑保持不变。
 
 **决策依据**：下载源状态以主进程真实更新检查结果为准，不在渲染进程重复发起测速或允许网页直接操作 `electron-updater`；这可避免展示伪造延迟数据并维持上下文隔离。
+
+### 2026-07-13 - 客户端更新弹窗完整复刻内置更新交互
+
+**变更内容**：客户端安装包更新弹窗改为与内置更新一致的双源可选结构，补充 GitHub / ModelScope 安装包节点的实时连通性检测、逐行延迟状态、自动推荐可用更快来源和右下角重新测试入口；下载确认会携带用户最终选择的来源。
+
+**变更理由**：原客户端弹窗仅展示“当前源 / 自动备用源”的静态状态，无法让用户根据本机网络主动选源，也缺少内置更新已有的连通性反馈，视觉和交互均未完整统一。
+
+**影响范围**：`static/index.html` 的客户端更新 UI 与状态机、`electron/preload.js` 的白名单探测/响应桥接、`electron/main.js` 的客户端专属节点探测和选源后重新检查流程；下载进度窗口、安装确认、用户数据保护与双源失败兜底保持不变。
+
+**决策依据**：安装包测速必须针对 `xiaoqi0102/Infinite-Canvas` 的 GitHub Release 与 ModelScope `desktop-release`，不能复用源码更新地址。网络探测和更新器切源仍由 Electron 主进程执行，渲染进程只能提交当前弹窗 `requestId`、白名单目标 ID 与 `github | modelscope`，继续保持 `contextIsolation: true`、`nodeIntegration: false` 和最小 IPC 暴露。

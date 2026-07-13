@@ -37,6 +37,7 @@ let clientUpdateProgressVersion = '';
 let clientUpdateProgressWindowReady = false;
 let clientUpdateDownloadFailureHandled = false;
 let lastDownloadProgressUiUpdate = 0;
+let pendingClientUpdatePrompt = null;
 
 function trimSlashes(value) {
   return String(value || '').replace(/^\/+|\/+$/g, '');
@@ -163,6 +164,52 @@ function setClientUpdateSource(source) {
 
 function clientUpdateErrorMessage(error) {
   return error && error.message ? error.message : String(error || 'Unknown update error');
+}
+
+function clientUpdateReleaseNotes(info) {
+  const notes = info && info.releaseNotes;
+  if (Array.isArray(notes)) {
+    return notes
+      .map((item) => (typeof item === 'string' ? item : item && item.note))
+      .filter(Boolean)
+      .map(String);
+  }
+  if (typeof notes === 'string') {
+    return notes
+      .replace(/<[^>]+>/g, ' ')
+      .split(/\r?\n/)
+      .map((item) => item.replace(/^[-*•\s]+/, '').trim())
+      .filter(Boolean);
+  }
+  return [];
+}
+
+function resolveClientUpdatePrompt(action = 'later') {
+  const pending = pendingClientUpdatePrompt;
+  pendingClientUpdatePrompt = null;
+  if (pending) pending.resolve(action === 'download' ? 'download' : 'later');
+}
+
+function showClientUpdateAvailablePrompt(info, source) {
+  if (!mainWindow || mainWindow.isDestroyed()) return Promise.resolve('later');
+  resolveClientUpdatePrompt('later');
+  const requestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const payload = {
+    requestId,
+    version: updateVersion(info),
+    currentVersion: app.getVersion(),
+    source,
+    sourceLabel: clientUpdateSourceLabel(source),
+    fallbackSource: source === 'github' ? 'modelscope' : 'github',
+    fallbackSourceLabel: source === 'github' ? 'ModelScope' : 'GitHub',
+    releaseNotes: clientUpdateReleaseNotes(info).slice(0, 8),
+  };
+  mainWindow.show();
+  mainWindow.focus();
+  return new Promise((resolve) => {
+    pendingClientUpdatePrompt = { requestId, resolve };
+    mainWindow.webContents.send('client-update:available', payload);
+  });
 }
 
 function resetClientUpdateFallbackState() {
@@ -831,17 +878,8 @@ function handleClientUpdateSourceFailure(
 
 async function promptDownloadClientUpdate(info, source = activeClientUpdateSource) {
   const version = updateVersion(info);
-  const sourceLabel = clientUpdateSourceLabel(source);
-  const result = await showDesktopDialog({
-    type: 'info',
-    buttons: ['下载更新', '稍后'],
-    defaultId: 0,
-    cancelId: 1,
-    title: '发现客户端更新',
-    message: version ? `发现 Infinite Canvas 客户端新版本 ${version}。` : '发现 Infinite Canvas 客户端新版本。',
-    detail: `这会从 ${sourceLabel} 下载桌面安装包。网页里的“一键更新”仍保留用于源项目 main.py、VERSION 和 static 更新提醒。`,
-  });
-  if (result.response !== 0) {
+  const action = await showClientUpdateAvailablePrompt(info, source);
+  if (action !== 'download') {
     clientUpdateState = 'idle';
     manualUpdateCheckPending = false;
     resetClientUpdateFallbackState();
@@ -1024,6 +1062,17 @@ function registerClientUpdateIpc() {
       version: app.getVersion(),
     };
   });
+  ipcMain.handle('client-update:respond', (event, payload = {}) => {
+    if (!mainWindow || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents) {
+      appendClientUpdateLog('response-ipc-denied');
+      return { ok: false, error: 'unauthorized' };
+    }
+    if (!pendingClientUpdatePrompt || payload.requestId !== pendingClientUpdatePrompt.requestId) {
+      return { ok: false, error: 'stale-request' };
+    }
+    resolveClientUpdatePrompt(payload.action);
+    return { ok: true };
+  });
 }
 
 async function createWindow() {
@@ -1046,6 +1095,10 @@ async function createWindow() {
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     shell.openExternal(url);
     return { action: 'deny' };
+  });
+  mainWindow.on('closed', () => {
+    resolveClientUpdatePrompt('later');
+    mainWindow = null;
   });
 
   await mainWindow.loadURL(`http://${HOST}:${PORT}/`);

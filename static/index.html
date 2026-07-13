@@ -1104,6 +1104,14 @@
 
         /* 更新弹窗：双卡片需要更宽的面板，避免左右布局被裁剪 */
         #project-update-modal .studio-modal-panel { width:min(880px, 100%); max-height:min(840px, calc(100vh - 48px)); }
+        #client-update-modal .studio-modal-panel { width:min(880px, 100%); max-height:min(760px, calc(100vh - 48px)); }
+        .client-update-source-card { cursor:default; }
+        .client-update-source-card:hover { transform:none; box-shadow:none; }
+        .client-update-source-card.is-fallback { background:#fbfdff; }
+        .client-update-source-card.is-fallback .update-source-badge { background:#eff6ff; color:#2563eb; }
+        .client-update-source-card .connectivity-list { min-height:58px; }
+        .client-update-source-card .connectivity-row { min-height:58px; }
+        .client-update-source-card .connectivity-url { white-space:normal; line-height:1.45; }
         .update-notes-box { margin:2px 0 14px; padding:12px; border:1px solid #e5e7eb; border-radius:8px; background:#fbfdff; }
         .update-notes-head { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:8px; }
         .update-notes-head strong { font-size:12px; color:#111827; font-weight:950; }
@@ -1303,6 +1311,17 @@
             border-color:#22c55e;
             box-shadow:0 0 0 2px rgba(34,197,94,.35);
             background:rgba(34,197,94,.12);
+        }
+
+        html.theme-dark .client-update-source-card.is-fallback,
+        body.theme-dark .client-update-source-card.is-fallback {
+            background:#0c0d10;
+        }
+
+        html.theme-dark .client-update-source-card.is-fallback .update-source-badge,
+        body.theme-dark .client-update-source-card.is-fallback .update-source-badge {
+            background:rgba(96,165,250,.14);
+            color:#93c5fd;
         }
 
         html.theme-dark .studio-modal-head,
@@ -1870,6 +1889,67 @@
         </div>
     </div>
 
+    <div id="client-update-modal" class="studio-modal" hidden role="dialog" aria-modal="true" aria-labelledby="client-update-title">
+        <div class="studio-modal-panel">
+            <div class="studio-modal-head">
+                <div>
+                    <div id="client-update-kicker" class="studio-modal-kicker">发现客户端更新</div>
+                    <h2 id="client-update-title" class="studio-modal-title">更新客户端</h2>
+                </div>
+                <button class="studio-modal-close" type="button" onclick="closeClientUpdateModal()" title="稍后更新" aria-label="稍后更新">
+                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <line x1="18" y1="6" x2="6" y2="18"></line>
+                        <line x1="6" y1="6" x2="18" y2="18"></line>
+                    </svg>
+                </button>
+            </div>
+            <div class="studio-modal-body">
+                <p id="client-update-copy" class="studio-modal-copy"></p>
+                <div id="client-update-notes" class="update-notes-box">
+                    <div class="update-notes-head">
+                        <strong id="client-update-notes-title">本次更新内容</strong>
+                        <span id="client-update-notes-version" class="update-notes-version"></span>
+                    </div>
+                    <ol id="client-update-notes-list" class="update-notes-list"></ol>
+                    <p id="client-update-notes-empty" class="update-notes-empty">暂未获取到这个版本的更新说明。</p>
+                </div>
+                <div class="update-source-list">
+                    <section id="client-update-source-github" class="update-source-card client-update-source-card">
+                        <div class="update-source-head">
+                            <div class="update-source-title"><strong>GitHub 下载源</strong><span>GitHub Release 安装包，适合可访问 GitHub 的网络。</span></div>
+                            <div class="update-source-head-right">
+                                <span class="update-source-check" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg></span>
+                                <span class="update-source-badge">自动备用</span>
+                            </div>
+                        </div>
+                        <div class="connectivity-list"><div class="connectivity-row"><span class="connectivity-indicator"></span><div><div class="connectivity-name">GitHub Release</div><div class="connectivity-url">下载失败时自动切换另一下载源</div></div><div class="connectivity-status">备用</div></div></div>
+                    </section>
+                    <section id="client-update-source-modelscope" class="update-source-card client-update-source-card">
+                        <div class="update-source-head">
+                            <div class="update-source-title"><strong>ModelScope 下载源</strong><span>ModelScope 桌面安装包，适合国内网络。</span></div>
+                            <div class="update-source-head-right">
+                                <span class="update-source-check" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg></span>
+                                <span class="update-source-badge">自动备用</span>
+                            </div>
+                        </div>
+                        <div class="connectivity-list"><div class="connectivity-row"><span class="connectivity-indicator"></span><div><div class="connectivity-name">ModelScope 版本文件</div><div class="connectivity-url">下载失败时自动切换另一下载源</div></div><div class="connectivity-status">备用</div></div></div>
+                    </section>
+                </div>
+                <div id="client-update-summary" class="update-modal-summary ok" role="status">
+                    <span class="update-modal-dot" aria-hidden="true"></span>
+                    <div><strong id="client-update-summary-title">下载源可用</strong><span id="client-update-summary-text"></span></div>
+                </div>
+            </div>
+            <div class="studio-modal-actions">
+                <button class="studio-modal-btn" type="button" onclick="closeClientUpdateModal()"><span id="client-update-later-text">稍后</span></button>
+                <button id="client-update-download-btn" class="studio-modal-btn primary" type="button" onclick="confirmClientUpdateDownload()">
+                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12"></path><path d="m7 10 5 5 5-5"></path><path d="M5 21h14"></path></svg>
+                    <span id="client-update-download-text">下载更新</span>
+                </button>
+            </div>
+        </div>
+    </div>
+
     <script>
         function generateUUID() {
             if (typeof crypto !== 'undefined' && crypto.randomUUID) {
@@ -2162,6 +2242,7 @@
             refreshUpdateButtonText();
             refreshClientUpdateButton();
             refreshProjectUpdateModalText();
+            if(pendingClientUpdatePrompt) renderClientUpdatePrompt(pendingClientUpdatePrompt);
         }
 
         function syncLanguageToFrame(frame) {
@@ -2296,6 +2377,114 @@
             const api = window.InfiniteCanvasDesktop;
             return api && typeof api.checkClientUpdate === 'function' ? api : null;
         }
+
+        let pendingClientUpdatePrompt = null;
+
+        function renderClientUpdatePrompt(payload = {}) {
+            pendingClientUpdatePrompt = payload;
+            const isEn = window.StudioI18n?.lang?.() === 'en';
+            const version = payload.version || '';
+            const currentVersion = payload.currentVersion || '';
+            const source = payload.source === 'modelscope' ? 'modelscope' : 'github';
+            const sourceLabel = payload.sourceLabel || (source === 'modelscope' ? 'ModelScope' : 'GitHub');
+            const title = document.getElementById('client-update-title');
+            const kicker = document.getElementById('client-update-kicker');
+            const copy = document.getElementById('client-update-copy');
+            const notesTitle = document.getElementById('client-update-notes-title');
+            const notesVersion = document.getElementById('client-update-notes-version');
+            const notesList = document.getElementById('client-update-notes-list');
+            const notesEmpty = document.getElementById('client-update-notes-empty');
+            const summaryTitle = document.getElementById('client-update-summary-title');
+            const summaryText = document.getElementById('client-update-summary-text');
+            const laterText = document.getElementById('client-update-later-text');
+            const downloadText = document.getElementById('client-update-download-text');
+            const closeBtn = document.querySelector('#client-update-modal .studio-modal-close');
+            if(kicker) kicker.textContent = isEn ? 'CLIENT UPDATE AVAILABLE' : '发现客户端更新';
+            if(title) title.textContent = version ? (isEn ? `Update to ${versionLabel(version)}` : `更新到 ${versionLabel(version)}`) : (isEn ? 'Update client' : '更新客户端');
+            if(copy) copy.textContent = isEn
+                ? `Download the desktop installer from ${sourceLabel}. Current ${versionLabel(currentVersion)}, latest ${versionLabel(version || currentVersion)}. If this source fails, the client automatically switches to the fallback source.`
+                : `将从 ${sourceLabel} 下载桌面安装包。当前 ${versionLabel(currentVersion)}，最新 ${versionLabel(version || currentVersion)}；如果当前下载源失败，客户端会自动切换备用源。`;
+            if(notesTitle) notesTitle.textContent = isEn ? 'What changed' : '本次更新内容';
+            if(notesVersion) notesVersion.textContent = version ? versionLabel(version) : '';
+            const notes = Array.isArray(payload.releaseNotes) ? payload.releaseNotes.filter(Boolean) : [];
+            if(notesList) {
+                notesList.replaceChildren();
+                notes.forEach(item => {
+                    const li = document.createElement('li');
+                    li.textContent = String(item);
+                    notesList.append(li);
+                });
+            }
+            if(notesEmpty) {
+                notesEmpty.hidden = notes.length > 0;
+                notesEmpty.textContent = isEn ? 'No release notes were provided for this version.' : '暂未获取到这个版本的更新说明。';
+            }
+            ['github', 'modelscope'].forEach(itemSource => {
+                const card = document.getElementById(`client-update-source-${itemSource}`);
+                const active = itemSource === source;
+                card?.classList.toggle('active', active);
+                card?.classList.toggle('is-fallback', !active);
+                const badge = card?.querySelector('.update-source-badge');
+                const row = card?.querySelector('.connectivity-row');
+                const url = card?.querySelector('.connectivity-url');
+                const status = card?.querySelector('.connectivity-status');
+                if(badge) {
+                    badge.classList.toggle('ok', active);
+                    badge.textContent = active ? (isEn ? 'Available' : '可用') : (isEn ? 'Fallback' : '自动备用');
+                }
+                row?.classList.toggle('ok', active);
+                if(url) url.textContent = active
+                    ? (isEn ? 'This source found the available client release.' : '已通过此下载源发现可用的客户端版本。')
+                    : (isEn ? 'Used automatically if the current download source fails.' : '当前下载源失败时自动切换到此源。');
+                if(status) status.textContent = active ? (isEn ? 'Ready' : '正常') : (isEn ? 'Standby' : '备用');
+            });
+            if(summaryTitle) summaryTitle.textContent = isEn ? `${sourceLabel} source available` : `${sourceLabel} 下载源可用`;
+            if(summaryText) summaryText.textContent = isEn
+                ? `The update is ready to download. Your InfiniteCanvas_Data user data will not be overwritten.`
+                : `客户端安装包已可下载；InfiniteCanvas_Data 中的用户数据不会被安装包覆盖。`;
+            if(laterText) laterText.textContent = isEn ? 'Later' : '稍后';
+            if(downloadText) downloadText.textContent = isEn ? 'Download update' : '下载更新';
+            if(closeBtn) {
+                closeBtn.title = isEn ? 'Update later' : '稍后更新';
+                closeBtn.setAttribute('aria-label', closeBtn.title);
+            }
+        }
+
+        async function respondToClientUpdate(action) {
+            const payload = pendingClientUpdatePrompt;
+            if(!payload) return;
+            pendingClientUpdatePrompt = null;
+            document.getElementById('client-update-modal').hidden = true;
+            try {
+                await desktopClientApi()?.respondToClientUpdate?.(payload.requestId, action);
+            } catch(e) {}
+        }
+
+        function closeClientUpdateModal() {
+            respondToClientUpdate('later');
+        }
+
+        function confirmClientUpdateDownload() {
+            const btn = document.getElementById('client-update-download-btn');
+            if(btn) btn.disabled = true;
+            respondToClientUpdate('download').finally(() => { if(btn) btn.disabled = false; });
+        }
+
+        function openClientUpdateModal(payload) {
+            const modal = document.getElementById('client-update-modal');
+            if(!modal) return;
+            renderClientUpdatePrompt(payload);
+            modal.hidden = false;
+            document.getElementById('client-update-download-btn')?.focus?.();
+        }
+
+        const desktopUpdateApi = desktopClientApi();
+        desktopUpdateApi?.onClientUpdateAvailable?.(openClientUpdateModal);
+        document.getElementById('client-update-modal')?.addEventListener('click', event => {
+            if(event.target?.id === 'client-update-modal') closeClientUpdateModal();
+        });
+        window.closeClientUpdateModal = closeClientUpdateModal;
+        window.confirmClientUpdateDownload = confirmClientUpdateDownload;
 
         function refreshClientUpdateButton() {
             const btn = document.getElementById('client-update-btn');
@@ -2643,7 +2832,12 @@
         });
 
         window.addEventListener('keydown', event => {
-            if(event.key === 'Escape') closeProjectUpdateModal();
+            if(event.key !== 'Escape') return;
+            if(!document.getElementById('client-update-modal')?.hidden) {
+                closeClientUpdateModal();
+                return;
+            }
+            closeProjectUpdateModal();
         });
 
         async function runProjectUpdate() {

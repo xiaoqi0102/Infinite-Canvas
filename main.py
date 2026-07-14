@@ -1268,7 +1268,7 @@ LOCKED_RECOMMENDED_PROVIDER_RULES = {
         "names": {"fhl"},
         "base_urls": {"https://www.fhl.mom"},
         "protocol": "openai",
-        "image_request_mode": "openai-responses",
+        "image_request_mode": "openai",
         "video_models": [],
     },
 }
@@ -1381,6 +1381,7 @@ def normalize_provider(item):
         "image_models": model_list_from_values(item.get("image_models") or []),
         "chat_models": model_list_from_values(item.get("chat_models") or []),
         "video_models": video_models,
+        "model_names": normalize_model_name_map(item.get("model_names")),
         "model_protocols": normalize_model_protocols(item.get("model_protocols")),
         "ms_loras": normalize_ms_loras(item.get("ms_loras") or []),
         "ms_defaults_version": int(item.get("ms_defaults_version") or 0),
@@ -3194,6 +3195,7 @@ class ApiProviderPayload(BaseModel):
     image_models: List[str] = []
     chat_models: List[str] = []
     video_models: List[str] = []
+    model_names: Dict[str, str] = {}
     model_protocols: Dict[str, str] = {}
     ms_loras: List[Dict[str, Any]] = []
     ms_defaults_version: int = 0
@@ -4297,11 +4299,54 @@ def looks_like_generated_image_url(value):
     clean = text.split("?", 1)[0].split("#", 1)[0].lower()
     return text.startswith(("http://", "https://", "/output/", "/assets/")) and re.search(r"\.(png|jpe?g|webp|gif|bmp|tiff?)$", clean)
 
+def looks_like_image_base64(value):
+    text = str(value or "").strip()
+    if not text:
+        return False
+    if text.startswith("data:image/"):
+        return True
+    if len(text) < 200:
+        return False
+    sample = re.sub(r"\s+", "", text[:4096])
+    if not re.fullmatch(r"[A-Za-z0-9+/=_-]+", sample):
+        return False
+    padded = sample.replace("-", "+").replace("_", "/")
+    padded += "=" * (-len(padded) % 4)
+    try:
+        head = base64.b64decode(padded[:256], validate=False)
+    except Exception:
+        return False
+    return (
+        head.startswith(b"\x89PNG\r\n\x1a\n")
+        or head.startswith(b"\xff\xd8\xff")
+        or head.startswith(b"RIFF") and head[8:12] == b"WEBP"
+        or head.startswith(b"GIF87a")
+        or head.startswith(b"GIF89a")
+    )
+
+def image_payload_from_string(value, mime_type="image/png", assume_b64=False):
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.startswith("data:image/"):
+        header, sep, encoded = text.partition(",")
+        if sep and encoded:
+            return {
+                "type": "b64",
+                "value": encoded.strip(),
+                "mime_type": header.split(";", 1)[0].replace("data:", "", 1) or mime_type or "image/png",
+            }
+    if looks_like_generated_image_url(text):
+        return {"type": "url", "value": text}
+    if assume_b64 or looks_like_image_base64(text):
+        return {"type": "b64", "value": text, "mime_type": mime_type or "image/png"}
+    return None
+
 def extract_image_flexible(value, depth=0):
     if depth > 8 or value is None:
         return None
     if isinstance(value, str):
-        return {"type": "url", "value": value} if looks_like_generated_image_url(value) else None
+        return image_payload_from_string(value)
     if isinstance(value, list):
         for item in value:
             found = extract_image_flexible(item, depth + 1)
@@ -4313,11 +4358,13 @@ def extract_image_flexible(value, depth=0):
     for key in IMAGE_BASE64_KEY_HINTS:
         item = value.get(key)
         if isinstance(item, str) and item.strip():
-            return {"type": "b64", "value": item.strip(), "mime_type": value.get("mime_type") or value.get("mimeType") or "image/png"}
+            return image_payload_from_string(item, value.get("mime_type") or value.get("mimeType") or "image/png", assume_b64=True)
     for key in IMAGE_OUTPUT_KEY_HINTS:
         item = value.get(key)
-        if isinstance(item, str) and looks_like_generated_image_url(item):
-            return {"type": "url", "value": item}
+        if isinstance(item, str):
+            found = image_payload_from_string(item, value.get("mime_type") or value.get("mimeType") or "image/png")
+            if found:
+                return found
         found = extract_image_flexible(item, depth + 1)
         if found:
             return found
@@ -4348,8 +4395,9 @@ def extract_images(data):
         if depth > 8 or value is None:
             return
         if isinstance(value, str):
-            if looks_like_generated_image_url(value):
-                add_image({"type": "url", "value": value})
+            found = image_payload_from_string(value)
+            if found:
+                add_image(found)
             return
         if isinstance(value, list):
             for item in value:
@@ -4360,25 +4408,26 @@ def extract_images(data):
         if value.get("type") == "image_generation_call":
             result = value.get("result")
             if isinstance(result, str) and result.strip():
-                add_image({
-                    "type": "b64",
-                    "value": result.strip(),
-                    "mime_type": value.get("mime_type") or value.get("mimeType") or "image/png",
-                })
+                add_image(image_payload_from_string(
+                    result,
+                    value.get("mime_type") or value.get("mimeType") or "image/png",
+                    assume_b64=not looks_like_generated_image_url(result),
+                ))
             else:
                 collect(result, depth + 1)
-        for key in IMAGE_BASE64_KEY_HINTS:
-            item = value.get(key)
-            if isinstance(item, str) and item.strip():
-                add_image({
-                    "type": "b64",
-                    "value": item.strip(),
-                    "mime_type": value.get("mime_type") or value.get("mimeType") or "image/png",
-                })
+        has_direct_url = any(
+            isinstance(value.get(key), str) and looks_like_generated_image_url(value.get(key))
+            for key in IMAGE_OUTPUT_KEY_HINTS
+        )
+        if not has_direct_url:
+            for key in IMAGE_BASE64_KEY_HINTS:
+                item = value.get(key)
+                if isinstance(item, str) and item.strip():
+                    add_image(image_payload_from_string(item, value.get("mime_type") or value.get("mimeType") or "image/png", assume_b64=True))
         for key in IMAGE_OUTPUT_KEY_HINTS:
             item = value.get(key)
-            if isinstance(item, str) and looks_like_generated_image_url(item):
-                add_image({"type": "url", "value": item})
+            if isinstance(item, str):
+                add_image(image_payload_from_string(item, value.get("mime_type") or value.get("mimeType") or "image/png"))
             else:
                 collect(item, depth + 1)
         for key in IMAGE_CONTAINER_KEY_HINTS:
@@ -4555,7 +4604,7 @@ def responses_proxy_tool_size(size: str) -> str:
     width, height = match.group(1), match.group(2)
     return f"{height}x{width}" if width != height else f"{width}x{height}"
 
-async def responses_input_image_url(ref) -> str:
+async def responses_input_image_url(ref, require_public_url=False) -> str:
     """RS / Responses 的 input_image。
     本机/内网 URL 不能透传（上游拉不到会挂到 Cloudflare 120s 超时/524）。
     本地文件优先上传图床（同视频卡片的 Litterbox/temp.sh 通道）换公网短链——
@@ -4573,8 +4622,13 @@ async def responses_input_image_url(ref) -> str:
             local_path = urllib.parse.unquote(parsed.path or "")
         else:
             return text
-    if not output_file_from_url(local_path):
+    local_file = output_file_from_url(local_path)
+    if not local_file:
+        if require_public_url:
+            raise HTTPException(status_code=400, detail=f"RS 参考图不是公网 URL，无法传给上游：{text[:160]}")
         return ""
+    if require_public_url:
+        return await openai_video_proxy_public_reference_url(local_path)
     try:
         uploaded = await upload_local_video_to_cloud(local_path)
         url = str((uploaded or {}).get("url") or "")
@@ -4745,7 +4799,28 @@ async def post_openai_responses_stream(client, url, headers, body):
                 return httpx.Response(resp.status_code, headers=resp.headers, content=content, request=request)
             completed = None
             error_payload = None
-            partial_b64 = ""
+            stream_images = []
+            stream_seen_images = set()
+
+            def remember_stream_image(image):
+                if not isinstance(image, dict):
+                    return
+                value = image.get("value")
+                if not value:
+                    return
+                key = (image.get("type") or "url", value)
+                if key in stream_seen_images:
+                    return
+                stream_seen_images.add(key)
+                stream_images.append(image)
+
+            def remember_stream_images_from(value):
+                try:
+                    for image in extract_images(value):
+                        remember_stream_image(image)
+                except HTTPException:
+                    pass
+
             async for line in resp.aiter_lines():
                 if not line.startswith("data:"):
                     continue
@@ -4767,11 +4842,43 @@ async def post_openai_responses_stream(client, url, headers, body):
                 elif etype == "error":
                     message = event.get("message") or event.get("error") or chunk[:300]
                     error_payload = {"error": {"message": str(message)}}
-                elif etype.endswith("partial_image") and isinstance(event.get("partial_image_b64"), str):
-                    partial_b64 = event["partial_image_b64"]
-            if completed is None and error_payload is None and partial_b64:
-                # 流被提前掐断但已收到分片图：用最后一张分片兜底
-                completed = {"output": [{"type": "image_generation_call", "status": "completed", "result": partial_b64}]}
+                if isinstance(event.get("item"), dict):
+                    item = event["item"]
+                    if item.get("type") not in {"input_image", "input_text"}:
+                        remember_stream_images_from(item)
+                for key in ("partial_image_b64", "image_b64", "b64_json"):
+                    image = image_payload_from_string(event.get(key), assume_b64=True)
+                    if image:
+                        remember_stream_image(image)
+                for key in ("result", "image", "image_url"):
+                    image = image_payload_from_string(event.get(key))
+                    if image:
+                        remember_stream_image(image)
+            if completed is not None and stream_images:
+                try:
+                    has_completed_image = bool(extract_images(completed))
+                except HTTPException:
+                    has_completed_image = False
+                if not has_completed_image:
+                    completed = dict(completed)
+                    completed["output"] = list(completed.get("output") or [])
+                    for image in stream_images:
+                        if image.get("type") == "b64":
+                            completed["output"].append({
+                                "type": "image_generation_call",
+                                "status": "completed",
+                                "result": image.get("value"),
+                                "mime_type": image.get("mime_type") or "image/png",
+                            })
+                        else:
+                            completed["output"].append({"type": "image", "image_url": image.get("value")})
+            if completed is None and error_payload is None and stream_images:
+                # 流被提前掐断但已收到图片事件：用最后一张图片兜底。
+                image = stream_images[-1]
+                if image.get("type") == "b64":
+                    completed = {"output": [{"type": "image_generation_call", "status": "completed", "result": image.get("value"), "mime_type": image.get("mime_type") or "image/png"}]}
+                else:
+                    completed = {"output": [{"type": "image", "image_url": image.get("value")}]}
             if completed is not None:
                 return wrap(200, completed)
             return wrap(502, error_payload or {"error": {"message": "RS 流式响应结束但没有 response.completed 事件"}})
@@ -4797,6 +4904,17 @@ def normalize_model_protocols(value):
             if name and proto in PER_MODEL_PROTOCOL_OPTIONS:
                 out[name] = proto
     return out
+
+def normalize_model_name_map(value):
+    """规整 {模型ID: 展示名}，只保存真正有意义的显示标签。"""
+    normalized = {}
+    if isinstance(value, dict):
+        for raw_model, raw_label in value.items():
+            model = str(raw_model or "").strip()
+            label = re.sub(r"\s+", " ", str(raw_label or "").strip())[:160]
+            if model and label and label != model:
+                normalized[model] = label
+    return normalized
 
 def effective_protocol(provider, model=""):
     """返回某模型实际生效的协议：优先单模型覆盖，否则用平台全局协议。"""
@@ -8413,6 +8531,24 @@ async def openai_video_proxy_public_reference_url(ref) -> str:
         )
     raise HTTPException(status_code=400, detail=f"参考图不是公网 URL，无法传给上游：{text[:160]}")
 
+def openai_video_proxy_local_image_path(ref) -> str:
+    raw = ref.get("url", "") if isinstance(ref, dict) else ref
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    local_path = ""
+    if re.match(r"^https?://", text, re.I):
+        parsed = urllib.parse.urlsplit(text)
+        host = (parsed.hostname or "").lower()
+        if host in {"127.0.0.1", "localhost", "::1"} or re.match(r"^(192\.168\.|10\.|172\.(1[6-9]|2\d|3[01])\.)", host):
+            local_path = urllib.parse.unquote(parsed.path or "")
+    elif text.startswith(("/output/", "/assets/")):
+        local_path = text
+    path = output_file_from_url(local_path) if local_path else None
+    if not path:
+        return ""
+    return path if content_type_for_path(path).startswith("image/") else ""
+
 def normalize_apimart_video_reference(value: str) -> str:
     text = str(value or "").strip()
     if valid_apimart_video_image_input(text):
@@ -9984,13 +10120,33 @@ def runninghub_model_id(item):
         return ""
     return str(item.get("name_en") or item.get("id") or item.get("name") or item.get("endpoint") or "").strip()
 
+def runninghub_model_display_name(item, model_id=""):
+    if not isinstance(item, dict):
+        return ""
+    raw_id = str(model_id or runninghub_model_id(item) or "").strip()
+    for key in (
+        "name_cn", "name_zh", "zh_name", "cn_name", "display_name", "displayName",
+        "title", "label", "nameCn", "nameZh", "chinese_name", "chineseName",
+    ):
+        value = re.sub(r"\s+", " ", str(item.get(key) or "").strip())
+        if value and value != raw_id:
+            return value[:160]
+    name = re.sub(r"\s+", " ", str(item.get("name") or "").strip())
+    if name and name != raw_id and not re.fullmatch(r"[A-Za-z0-9_./:-]+", name):
+        return name[:160]
+    return ""
+
 def runninghub_registry_payload(items):
     grouped = {"image": [], "chat": RUNNINGHUB_FALLBACK_CHAT_MODELS[:], "video": []}
+    model_names = {}
     all_ids = []
     for item in items or []:
         mid = runninghub_model_id(item)
         if not mid:
             continue
+        display_name = runninghub_model_display_name(item, mid)
+        if display_name:
+            model_names[mid] = display_name
         output_type = str(item.get("output_type") or item.get("outputType") or "").strip().lower()
         if output_type in ("image", "video"):
             grouped[output_type].append(mid)
@@ -10014,6 +10170,7 @@ def runninghub_registry_payload(items):
         "chat_models": grouped["chat"],
         "video_models": grouped["video"],
         "all": sorted(set(all_ids)),
+        "model_names": model_names,
         "protocol": "runninghub",
     }
 
@@ -10791,17 +10948,47 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
                 "prompt": prompt,
                 "aspect_ratio": runninghub_aspect_from_size(size, "1:1"),
             }
-            if image_refs:
-                body["images"] = [await openai_video_proxy_public_reference_url(ref) for ref in image_refs[:6]]
             video_url = f"{base_url}/videos" if base_url.endswith("/v1") else f"{base_url}/v1/videos"
-            response = await httpx_request_with_transient_retries(
-                client,
-                "POST",
-                video_url,
-                attempts=2,
-                headers=api_headers(provider=provider, model=model),
-                json=body,
-            )
+            refs_for_proxy = image_refs[:6]
+            local_image_paths = [openai_video_proxy_local_image_path(ref) for ref in refs_for_proxy]
+            has_local_images = any(local_image_paths)
+            if has_local_images:
+                form_data = [(key, value) for key, value in body.items()]
+                for ref, local_path in zip(refs_for_proxy, local_image_paths):
+                    if local_path:
+                        continue
+                    url = await openai_video_proxy_public_reference_url(ref)
+                    if url:
+                        form_data.append(("images", url))
+                files = []
+                opened = []
+                try:
+                    for local_path in local_image_paths:
+                        if not local_path:
+                            continue
+                        fh = open(local_path, "rb")
+                        opened.append(fh)
+                        files.append(("images", (os.path.basename(local_path), fh, content_type_for_path(local_path))))
+                    response = await client.post(
+                        video_url,
+                        headers=api_headers(json_body=False, provider=provider, model=model),
+                        data=form_data,
+                        files=files,
+                    )
+                finally:
+                    for fh in opened:
+                        fh.close()
+            else:
+                if refs_for_proxy:
+                    body["images"] = [await openai_video_proxy_public_reference_url(ref) for ref in refs_for_proxy]
+                response = await httpx_request_with_transient_retries(
+                    client,
+                    "POST",
+                    video_url,
+                    attempts=2,
+                    headers=api_headers(provider=provider, model=model),
+                    json=body,
+                )
         elif image_request_mode == "openai-responses":
             tool = {"type": "image_generation"}
             tool["action"] = "edit" if image_refs else "generate"
@@ -10812,14 +10999,16 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
             size_instruction = responses_image_size_instruction(size)
             input_text = f"{size_instruction}\n\n{prompt}" if size_instruction else prompt
             content = [{"type": "input_text", "text": input_text}]
+            force_public_refs = bool(locked_recommended_provider_rule(provider.get("id"), provider.get("name"), base_url))
             for ref in image_refs[:ONLINE_IMAGE_REFERENCE_MAX]:
-                image_url = await responses_input_image_url(ref)
+                image_url = await responses_input_image_url(ref, require_public_url=force_public_refs)
                 if image_url:
                     content.append({"type": "input_image", "image_url": image_url})
             body = {
                 "model": model,
                 "input": [{"role": "user", "content": content}],
                 "tools": [tool],
+                "tool_choice": {"type": "image_generation"},
             }
             responses_url = provider_endpoint_url(provider, "image_generation_endpoint", "/v1/responses")
             response = await post_openai_responses(client, responses_url, api_headers(provider=provider, model=model), body)

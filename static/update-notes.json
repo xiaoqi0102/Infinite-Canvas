@@ -1,10 +1,22 @@
 {
   "version": "2026.07.14",
-  "updated_at": "2026-07-13T23:14:07+08:00",
+  "updated_at": "2026-07-13T23:41:36+08:00",
   "items": [
     {
       "type": "feature",
       "text": "发现客户端新版本后，侧栏更新入口会显示绿色提示和目标版本；选择稍后仍会保留提醒"
+    },
+    {
+      "type": "feature",
+      "text": "修复EXELLOME的本地多图参考bug"
+    },
+    {
+      "type": "feature",
+      "text": "修复FHL的生图报错bug"
+    },
+    {
+      "type": "feature",
+      "text": "增加RunningHub拉取模型的翻译功能"
     }
   ]
 }

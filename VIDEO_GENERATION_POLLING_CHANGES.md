@@ -16,7 +16,7 @@
   - 提交：`POST /api/canvas-video-tasks`
   - 查询：`GET /api/canvas-video-tasks/{task_id}`
 - 前端先保存本地 pending 状态，再轮询本地任务接口；刷新页面或后端重启后，能尽量恢复查询。
-- 视频轮询间隔从 5 秒开始，避免轮询过快导致上游失败或拒绝。
+- 后端查询上游视频任务时固定以 25 秒为基础间隔，避免轮询过快导致上游失败或拒绝；前端仍每 5 秒刷新本地任务状态。
 - 识别余额不足等终态错误，直接失败并清理 pending，不再无限等待。
 - 通过补丁脚本 `tools/patches/video_request_mode_patch.py` 保留改动，便于原项目更新后重新打补丁。
 
@@ -413,19 +413,27 @@ VIDEO_POLL_TIMEOUT = float(os.getenv("VIDEO_POLL_TIMEOUT", "1800"))
 1800 秒，也就是 30 分钟
 ```
 
-### 7.2 起始轮询间隔
+### 7.2 轮询间隔
+
+后端统一常量：
+
+```python
+VIDEO_POLL_INTERVAL = 25.0
+```
 
 通用视频轮询：
 
 ```python
-delay = max(5.0, IMAGE_POLL_INTERVAL)
+delay = VIDEO_POLL_INTERVAL
 ```
 
 Agnes 视频轮询：
 
 ```python
-delay = 5.0
+delay = VIDEO_POLL_INTERVAL
 ```
+
+RunningHub 视频任务和服务重启后的即梦视频续查也使用该常量。
 
 前端普通画布视频轮询：
 
@@ -442,24 +450,18 @@ await sleep(5000);
 结论：
 
 ```text
-视频轮询统一从 5 秒开始。
+后端查询上游视频任务时以 25 秒为基础间隔；前端查询本地任务状态时保持 5 秒刷新。
 ```
 
-### 7.3 后端动态退避
+### 7.3 后端固定基础间隔
 
-通用视频任务在没有 `retry_after` 时，轮询间隔会逐步增长：
+通用视频任务和 Agnes 视频任务在没有 `retry_after` 时保持 25 秒间隔：
 
 ```python
-delay = min(delay * 1.6, 12)
+delay = VIDEO_POLL_INTERVAL
 ```
 
-Agnes 视频任务：
-
-```python
-delay = min(delay * 1.35, 12)
-```
-
-也就是说，后端轮询不会一直高频请求，最终最多约 12 秒一次。
+如果上游返回更长的 `retry_after`，后端会采用更长的等待时间；上游返回小于 25 秒的值时，仍至少等待 25 秒。
 
 ### 7.4 retry_after 支持
 
@@ -490,6 +492,8 @@ delay = min(delay * 1.35, 12)
   "raw_last": {}
 }
 ```
+
+其中 `retry_after` 保留上游返回的原始值，`next_poll_at` 按实际等待时间计算；例如上游返回 `10` 秒时，实际仍至少等待 25 秒。
 
 注意：
 
@@ -1111,13 +1115,13 @@ credits_remaining
 
 ### 15.5 轮询太快导致失败
 
-当前视频轮询已经统一为 5 秒起步：
+当前视频轮询分为两层：
 
-- 后端：`delay = max(5.0, IMAGE_POLL_INTERVAL)`
-- 普通画布：`await sleep(5000)`
-- 智能画布：`await sleep(5000)`
+- 后端查询上游：`VIDEO_POLL_INTERVAL = 25.0`
+- 普通画布查询本地任务：`await sleep(5000)`
+- 智能画布查询本地任务：`await sleep(5000)`
 
-如果某个上游仍嫌频率高，应优先让上游返回 `retry_after`，后端会识别并遵守。
+如果某个上游要求更长间隔，应返回 `retry_after`，后端会识别并遵守。
 
 ## 16. 添加新视频中转站的建议
 
@@ -1211,8 +1215,8 @@ GET /v1/videos/generations/{task_id}
 ## 18. 当前改动的关键结论
 
 1. 主流程已经从 `/api/canvas-video` 长请求转成 `/api/canvas-video-tasks` 本地任务。
-2. 前端普通画布和智能画布都使用 5 秒视频轮询。
-3. 后端也使用 5 秒起步轮询，并支持 `retry_after`。
+2. 前端普通画布和智能画布每 5 秒查询一次本地任务状态。
+3. 后端每 25 秒查询一次上游视频任务，并支持更长的 `retry_after`。
 4. `/v1/video/generations` 与 `/v1/videos/generations` 通过 API 设置页下拉切换。
 5. 余额不足/额度不足是终态错误，会直接失败，不再保留 pending。
 6. 后端任务持久化后，重启可恢复已经拿到上游任务 ID 的任务。

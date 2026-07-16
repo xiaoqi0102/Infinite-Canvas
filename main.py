@@ -726,6 +726,7 @@ APIMART_IMAGE_TASK_TIMEOUT = float(os.getenv("APIMART_IMAGE_TASK_TIMEOUT", "1800
 APIMART_IMAGE_POLL_INTERVAL = float(os.getenv("APIMART_IMAGE_POLL_INTERVAL", "5"))
 APIMART_IMAGE_INITIAL_POLL_DELAY = float(os.getenv("APIMART_IMAGE_INITIAL_POLL_DELAY", "10"))
 VIDEO_POLL_TIMEOUT = float(os.getenv("VIDEO_POLL_TIMEOUT", "1800"))
+VIDEO_POLL_INTERVAL = 25.0
 ONLINE_IMAGE_PROMPT_MAX_LENGTH = int(os.getenv("ONLINE_IMAGE_PROMPT_MAX_LENGTH", "20000"))
 VIDEO_PROMPT_MAX_LENGTH = int(os.getenv("VIDEO_PROMPT_MAX_LENGTH", "4000"))
 LLM_MESSAGE_MAX_LENGTH = int(os.getenv("LLM_MESSAGE_MAX_LENGTH", "20000"))
@@ -3039,7 +3040,7 @@ async def resume_canvas_video_task_result(task_id: str):
                 result = {"videos": urls, "task_id": upstream_task_id, "raw": queried}
                 return result
             except JimengPendingError:
-                await asyncio.sleep(min(60.0, max(0.0, deadline - time.monotonic())))
+                await asyncio.sleep(min(VIDEO_POLL_INTERVAL, max(0.0, deadline - time.monotonic())))
         raise HTTPException(status_code=504, detail=f"即梦视频任务恢复超时：{last_raw or upstream_task_id}")
 
     timeout = httpx.Timeout(connect=20.0, read=VIDEO_POLL_TIMEOUT, write=120.0, pool=20.0)
@@ -11044,7 +11045,8 @@ async def wait_for_runninghub_openapi_task(client, provider, task_id, output_kin
     deadline = time.monotonic() + 1800
     last_payload = None
     while time.monotonic() < deadline:
-        await asyncio.sleep(3)
+        interval = VIDEO_POLL_INTERVAL if output_kind == "video" else 3.0
+        await asyncio.sleep(min(interval, max(0.0, deadline - time.monotonic())))
         response = await client.post(query_url, headers=runninghub_json_headers(provider), json={"taskId": task_id})
         response.raise_for_status()
         raw = response.json()
@@ -14681,7 +14683,7 @@ async def wait_for_video_task(client, provider, task_id, submit_url="", on_progr
         raise HTTPException(status_code=400, detail=f"{provider.get('name') or provider['id']} 未配置 Base URL")
     task_urls = video_task_url_candidates(provider, base_url, task_id, submit_url)
     deadline = time.monotonic() + VIDEO_POLL_TIMEOUT
-    delay = max(5.0, IMAGE_POLL_INTERVAL)
+    delay = VIDEO_POLL_INTERVAL
     last_payload = {}
     while time.monotonic() < deadline:
         await asyncio.sleep(delay)
@@ -14717,7 +14719,7 @@ async def wait_for_video_task(client, provider, task_id, submit_url="", on_progr
                 continue
         if raw is None:
             if retry_after_delay:
-                delay = min(retry_after_delay, max(0.0, deadline - time.monotonic()))
+                delay = min(max(VIDEO_POLL_INTERVAL, retry_after_delay), max(0.0, deadline - time.monotonic()))
                 if delay <= 0:
                     break
                 report_canvas_video_progress(on_progress, {
@@ -14750,7 +14752,7 @@ async def wait_for_video_task(client, provider, task_id, submit_url="", on_progr
             return raw
         retry_after_delay = video_retry_after_seconds(raw)
         if retry_after_delay:
-            delay = min(retry_after_delay, max(0.0, deadline - time.monotonic()))
+            delay = min(max(VIDEO_POLL_INTERVAL, retry_after_delay), max(0.0, deadline - time.monotonic()))
             if delay <= 0:
                 break
             report_canvas_video_progress(on_progress, {
@@ -14764,7 +14766,7 @@ async def wait_for_video_task(client, provider, task_id, submit_url="", on_progr
             error = task_data.get("error") if isinstance(task_data.get("error"), dict) else {}
             reason = task_data.get("fail_reason") or task_data.get("message") or error.get("message") or raw.get("error") or raw.get("message") or str(raw)
             raise HTTPException(status_code=502, detail=humanize_video_task_failure(reason))
-        delay = min(delay * 1.6, 12)
+        delay = VIDEO_POLL_INTERVAL
     raise HTTPException(status_code=504, detail=f"视频生成任务超时：{last_payload or task_id}")
 
 def apimart_video_size(size):
@@ -14819,7 +14821,7 @@ async def wait_for_agnes_video_task(client, provider, video_id, model, on_progre
     query_url = f"{base_url}/agnesapi?{urllib.parse.urlencode({'video_id': video_id, 'model_name': model})}"
     legacy_url = f"{base_url}/v1/videos/{urllib.parse.quote(str(video_id), safe='')}"
     deadline = time.monotonic() + VIDEO_POLL_TIMEOUT
-    delay = 5.0
+    delay = VIDEO_POLL_INTERVAL
     last_payload = {}
     while time.monotonic() < deadline:
         await asyncio.sleep(delay)
@@ -14854,7 +14856,7 @@ async def wait_for_agnes_video_task(client, provider, video_id, model, on_progre
                     break
         if raw is None:
             if retry_after_delay:
-                delay = min(retry_after_delay, max(0.0, deadline - time.monotonic()))
+                delay = min(max(VIDEO_POLL_INTERVAL, retry_after_delay), max(0.0, deadline - time.monotonic()))
                 if delay <= 0:
                     break
                 report_canvas_video_progress(on_progress, {
@@ -14881,7 +14883,7 @@ async def wait_for_agnes_video_task(client, provider, video_id, model, on_progre
             error = task_data.get("error") if isinstance(task_data.get("error"), dict) else {}
             reason = task_data.get("message") or error.get("message") or raw.get("error") or raw.get("message") or str(raw)
             raise HTTPException(status_code=502, detail=humanize_video_task_failure(reason))
-        delay = min(delay * 1.35, 12)
+        delay = VIDEO_POLL_INTERVAL
     raise HTTPException(status_code=504, detail=f"Agnes 视频生成任务超时：{last_payload or video_id}")
 
 async def generate_agnes_video(client, payload, provider, base_url, requested_model, progress=None):

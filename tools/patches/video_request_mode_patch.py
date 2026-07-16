@@ -479,7 +479,7 @@ async def resume_canvas_video_task_result(task_id: str):
                 urls = await jimeng_store_outputs(queried, "video", allow_query=False)
                 return {"videos": urls, "task_id": upstream_task_id, "raw": queried}
             except JimengPendingError:
-                await asyncio.sleep(min(60.0, max(0.0, deadline - time.monotonic())))
+                await asyncio.sleep(min(VIDEO_POLL_INTERVAL, max(0.0, deadline - time.monotonic())))
         raise HTTPException(status_code=504, detail=f"即梦视频任务恢复超时：{last_raw or upstream_task_id}")
 
     timeout = httpx.Timeout(connect=20.0, read=VIDEO_POLL_TIMEOUT, write=120.0, pool=20.0)
@@ -920,6 +920,16 @@ def patch_main(text):
             flags=0,
         )
 
+    if "VIDEO_POLL_INTERVAL = 25.0" not in text:
+        text = regex_replace(
+            text,
+            r'(VIDEO_POLL_TIMEOUT = float\(os\.getenv\("VIDEO_POLL_TIMEOUT", "1800"\)\)\n)',
+            r'\1VIDEO_POLL_INTERVAL = 25.0\n',
+            "VIDEO_POLL_INTERVAL",
+            required=True,
+            flags=0,
+        )
+
     text = re.sub(
         r'("image_request_mode": "openai",\n)(?![ \t]+"video_request_mode")([ \t]+)',
         r'\1\2"video_request_mode": "openai-videos-generations",\n\2',
@@ -1011,12 +1021,12 @@ def normalize_video_request_mode(value):
             required=True,
         )
 
-    text = replace_once(
-        text,
+    for legacy_delay in (
         "    delay = max(2.0, IMAGE_POLL_INTERVAL)\n",
         "    delay = max(5.0, IMAGE_POLL_INTERVAL)\n",
-        "video poll initial delay",
-    )
+    ):
+        if legacy_delay in text:
+            text = text.replace(legacy_delay, "    delay = VIDEO_POLL_INTERVAL\n", 1)
     text = replace_once(
         text,
         "        raw = None\n        last_error = None\n        for task_url in task_urls:\n",
@@ -1026,13 +1036,13 @@ def normalize_video_request_mode(value):
     text = replace_once(
         text,
         "            except Exception as exc:\n                last_error = exc\n                continue\n        if raw is None:\n            if last_error:\n                raise last_error\n            raise HTTPException(status_code=502, detail=f\"视频任务查询失败：{task_id}\")\n",
-        "            except Exception as exc:\n                last_error = exc\n                retry_after_delay = video_retry_after_seconds(exc) or retry_after_delay\n                if retry_after_delay:\n                    break\n                continue\n        if raw is None:\n            if retry_after_delay:\n                delay = min(retry_after_delay, max(0.0, deadline - time.monotonic()))\n                if delay <= 0:\n                    break\n                continue\n            if last_error:\n                raise last_error\n            raise HTTPException(status_code=502, detail=f\"视频任务查询失败：{task_id}\")\n",
+        "            except Exception as exc:\n                last_error = exc\n                retry_after_delay = video_retry_after_seconds(exc) or retry_after_delay\n                if retry_after_delay:\n                    break\n                continue\n        if raw is None:\n            if retry_after_delay:\n                delay = min(max(VIDEO_POLL_INTERVAL, retry_after_delay), max(0.0, deadline - time.monotonic()))\n                if delay <= 0:\n                    break\n                continue\n            if last_error:\n                raise last_error\n            raise HTTPException(status_code=502, detail=f\"视频任务查询失败：{task_id}\")\n",
         "video retry_after exception handling",
     )
     text = replace_once(
         text,
         "        if status not in VIDEO_TASK_FAILURE_STATUSES and video_output_urls(raw):\n            return raw\n        if status in VIDEO_TASK_FAILURE_STATUSES:\n",
-        "        if status not in VIDEO_TASK_FAILURE_STATUSES and video_output_urls(raw):\n            return raw\n        retry_after_delay = video_retry_after_seconds(raw)\n        if retry_after_delay:\n            delay = min(retry_after_delay, max(0.0, deadline - time.monotonic()))\n            if delay <= 0:\n                break\n            continue\n        if status in VIDEO_TASK_FAILURE_STATUSES:\n",
+        "        if status not in VIDEO_TASK_FAILURE_STATUSES and video_output_urls(raw):\n            return raw\n        retry_after_delay = video_retry_after_seconds(raw)\n        if retry_after_delay:\n            delay = min(max(VIDEO_POLL_INTERVAL, retry_after_delay), max(0.0, deadline - time.monotonic()))\n            if delay <= 0:\n                break\n            continue\n        if status in VIDEO_TASK_FAILURE_STATUSES:\n",
         "video retry_after payload handling",
     )
     if "response.status_code >= 400 and is_video_terminal_error(response)" not in text:
@@ -1050,6 +1060,29 @@ def normalize_video_request_mode(value):
             "        task_data = raw.get(\"data\") if isinstance(raw.get(\"data\"), dict) else raw\n        status = ",
             "        task_data = raw.get(\"data\") if isinstance(raw.get(\"data\"), dict) else raw\n        if is_video_terminal_error(raw):\n            raise HTTPException(status_code=502, detail=humanize_video_task_failure(video_task_failure_reason(raw)))\n        status = ",
         )
+
+    text = text.replace(
+        "delay = min(retry_after_delay, max(0.0, deadline - time.monotonic()))",
+        "delay = min(max(VIDEO_POLL_INTERVAL, retry_after_delay), max(0.0, deadline - time.monotonic()))",
+    )
+    text = text.replace(
+        "await asyncio.sleep(min(60.0, max(0.0, deadline - time.monotonic())))",
+        "await asyncio.sleep(min(VIDEO_POLL_INTERVAL, max(0.0, deadline - time.monotonic())))",
+    )
+    text = text.replace("delay = min(delay * 1.6, 12)", "delay = VIDEO_POLL_INTERVAL")
+    text = text.replace("delay = min(delay * 1.35, 12)", "delay = VIDEO_POLL_INTERVAL")
+    text = regex_replace(
+        text,
+        r'(async def wait_for_agnes_video_task\(.*?deadline = time\.monotonic\(\) \+ VIDEO_POLL_TIMEOUT\n)    delay = 5\.0\n',
+        r'\1    delay = VIDEO_POLL_INTERVAL\n',
+        "Agnes video poll interval",
+    )
+    text = regex_replace(
+        text,
+        r'(async def wait_for_runninghub_openapi_task\(.*?while time\.monotonic\(\) < deadline:\n)        await asyncio\.sleep\(3\)\n',
+        r'\1        interval = VIDEO_POLL_INTERVAL if output_kind == "video" else 3.0\n        await asyncio.sleep(min(interval, max(0.0, deadline - time.monotonic())))\n',
+        "RunningHub video poll interval",
+    )
 
     if "is_single_video_generations = is_openai_video_generations_mode(provider)" not in text:
         text = replace_once(
@@ -1580,7 +1613,8 @@ def validate(root):
             "is_single_video_generations = is_openai_video_generations_mode(provider)",
             "def video_retry_after_seconds(source):",
             "def is_video_terminal_error(source):",
-            "delay = max(5.0, IMAGE_POLL_INTERVAL)",
+            "VIDEO_POLL_INTERVAL = 25.0",
+            "delay = VIDEO_POLL_INTERVAL",
             "CANVAS_VIDEO_TASKS_FILE",
             "def update_canvas_video_task",
             '@app.post("/api/canvas-video-tasks")',

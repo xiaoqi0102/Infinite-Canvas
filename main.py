@@ -380,7 +380,7 @@ def _storage_abs_path(value, fallback):
         return os.path.abspath(fallback)
     text = os.path.expanduser(os.path.expandvars(text))
     if not os.path.isabs(text):
-        text = os.path.join(BASE_DIR, text)
+        text = os.path.join(USER_DATA_ROOT, text)
     return os.path.abspath(text)
 
 def load_storage_settings():

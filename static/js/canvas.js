@@ -697,6 +697,71 @@ function providerVideoModels(providerId){
     const provider = apiProviders.find(p => p.id === providerId);
     return uniqueModels(provider?.video_models || []);
 }
+function videoProviderConfig(providerId){
+    return (apiProviders.length ? apiProviders : defaultApiProviders()).find(p => p.id === providerId) || null;
+}
+const MEGABY_VIDEO_DURATION_MIN = 4;
+const MEGABY_VIDEO_DURATION_MAX = 15;
+const MEGABY_VIDEO_ASPECTS = new Set(['16:9', '9:16', '1:1']);
+const MEGABY_VIDEO_RESOLUTIONS = new Set(['', '480p', '720p']);
+function isMegabyVideoProvider(providerId){
+    const provider = videoProviderConfig(providerId);
+    if(!provider) return false;
+    const requestMode = String(provider.video_request_mode || provider.videoRequestMode || '').trim().toLowerCase();
+    if(requestMode === 'megabyai-v1-videos') return true;
+    if(window.StudioVideoApi?.isMegabyAiBaseUrl) return window.StudioVideoApi.isMegabyAiBaseUrl(provider.base_url);
+    const officialHostnames = new Set(['newapi.megabyai.cc', 'cn.megabyai.cc']);
+    const text = String(provider.base_url || '').trim();
+    try {
+        const hostname = new URL(text).hostname.toLowerCase();
+        if(hostname) return officialHostnames.has(hostname);
+    } catch(_) {}
+    try { return officialHostnames.has(new URL(`https://${text.replace(/^\/+/, '')}`).hostname.toLowerCase()); }
+    catch(_) { return false; }
+}
+function normalizeMegabyVideoNodeSettings(node, {resetInvalidGroup=false}={}){
+    if(!node || !isMegabyVideoProvider(node.apiProvider)) return false;
+    const duration = Number(node.duration);
+    const aspect = String(node.aspectRatio || '');
+    const resolution = String(node.resolution || '');
+    const hasInvalidGroup = !Number.isInteger(duration)
+        || duration < MEGABY_VIDEO_DURATION_MIN
+        || duration > MEGABY_VIDEO_DURATION_MAX
+        || !MEGABY_VIDEO_ASPECTS.has(aspect)
+        || !MEGABY_VIDEO_RESOLUTIONS.has(resolution);
+    if(hasInvalidGroup && resetInvalidGroup){
+        node.duration = 5;
+        node.aspectRatio = '16:9';
+        node.resolution = '720p';
+    } else {
+        node.duration = Math.max(MEGABY_VIDEO_DURATION_MIN, Math.min(MEGABY_VIDEO_DURATION_MAX, Math.round(duration || 5)));
+        if(!MEGABY_VIDEO_ASPECTS.has(aspect)) node.aspectRatio = '16:9';
+        if(!MEGABY_VIDEO_RESOLUTIONS.has(resolution)) node.resolution = '720p';
+    }
+    ['enhancePrompt', 'enableUpsample', 'watermark', 'cameraFixed', 'generateAudio', 'multimodal', 'useFrameRoles']
+        .forEach(field => { node[field] = false; });
+    return hasInvalidGroup;
+}
+function canvasVideoProtocolProfile(node){
+    const provider = videoProviderConfig(resolveVideoProviderId(node?.apiProvider || 'comfly'));
+    if(window.StudioVideoApi?.videoProtocolProfile){
+        return window.StudioVideoApi.videoProtocolProfile(provider, node?.model || '', node?.resolution || '');
+    }
+    return {isSudashui:false, resolutionReadOnly:false, resolution:node?.resolution || '', resolutionLabel:'', officialAssetsEnabled:false};
+}
+function canvasVideoImageSignature(refs){
+    return (refs || []).map(ref => `${ref.url || ''}|${ref.name || ''}`).join('\n');
+}
+function syncCanvasOfficialAssetState(node, imageRefs, profile, notify=false){
+    const signature = canvasVideoImageSignature(imageRefs);
+    const changed = Boolean(node.officialAssetImageSignature) && node.officialAssetImageSignature !== signature;
+    const mustClear = !profile.officialAssetsEnabled || changed;
+    if(mustClear && node.officialAssetImageNumbers){
+        node.officialAssetImageNumbers = '';
+        if(notify) setStatus(tr('canvas.sudashuiOfficialCleared'));
+    }
+    node.officialAssetImageSignature = profile.officialAssetsEnabled ? signature : '';
+}
 function sanitizeVideoNodeProviderModel(node){
     if(!node || node.type !== 'video') return;
     node.apiProvider = resolveVideoProviderId(node.apiProvider || 'comfly');
@@ -8505,14 +8570,31 @@ function renderVideoBody(node){
     const mediaInputs = ordered.filter(src => src.refs?.some(ref => ['image','video','audio'].includes(mediaKindForRef(ref))));
     const promptInputs = ordered.filter(src => src.prompt && !src.refs?.length);
     sanitizeVideoNodeProviderModel(node);
+    normalizeMegabyVideoNodeSettings(node, {resetInvalidGroup:true});
     node.model = node.model || 'veo3-fast';
+    const profile = canvasVideoProtocolProfile(node);
+    const isMegaby = isMegabyVideoProvider(node.apiProvider);
+    const currentImageRefs = imageRefsOnly(ordered.flatMap(src => src.refs || []));
+    syncCanvasOfficialAssetState(node, currentImageRefs, profile, true);
+    if(profile.isSudashui){
+        node.duration = Math.max(4, Math.min(15, Number(node.duration) || 5));
+        const normalizedRatio = window.StudioVideoApi?.normalizeSudashuiAspectRatio?.(node.aspectRatio);
+        if(!normalizedRatio) node.aspectRatio = '16:9';
+        else if(node.aspectRatio === 'keep_ratio') node.aspectRatio = 'adaptive';
+    }
+    const aspectOptions = (isMegaby
+        ? ['16:9','9:16','1:1']
+        : (profile.isSudashui ? window.StudioVideoApi?.SUDASHUI_ASPECT_RATIOS : ['16:9','9:16','1:1','4:3','3:4','21:9','9:21','keep_ratio','adaptive'])) || ['16:9','9:16','1:1'];
+    const aspectLabels = {keep_ratio:'keep', adaptive:'adapt'};
+    const resolutionLabel = profile.resolutionLabel ? trf('canvas.videoResolutionModelValue', {resolution:profile.resolutionLabel}) : tr('canvas.videoResolutionModelAuto');
+    const officialImages = currentImageRefs.map((ref, index) => `${index + 1}. ${ref.name || `图${index + 1}`}`).join(' · ');
     wrap.innerHTML = `
         <div class="prompt-list mb-3"></div>
         <div class="video-input-head">
             <div class="text-[10px] font-bold text-gray-400 uppercase tracking-widest">Media</div>
             <div class="video-input-actions">
                 <button type="button" class="tool-btn" data-video-manual-url title="手动输入视频 URL"><i data-lucide="link" class="w-4 h-4"></i><span>输入网址</span></button>
-                <button type="button" class="tool-btn" data-video-temp-sh ${node.tempShUploading ? 'disabled' : ''} title="上传当前输入视频到云端直链"><i data-lucide="upload-cloud" class="w-4 h-4"></i><span>${node.tempShUploading ? '上传中...' : '上传云端'}</span></button>
+                ${profile.isSudashui ? '' : `<button type="button" class="tool-btn" data-video-temp-sh ${node.tempShUploading ? 'disabled' : ''} title="上传当前输入视频到云端直链"><i data-lucide="upload-cloud" class="w-4 h-4"></i><span>${node.tempShUploading ? '上传中...' : '上传云端'}</span></button>`}
             </div>
         </div>
         <div class="input-list video-img-list"></div>
@@ -8524,42 +8606,40 @@ function renderVideoBody(node){
             <div class="gen-settings-row">
                 <label class="field" style="flex:1">
                     <div class="setting-title">${tr('canvas.videoDuration')}</div>
-                    <input class="setting-input video-duration" type="number" min="1" max="60" step="1" value="${Number(node.duration || 5)}">
+                    <input class="setting-input video-duration" type="number" min="${isMegaby || profile.isSudashui ? 4 : 1}" max="${isMegaby || profile.isSudashui ? 15 : 60}" step="1" value="${Number(node.duration || 5)}">
                 </label>
                 <label class="field" style="flex:1">
                     <div class="setting-title">${tr('canvas.videoAspect')}</div>
                     <select class="select-lite video-aspect compact-select">
-                        <option value="16:9">16:9</option>
-                        <option value="9:16">9:16</option>
-                        <option value="1:1">1:1</option>
-                        <option value="4:3">4:3</option>
-                        <option value="3:4">3:4</option>
-                        <option value="21:9">21:9</option>
-                        <option value="9:21">9:21</option>
-                        <option value="keep_ratio">keep</option>
-                        <option value="adaptive">adapt</option>
+                        ${aspectOptions.map(value => `<option value="${escapeHtml(value)}">${escapeHtml(aspectLabels[value] || value)}</option>`).join('')}
                     </select>
                 </label>
                 <label class="field" style="flex:1">
                     <div class="setting-title">${tr('canvas.videoResolution')}</div>
-                    <select class="select-lite video-resolution compact-select">
-                        <option value="">Auto</option>
-                        <option value="480p">480p</option>
-                        <option value="720p">720p</option>
-                        <option value="1080p">1080p</option>
-                        <option value="780P">780P</option>
+                    <select class="select-lite video-resolution compact-select" ${profile.resolutionReadOnly ? 'disabled aria-disabled="true"' : ''} title="${profile.resolutionReadOnly ? escapeAttr(tr('canvas.videoResolutionModelTip')) : ''}">
+                        ${profile.resolutionReadOnly
+                            ? `<option value="${escapeAttr(profile.resolution || '')}">${escapeHtml(resolutionLabel)}</option>`
+                            : isMegaby
+                                ? '<option value="">Auto</option><option value="480p">480p</option><option value="720p">720p</option>'
+                                : '<option value="">Auto</option><option value="480p">480p</option><option value="720p">720p</option><option value="1080p">1080p</option><option value="780P">780P</option>'}
                     </select>
                 </label>
             </div>
-            <div class="gen-settings-row" style="flex-wrap:wrap">
-                <button type="button" class="setting-check ${node.enhancePrompt ? 'active' : ''}" data-video-toggle="enhancePrompt"><span class="check-dot"></span>${tr('canvas.videoEnhancePrompt')}</button>
+            ${isMegaby ? '' : `<div class="gen-settings-row" style="flex-wrap:wrap">
+                ${profile.isSudashui ? '' : `<button type="button" class="setting-check ${node.enhancePrompt ? 'active' : ''}" data-video-toggle="enhancePrompt"><span class="check-dot"></span>${tr('canvas.videoEnhancePrompt')}</button>
                 <button type="button" class="setting-check ${node.enableUpsample ? 'active' : ''}" data-video-toggle="enableUpsample"><span class="check-dot"></span>${tr('canvas.videoUpsample')}</button>
                 <button type="button" class="setting-check ${node.watermark ? 'active' : ''}" data-video-toggle="watermark"><span class="check-dot"></span>${tr('canvas.videoWatermark')}</button>
                 <button type="button" class="setting-check ${node.cameraFixed ? 'active' : ''}" data-video-toggle="cameraFixed"><span class="check-dot"></span>${tr('canvas.videoCameraFixed')}</button>
                 <button type="button" class="setting-check ${node.generateAudio ? 'active' : ''}" data-video-toggle="generateAudio"><span class="check-dot"></span>${tr('canvas.videoGenerateAudio')}</button>
-                <button type="button" class="setting-check ${node.multimodal ? 'active' : ''}" data-video-toggle="multimodal"><span class="check-dot"></span>${tr('canvas.videoMultimodal')}</button>
+                <button type="button" class="setting-check ${node.multimodal ? 'active' : ''}" data-video-toggle="multimodal"><span class="check-dot"></span>${tr('canvas.videoMultimodal')}</button>`}
                 <button type="button" class="setting-check ${node.useFrameRoles ? 'active' : ''}" data-video-toggle="useFrameRoles"><span class="check-dot"></span>${tr('canvas.videoFirstLastFrames')}</button>
-            </div>
+            </div>`}
+            ${profile.officialAssetsEnabled ? `<label class="field sudashui-official-assets">
+                <div class="setting-title">${tr('canvas.sudashuiOfficialAssetNumbers')}</div>
+                <input class="setting-input video-official-assets" type="text" value="${escapeAttr(node.officialAssetImageNumbers || '')}" placeholder="${escapeAttr(tr('canvas.sudashuiOfficialAssetPlaceholder'))}">
+                <div class="text-[10px] text-gray-400">${escapeHtml(tr('canvas.sudashuiOfficialAssetTip'))}${officialImages ? ` · ${escapeHtml(officialImages)}` : ''}</div>
+            </label>` : ''}
+            ${profile.isSudashui ? `<div class="text-[10px] text-gray-400">${escapeHtml(tr('canvas.sudashuiAutoUploadTip'))}</div>` : ''}
         </div>
         <div class="gen-run-row">
             <button class="gen-btn ${node.running ? 'running' : ''}" ${node.running ? 'disabled' : ''}><i data-lucide="clapperboard" class="w-4 h-4"></i>${node.running ? tr('canvas.generating') : tr('canvas.videoGenerate')}</button>
@@ -8575,7 +8655,7 @@ function renderVideoBody(node){
     providerSelect.value = node.apiProvider;
     durationSelect.value = String(node.duration || 5);
     aspectSelect.value = node.aspectRatio || '16:9';
-    resolutionSelect.value = node.resolution || '';
+    resolutionSelect.value = profile.resolutionReadOnly ? (profile.resolution || '') : (node.resolution || '');
     [providerSelect, modelSelect, durationSelect, aspectSelect, resolutionSelect].forEach(input => {
         input.onmousedown = e => e.stopPropagation();
         input.onclick = e => e.stopPropagation();
@@ -8585,14 +8665,22 @@ function renderVideoBody(node){
         node.apiProvider = e.target.value;
         const models = providerVideoModels(node.apiProvider);
         if(!models.includes(node.model)) node.model = models[0] || node.model;
-        modelSelect.innerHTML = videoModelOptions(node.model, node.apiProvider);
+        const paramsReset = normalizeMegabyVideoNodeSettings(node, {resetInvalidGroup:true});
+        syncCanvasOfficialAssetState(node, currentImageRefs, canvasVideoProtocolProfile(node), true);
+        render();
         scheduleSave();
+        if(paramsReset) setTimeout(() => showErrorModal(tr('canvas.megabyParamsReset'), 'MegabyAI'), 0);
     };
-    modelSelect.onchange = e => { e.stopPropagation(); node.model = e.target.value; scheduleSave(); };
-    durationSelect.oninput = e => { e.stopPropagation(); node.duration = Math.max(1, Math.min(60, Number(e.target.value || 5))); scheduleSave(); };
-    durationSelect.onblur = e => { e.target.value = String(Math.max(1, Math.min(60, Number(node.duration || 5)))); };
+    modelSelect.onchange = e => { e.stopPropagation(); node.model = e.target.value; syncCanvasOfficialAssetState(node, currentImageRefs, canvasVideoProtocolProfile(node), true); render(); scheduleSave(); };
+    durationSelect.oninput = e => { e.stopPropagation(); const min = isMegaby || profile.isSudashui ? 4 : 1; const max = isMegaby || profile.isSudashui ? 15 : 60; node.duration = Math.max(min, Math.min(max, Math.round(Number(e.target.value || 5)))); scheduleSave(); };
+    durationSelect.onblur = e => { const min = isMegaby || profile.isSudashui ? 4 : 1; const max = isMegaby || profile.isSudashui ? 15 : 60; e.target.value = String(Math.max(min, Math.min(max, Math.round(Number(node.duration || 5))))); };
     aspectSelect.onchange = e => { e.stopPropagation(); node.aspectRatio = e.target.value; scheduleSave(); };
     resolutionSelect.onchange = e => { e.stopPropagation(); node.resolution = e.target.value; scheduleSave(); };
+    const officialInput = wrap.querySelector('.video-official-assets');
+    if(officialInput){
+        officialInput.onmousedown = officialInput.onclick = e => e.stopPropagation();
+        officialInput.oninput = e => { node.officialAssetImageNumbers = e.target.value; scheduleSave(); };
+    }
     wrap.querySelectorAll('[data-video-toggle]').forEach(btn => {
         btn.onmousedown = e => e.stopPropagation();
         btn.onclick = e => {
@@ -8669,13 +8757,16 @@ function renderImageInputList(list, node, imageInputs, emptyText=null){
 function renderVideoImageInputs(list, node, imageInputs){
     if(!list) return;
     list.innerHTML = imageInputs.length ? '' : `<div class="text-[11px] text-gray-300 py-2">${tr('canvas.groupEmpty')}</div>`;
+    const counters = {image:0, video:0, audio:0};
     imageInputs.forEach((src, i) => {
         const item = document.createElement('div');
         item.className = 'input-item video-input-item';
         item.draggable = true;
         item.dataset.sourceId = src.id;
         const kind = mediaKindForRef(src.refs?.[0] || {url:src.preview || ''});
-        const frameLabel = kind === 'image' && node.useFrameRoles && i === 0 ? tr('canvas.videoRoleFirstFrame') : kind === 'image' && node.useFrameRoles && i === 1 ? tr('canvas.videoRoleLastFrame') : '';
+        counters[kind] = Number(counters[kind] || 0) + 1;
+        const kindIndex = counters[kind];
+        const frameLabel = kind === 'image' && node.useFrameRoles && kindIndex === 1 ? tr('canvas.videoRoleFirstFrame') : kind === 'image' && node.useFrameRoles && kindIndex === 2 ? tr('canvas.videoRoleLastFrame') : '';
         const previewHtml = kind === 'video'
             ? canvasVideoPreviewHtml(src.preview || src.refs?.[0]?.url || '', 256)
             : kind === 'audio'
@@ -8683,7 +8774,7 @@ function renderVideoImageInputs(list, node, imageInputs){
             : src.preview && !isMissingAssetUrl(src.preview)
             ? canvasPreviewImgHtml(src.preview, 256)
             : (src.preview ? missingAssetHtml(src.preview, true) : '<i data-lucide="image" class="w-6 h-6 text-slate-400"></i>');
-        const typeLabel = kind === 'audio' ? `音频${i + 1}` : kind === 'video' ? `视频${i + 1}` : `图${i + 1}`;
+        const typeLabel = kind === 'audio' ? `音频${kindIndex}` : kind === 'video' ? `视频${kindIndex}` : `图${kindIndex}`;
         item.innerHTML = `
             <div class="video-input-thumb">
                 <span class="input-index">${i + 1}</span>
@@ -10547,9 +10638,32 @@ async function runGeneratorLegacy(genId, opts={}){
         showErrorModal(err.message || tr('canvas.generationFailed'), tr('canvas.apiFailed'));
     }
 }
+function validateCanvasSudashuiVideoRequest(node, profile, refs, videoUrls, audioUrls){
+    if(!profile.isSudashui) return {duration:Number(node.duration || 5), aspectRatio:node.aspectRatio || '16:9', officialAssetIndexes:null};
+    const duration = Number(node.duration);
+    if(!window.StudioVideoApi?.isAllowedSudashuiDuration?.(duration)) throw new Error(tr('canvas.sudashuiDurationError'));
+    const aspectRatio = window.StudioVideoApi?.normalizeSudashuiAspectRatio?.(node.aspectRatio);
+    if(!aspectRatio) throw new Error(tr('canvas.sudashuiAspectError'));
+    if(refs.length > 9) throw new Error(trf('canvas.sudashuiImageLimit', {count:9}));
+    if(videoUrls.length > 3) throw new Error(trf('canvas.sudashuiVideoLimit', {count:3}));
+    if(audioUrls.length > 3) throw new Error(trf('canvas.sudashuiAudioLimit', {count:3}));
+    if(refs.length + videoUrls.length + audioUrls.length > 12) throw new Error(trf('canvas.sudashuiTotalLimit', {count:12}));
+    if(node.useFrameRoles && (refs.length !== 2 || videoUrls.length || audioUrls.length)) throw new Error(tr('canvas.sudashuiFramesError'));
+    if(profile.officialAssetsEnabled && videoUrls.length) throw new Error(tr('canvas.sudashuiOfficialVideoError'));
+    let officialAssetIndexes = [];
+    if(profile.officialAssetsEnabled){
+        try {
+            officialAssetIndexes = window.StudioVideoApi.parseOfficialAssetIndexes(node.officialAssetImageNumbers || '', refs.length);
+        } catch(_) {
+            throw new Error(tr('canvas.sudashuiOfficialAssetError'));
+        }
+    }
+    return {duration, aspectRatio, officialAssetIndexes};
+}
 async function runVideoNode(nodeId, opts={}){
     const node = nodes.find(n => n.id === nodeId);
     if(!node || (node.running && !opts.cascade)) return;
+    normalizeMegabyVideoNodeSettings(node, {resetInvalidGroup:true});
     const cascadeTargetId = cascadeTargetIdFromOptions(opts);
     const sources = orderedSources(node, generatorSources(node));
     const prompt = sources.map(s => s.prompt).filter(Boolean).join('\n\n');
@@ -10565,18 +10679,33 @@ async function runVideoNode(nodeId, opts={}){
     const pendingId = uid('p');
     const run = runSnapshot(node, prompt, refs);
     const manualVideoUrl = manualVideoUrlForNode(node);
+    const providerId = resolveVideoProviderId(node.apiProvider || 'comfly');
+    const provider = videoProviderConfig(providerId);
+    const profile = window.StudioVideoApi?.videoProtocolProfile
+        ? window.StudioVideoApi.videoProtocolProfile(provider, node.model || '', node.resolution || '')
+        : {isSudashui:false, resolution:node.resolution || '', officialAssetsEnabled:false};
+    const videoUrls = manualVideoUrl
+        ? [manualVideoUrl]
+        : videoRefs.map(ref => tempShUploadedUrlForNode(node, ref.url)).filter(Boolean);
+    const audioUrls = audioRefs.map(ref => ref.url).filter(Boolean);
+    let sudashui;
+    try {
+        sudashui = validateCanvasSudashuiVideoRequest(node, profile, refs, videoUrls, audioUrls);
+    } catch(error) {
+        if(opts.cascade) throw error;
+        showErrorModal(error.message || tr('canvas.videoFailed'), tr('canvas.apiFailed'));
+        return;
+    }
     const payload = {
         prompt,
-        provider_id:resolveVideoProviderId(node.apiProvider || 'comfly'),
+        provider_id:providerId,
         model:node.model || 'veo3-fast',
-        duration:Number(node.duration || 5),
-        aspect_ratio:node.aspectRatio || '16:9',
-        resolution:node.resolution || '',
+        duration:sudashui.duration,
+        aspect_ratio:sudashui.aspectRatio,
+        resolution:profile.isSudashui ? (profile.resolution || '') : (node.resolution || ''),
         images:refs,
-        videos:manualVideoUrl
-            ? [manualVideoUrl]
-            : videoRefs.map(ref => tempShUploadedUrlForNode(node, ref.url)),
-        audios:audioRefs.map(ref => ref.url).filter(Boolean),
+        videos:videoUrls,
+        audios:audioUrls,
         enhance_prompt:Boolean(node.enhancePrompt),
         enable_upsample:Boolean(node.enableUpsample),
         watermark:Boolean(node.watermark),
@@ -10584,6 +10713,7 @@ async function runVideoNode(nodeId, opts={}){
         generate_audio:Boolean(node.generateAudio),
         multimodal:Boolean(node.multimodal)
     };
+    if(profile.isSudashui) payload.official_asset_indexes = sudashui.officialAssetIndexes;
     const startedAt = nowMs();
     let taskInfo = null;
     if(!opts.cascade){

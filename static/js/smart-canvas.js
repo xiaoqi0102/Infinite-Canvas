@@ -320,6 +320,8 @@ let settings = {
     videoDuration:5,
     videoAspect:'16:9',
     videoResolution:'',
+    videoOfficialAssetImageNumbers:'',
+    videoOfficialAssetImageSignature:'',
     videoEnhancePrompt:false,
     videoEnableUpsample:false,
     videoWatermark:false,
@@ -2479,6 +2481,7 @@ function sanitizeSmartApiSelection(target=settings){
     if(target.videoProvider){
         const models = providerVideoModels(target.videoProvider);
         if(models.length && !models.includes(target.videoModel)) target.videoModel = models[0] || '';
+        normalizeMegabyVideoSettings(target, {resetInvalidGroup:true});
     }
     return target;
 }
@@ -2497,6 +2500,84 @@ function videoApiProviders(){
 function videoProviderById(providerId){
     if(providerId === 'volcengine') return volcengineProvider();
     return videoApiProviders().find(p => p.id === providerId) || videoApiProviders()[0] || null;
+}
+function syncSudashuiOfficialAssetForRefs(node=activeComposerNode() || selectedNode()){
+    if(settings.engine !== 'api' || settings.apiKind !== 'video') return;
+    const profile = smartVideoProtocolProfile(settings);
+    const refs = imageRefsOnly(node ? visibleReferenceImagesFor(node) : []);
+    const beforeNumbers = settings.videoOfficialAssetImageNumbers || '';
+    const beforeSignature = settings.videoOfficialAssetImageSignature || '';
+    syncSmartOfficialAssetState(profile, refs, true);
+    if(beforeNumbers !== (settings.videoOfficialAssetImageNumbers || '') || beforeSignature !== (settings.videoOfficialAssetImageSignature || '')){
+        persistActiveSmartSettings();
+        scheduleDynamicParamsRefresh(80);
+        scheduleSave();
+    }
+}
+function smartVideoProtocolProfile(runSettings=settings){
+    const provider = videoProviderById(runSettings?.videoProvider || '');
+    if(window.StudioVideoApi?.videoProtocolProfile){
+        return window.StudioVideoApi.videoProtocolProfile(provider, runSettings?.videoModel || '', runSettings?.videoResolution || '');
+    }
+    return {isSudashui:false, resolutionReadOnly:false, resolution:runSettings?.videoResolution || '', resolutionLabel:'', officialAssetsEnabled:false};
+}
+function smartVideoImageRefs(){
+    const node = activeComposerNode() || selectedNode();
+    return imageRefsOnly(node ? visibleReferenceImagesFor(node) : []);
+}
+function smartVideoImageSignature(refs){
+    return (refs || []).map(ref => `${ref.url || ''}|${ref.name || ''}`).join('\n');
+}
+function syncSmartOfficialAssetState(profile, refs, notify=false){
+    const signature = smartVideoImageSignature(refs);
+    const changed = Boolean(settings.videoOfficialAssetImageSignature) && settings.videoOfficialAssetImageSignature !== signature;
+    if((!profile.officialAssetsEnabled || changed) && settings.videoOfficialAssetImageNumbers){
+        settings.videoOfficialAssetImageNumbers = '';
+        if(notify) toast(tr('smart.sudashuiOfficialCleared'));
+    }
+    settings.videoOfficialAssetImageSignature = profile.officialAssetsEnabled ? signature : '';
+}
+const MEGABY_VIDEO_DURATION_MIN = 4;
+const MEGABY_VIDEO_DURATION_MAX = 15;
+const MEGABY_VIDEO_ASPECTS = new Set(['16:9', '9:16', '1:1']);
+const MEGABY_VIDEO_RESOLUTIONS = new Set(['', '480p', '720p']);
+function isMegabyVideoProvider(providerId){
+    const provider = (apiProviders || []).find(p => p.id === providerId);
+    if(!provider) return false;
+    const requestMode = String(provider.video_request_mode || provider.videoRequestMode || '').trim().toLowerCase();
+    if(requestMode === 'megabyai-v1-videos') return true;
+    if(window.StudioVideoApi?.isMegabyAiBaseUrl) return window.StudioVideoApi.isMegabyAiBaseUrl(provider.base_url);
+    const officialHostnames = new Set(['newapi.megabyai.cc', 'cn.megabyai.cc']);
+    const text = String(provider.base_url || '').trim();
+    try {
+        const hostname = new URL(text).hostname.toLowerCase();
+        if(hostname) return officialHostnames.has(hostname);
+    } catch(_) {}
+    try { return officialHostnames.has(new URL(`https://${text.replace(/^\/+/, '')}`).hostname.toLowerCase()); }
+    catch(_) { return false; }
+}
+function normalizeMegabyVideoSettings(target, {resetInvalidGroup=false}={}){
+    if(!target || !isMegabyVideoProvider(target.videoProvider)) return false;
+    const duration = Number(target.videoDuration);
+    const aspect = String(target.videoAspect || '');
+    const resolution = String(target.videoResolution || '');
+    const hasInvalidGroup = !Number.isInteger(duration)
+        || duration < MEGABY_VIDEO_DURATION_MIN
+        || duration > MEGABY_VIDEO_DURATION_MAX
+        || !MEGABY_VIDEO_ASPECTS.has(aspect)
+        || !MEGABY_VIDEO_RESOLUTIONS.has(resolution);
+    if(hasInvalidGroup && resetInvalidGroup){
+        target.videoDuration = 5;
+        target.videoAspect = '16:9';
+        target.videoResolution = '720p';
+    } else {
+        target.videoDuration = Math.max(MEGABY_VIDEO_DURATION_MIN, Math.min(MEGABY_VIDEO_DURATION_MAX, Math.round(duration || 5)));
+        if(!MEGABY_VIDEO_ASPECTS.has(aspect)) target.videoAspect = '16:9';
+        if(!MEGABY_VIDEO_RESOLUTIONS.has(resolution)) target.videoResolution = '720p';
+    }
+    ['videoEnhancePrompt', 'videoEnableUpsample', 'videoGenerateAudio', 'videoCameraFixed', 'videoWatermark', 'videoMultimodal', 'videoUseFrameRoles', 'videoTrustedAsset']
+        .forEach(field => { target[field] = false; });
+    return hasInvalidGroup;
 }
 function providerVideoModels(providerId){
     if(providerId === 'volcengine') return volcengineVideoModels();
@@ -2531,9 +2612,12 @@ function renderVideoModelControl(models){
         </div>
     </div>`;
 }
-function renderVideoDurationControl(){
-    const v = Math.max(1, Math.min(60, Number(settings.videoDuration) || 5));
-    const quick = [3, 4, 5, 6, 8, 10, 12, 15];
+function renderVideoDurationControl(profile=smartVideoProtocolProfile()){
+    const isMegaby = isMegabyVideoProvider(settings.videoProvider);
+    const min = profile.isSudashui ? 4 : (isMegaby ? MEGABY_VIDEO_DURATION_MIN : 1);
+    const max = profile.isSudashui ? 15 : (isMegaby ? MEGABY_VIDEO_DURATION_MAX : 60);
+    const v = Math.max(min, Math.min(max, Math.round(Number(settings.videoDuration) || 5)));
+    const quick = (profile.isSudashui || isMegaby) ? [4, 5, 6, 8, 10, 12, 15] : [3, 4, 5, 6, 8, 10, 12, 15];
     return `<div class="smart-control duration-control" title="${escapeHtml(tr('smart.videoDurationTip'))}">
         <button class="smart-pill" type="button"><i data-lucide="timer"></i><span>${v}s</span></button>
         <div class="smart-popover compact-popover">
@@ -2543,16 +2627,20 @@ function renderVideoDurationControl(){
             </div>
             <label class="duration-custom">
                 <span>${escapeHtml(tr('smart.custom'))}</span>
-                <input type="number" min="1" max="60" step="1" data-param="videoDuration" value="${v}">
+                <input type="number" min="${min}" max="${max}" step="1" data-param="videoDuration" value="${v}">
             </label>
         </div>
     </div>`;
 }
-function renderVideoAspectControl(){
-    const options = [
-        ['16:9','16:9'], ['9:16','9:16'], ['1:1','1:1'], ['4:3','4:3'], ['3:4','3:4'],
-        ['21:9','21:9'], ['9:21','9:21'], ['keep_ratio', tr('smart.videoAspectKeep')], ['adaptive', tr('smart.videoAspectAdaptive')]
-    ];
+function renderVideoAspectControl(profile=smartVideoProtocolProfile()){
+    const options = profile.isSudashui
+        ? (window.StudioVideoApi?.SUDASHUI_ASPECT_RATIOS || ['16:9','9:16','1:1','4:3','3:4','21:9','adaptive']).map(value => [value, value === 'adaptive' ? tr('smart.videoAspectAdaptive') : value])
+        : isMegabyVideoProvider(settings.videoProvider)
+        ? [['16:9','16:9'], ['9:16','9:16'], ['1:1','1:1']]
+        : [
+            ['16:9','16:9'], ['9:16','9:16'], ['1:1','1:1'], ['4:3','4:3'], ['3:4','3:4'],
+            ['21:9','21:9'], ['9:21','9:21'], ['keep_ratio', tr('smart.videoAspectKeep')], ['adaptive', tr('smart.videoAspectAdaptive')]
+        ];
     const value = settings.videoAspect || '16:9';
     const labelMap = Object.fromEntries(options);
     return `<div class="smart-control aspect-control">
@@ -2565,8 +2653,16 @@ function renderVideoAspectControl(){
         </div>
     </div>`;
 }
-function renderVideoResolutionControl(){
-    const options = [['', tr('smart.videoResAuto')], ['480p','480P'], ['720p','720P'], ['1080p','1080P']];
+function renderVideoResolutionControl(profile=smartVideoProtocolProfile()){
+    if(profile.resolutionReadOnly){
+        const label = profile.resolutionLabel ? trf('smart.videoResolutionModelValue', {resolution:profile.resolutionLabel}) : tr('smart.videoResolutionModelAuto');
+        return `<div class="smart-control resolution-control readonly" title="${escapeHtml(tr('smart.videoResolutionModelTip'))}">
+            <button class="smart-pill" type="button" disabled aria-disabled="true"><i data-lucide="monitor"></i><span>${escapeHtml(label)}</span></button>
+        </div>`;
+    }
+    const options = isMegabyVideoProvider(settings.videoProvider)
+        ? [['', tr('smart.videoResAuto')], ['480p','480P'], ['720p','720P']]
+        : [['', tr('smart.videoResAuto')], ['480p','480P'], ['720p','720P'], ['1080p','1080P']];
     const value = settings.videoResolution || '';
     const labelMap = Object.fromEntries(options);
     return `<div class="smart-control resolution-control">
@@ -2783,23 +2879,49 @@ function renderApiParams(){
 function renderApiVideoParams(){
     const providers = videoApiProviders();
     if(!settings.videoProvider || !providers.some(p => p.id === settings.videoProvider)) settings.videoProvider = providers[0]?.id || 'comfly';
+    normalizeMegabyVideoSettings(settings, {resetInvalidGroup:true});
+    const isMegaby = isMegabyVideoProvider(settings.videoProvider);
     const models = filterJimengVideoModels(providerVideoModels(settings.videoProvider));
     if(!settings.videoModel || !models.includes(settings.videoModel)) settings.videoModel = models[0] || 'veo3-fast';
+    const profile = smartVideoProtocolProfile(settings);
+    const imageRefs = smartVideoImageRefs();
+    syncSmartOfficialAssetState(profile, imageRefs, true);
+    if(profile.isSudashui){
+        settings.videoDuration = Math.max(4, Math.min(15, Number(settings.videoDuration) || 5));
+        const normalizedRatio = window.StudioVideoApi?.normalizeSudashuiAspectRatio?.(settings.videoAspect);
+        settings.videoAspect = normalizedRatio || '16:9';
+    }
     dynamicParams.innerHTML = `
         ${renderVideoProviderControl(providers)}
         ${renderVideoModelControl(models)}
-        ${renderVideoResolutionControl()}
-        ${renderVideoAspectControl()}
-        ${renderVideoDurationControl()}
-        ${renderVideoToggleControl('videoEnhancePrompt', tr('smart.videoEnhancePrompt'))}
-        ${renderVideoToggleControl('videoEnableUpsample', tr('smart.videoUpsample'))}
-        ${renderVideoToggleControl('videoGenerateAudio', tr('smart.videoGenerateAudio'))}
-        ${renderVideoToggleControl('videoCameraFixed', tr('smart.videoCameraFixed'))}
-        ${renderVideoToggleControl('videoWatermark', tr('smart.videoWatermark'))}
-        ${renderVideoToggleControl('videoMultimodal', tr('smart.videoMultimodal'))}
-        ${renderVideoToggleControl('videoUseFrameRoles', tr('smart.videoUseFrameRoles'))}
-        ${settings.videoProvider === 'jimeng' ? '' : renderVideoTrustedAssetControl()}
+        ${renderVideoResolutionControl(profile)}
+        ${renderVideoAspectControl(profile)}
+        ${renderVideoDurationControl(profile)}
+        ${profile.isSudashui ? renderVideoToggleControl('videoUseFrameRoles', tr('smart.videoUseFrameRoles')) : ''}
+        ${(!profile.isSudashui && !isMegaby) ? `
+            ${renderVideoToggleControl('videoEnhancePrompt', tr('smart.videoEnhancePrompt'))}
+            ${renderVideoToggleControl('videoEnableUpsample', tr('smart.videoUpsample'))}
+            ${renderVideoToggleControl('videoGenerateAudio', tr('smart.videoGenerateAudio'))}
+            ${renderVideoToggleControl('videoCameraFixed', tr('smart.videoCameraFixed'))}
+            ${renderVideoToggleControl('videoWatermark', tr('smart.videoWatermark'))}
+            ${renderVideoToggleControl('videoMultimodal', tr('smart.videoMultimodal'))}
+            ${renderVideoToggleControl('videoUseFrameRoles', tr('smart.videoUseFrameRoles'))}
+            ${settings.videoProvider === 'jimeng' ? '' : renderVideoTrustedAssetControl()}
+        ` : ''}
+        ${renderSudashuiOfficialAssetControl(profile, imageRefs)}
+        ${profile.isSudashui ? `<div class="muted-note">${escapeHtml(tr('smart.sudashuiAutoUploadTip'))}</div>` : ''}
     `;
+}
+function renderSudashuiOfficialAssetControl(profile, imageRefs){
+    if(!profile.officialAssetsEnabled) return '';
+    const list = (imageRefs || []).map((ref, index) => `${index + 1}. ${ref.name || trf('smart.imageNumber', {number:index + 1})}`).join(' · ');
+    return `<div class="smart-control official-asset-control">
+        <label class="duration-custom" title="${escapeHtml(tr('smart.sudashuiOfficialAssetTip'))}">
+            <span>${escapeHtml(tr('smart.sudashuiOfficialAssetNumbers'))}</span>
+            <input type="text" data-param="videoOfficialAssetImageNumbers" value="${escapeHtml(settings.videoOfficialAssetImageNumbers || '')}" placeholder="${escapeHtml(tr('smart.sudashuiOfficialAssetPlaceholder'))}">
+        </label>
+        <div class="muted-note">${escapeHtml(tr('smart.sudashuiOfficialAssetTip'))}${list ? ` · ${escapeHtml(list)}` : ''}</div>
+    </div>`;
 }
 function renderVolcengineParams(){
     const provider = volcengineProvider();
@@ -3873,6 +3995,8 @@ function setDynamicSetting(key, value){
     if(key === 'videoMultimodal') settings._videoMultimodalUserSet = true;
     if(key === 'videoMultimodal' && settings.videoMultimodal) settings.videoUseFrameRoles = false;
     normalizeSmartVideoModeSettings(settings, key === 'videoUseFrameRoles');
+    const megabyParamsReset = normalizeMegabyVideoSettings(settings, {resetInvalidGroup:key === 'videoProvider'});
+    if(key === 'videoProvider' && megabyParamsReset) setTimeout(() => toast(tr('smart.megabyParamsReset')), 0);
     if(key === 'comfyMode') applyRecentSmartSettingsForCurrentMode();
     if(key === 'resolution'){
         if(settings.resolution === 'custom') settings.ratio = '';
@@ -3994,6 +4118,7 @@ function bindDynamicParams(){
             if(btn.dataset.toggleParam === 'videoMultimodal') settings._videoMultimodalUserSet = true;
             if(btn.dataset.toggleParam === 'videoMultimodal' && settings.videoMultimodal) settings.videoUseFrameRoles = false;
             normalizeSmartVideoModeSettings(settings, btn.dataset.toggleParam === 'videoUseFrameRoles');
+            normalizeMegabyVideoSettings(settings);
             persistActiveSmartSettings();
             renderDynamicParams();
             scheduleSave();
@@ -11471,6 +11596,7 @@ function renderInputThumbsRow(node){
     if(!inputThumbsRow) return;
     syncJimengModelPillForRefs();
     syncJimengVideoModelPillForRefs();
+    syncSudashuiOfficialAssetForRefs(node);
     const dedup = node ? visibleReferenceImagesFor(node) : [];
     const manualRefKeys = new Set(manualReferenceImagesFor(node).map(img => inputRefKey(img)));
     const addActive = mentionInsertMode === 'manual-ref';
@@ -14768,11 +14894,35 @@ async function runRunningHubGeneration(prompt, refs, runSettings=settings){
     }
     throw new Error(tr('smart.rhTimeout'));
 }
+function validateSmartSudashuiVideoRequest(runSettings, profile, images, videos, audios){
+    if(!profile.isSudashui) return {duration:Math.max(1, Math.min(60, Number(runSettings.videoDuration) || 5)), aspectRatio:runSettings.videoAspect || '16:9', officialAssetIndexes:null};
+    const duration = Number(runSettings.videoDuration);
+    if(!window.StudioVideoApi?.isAllowedSudashuiDuration?.(duration)) throw new Error(tr('smart.sudashuiDurationError'));
+    const aspectRatio = window.StudioVideoApi?.normalizeSudashuiAspectRatio?.(runSettings.videoAspect);
+    if(!aspectRatio) throw new Error(tr('smart.sudashuiAspectError'));
+    if(images.length > 9) throw new Error(trf('smart.sudashuiImageLimit', {count:9}));
+    if(videos.length > 3) throw new Error(trf('smart.sudashuiVideoLimit', {count:3}));
+    if(audios.length > 3) throw new Error(trf('smart.sudashuiAudioLimit', {count:3}));
+    if(images.length + videos.length + audios.length > 12) throw new Error(trf('smart.sudashuiTotalLimit', {count:12}));
+    if(runSettings.videoUseFrameRoles && (images.length !== 2 || videos.length || audios.length)) throw new Error(tr('smart.sudashuiFramesError'));
+    if(profile.officialAssetsEnabled && videos.length) throw new Error(tr('smart.sudashuiOfficialVideoError'));
+    let officialAssetIndexes = [];
+    if(profile.officialAssetsEnabled){
+        try {
+            officialAssetIndexes = window.StudioVideoApi.parseOfficialAssetIndexes(runSettings.videoOfficialAssetImageNumbers || '', images.length);
+        } catch(_) {
+            throw new Error(tr('smart.sudashuiOfficialAssetError'));
+        }
+    }
+    return {duration, aspectRatio, officialAssetIndexes};
+}
 async function runApiVideoGeneration(prompt, refs, runSettings=settings){
     if(!runSettings.videoModel) throw new Error(tr('smart.errNoVideoModel'));
     try {
+        normalizeMegabyVideoSettings(runSettings, {resetInvalidGroup:true});
         const uploadedRefs = applyUploadedUrlsToSmartRefs(refs, runSettings);
-        const trustedMode = Boolean(runSettings.videoTrustedAsset);
+        const profile = smartVideoProtocolProfile(runSettings);
+        const trustedMode = !profile.isSudashui && Boolean(runSettings.videoTrustedAsset);
         const trustedSource = trustedMode ? (['library','cloud','manual'].includes(runSettings.videoTrustedSource) ? runSettings.videoTrustedSource : 'library') : 'none';
         // 仅「素材库链接」来源才走 asset:// 认证地址 + 后端可信素材路由；上传云端/手动网址走普通直链。
         const useAssetUris = trustedSource === 'library';
@@ -14797,15 +14947,17 @@ async function runApiVideoGeneration(prompt, refs, runSettings=settings){
         });
         const manualVideo = manualSmartVideoLink(runSettings)?.url || '';
         const refVideos = manualVideo ? manualSmartMediaLinks(runSettings).map(item => item.url).filter(Boolean) : videoRefsOnly(uploadedRefs).map(ref => effUrl(ref)).filter(Boolean);
-        const refAudios = audioRefsOnly(uploadedRefs).map(ref => effUrl(ref)).filter(Boolean).slice(0, 3);
+        const allRefAudios = audioRefsOnly(uploadedRefs).map(ref => effUrl(ref)).filter(Boolean);
+        const refAudios = profile.isSudashui ? allRefAudios : allRefAudios.slice(0, 3);
         if(mismatchedAsset) toast('部分认证素材属于其它平台，已回退为普通素材。切换到对应平台的视频接口才能用 asset:// 认证地址。');
+        const sudashui = validateSmartSudashuiVideoRequest(runSettings, profile, refImages, refVideos, refAudios);
         const payload = {
             prompt,
             provider_id: runSettings.videoProvider || 'comfly',
             model: runSettings.videoModel || 'veo3-fast',
-            duration: Math.max(1, Math.min(60, Number(runSettings.videoDuration) || 5)),
-            aspect_ratio: runSettings.videoAspect || '16:9',
-            resolution: runSettings.videoResolution || '',
+            duration: sudashui.duration,
+            aspect_ratio: sudashui.aspectRatio,
+            resolution: profile.isSudashui ? (profile.resolution || '') : (runSettings.videoResolution || ''),
             images: refImages,
             videos: refVideos,
             audios: refAudios,
@@ -14817,6 +14969,7 @@ async function runApiVideoGeneration(prompt, refs, runSettings=settings){
             multimodal: Boolean(runSettings.videoMultimodal),
             trusted_asset: useAssetUris
         };
+        if(profile.isSudashui) payload.official_asset_indexes = sudashui.officialAssetIndexes;
         const task = await createSmartCanvasVideoTask(payload);
         const taskId = task?.task_id || task?.id || '';
         if(!taskId) throw new Error(tr('smart.errRunFailed'));
@@ -15125,7 +15278,7 @@ function providerIdForSmartTask(node, task){
 }
 function isSmartTerminalTaskError(message){
     const text = String(message || '').toLowerCase();
-    return /(insufficient[_\s-]*quota|insufficient\s+credits?|credits[_\s-]*remaining|not\s+enough\s+credits?|quota\s+exceeded|payment\s+required|billing|余额不足|额度不足)/i.test(text);
+    return /(insufficient[_\s-]*quota|insufficient\s+credits?|credits[_\s-]*remaining|not\s+enough\s+credits?|quota\s+exceeded|payment\s+required|billing[_\s-]*(?:error|failed|failure|disabled|issue|problem)|billing\s+account\s+(?:disabled|inactive|suspended)|余额不足|额度不足)/i.test(text);
 }
 async function fetchImageTaskQuery(providerId, taskId){
     return fetch('/api/image-task-query', {

@@ -552,7 +552,7 @@ Agnes 的 `wait_for_agnes_video_task()` 同样有这套逻辑。
 ```javascript
 function isSmartTerminalTaskError(message){
     const text = String(message || '').toLowerCase();
-    return /(insufficient[_\s-]*quota|insufficient\s+credits?|credits[_\s-]*remaining|not\s+enough\s+credits?|quota\s+exceeded|payment\s+required|billing|余额不足|额度不足)/i.test(text);
+    return /(insufficient[_\s-]*quota|insufficient\s+credits?|credits[_\s-]*remaining|not\s+enough\s+credits?|quota\s+exceeded|payment\s+required|billing[_\s-]*(?:error|failed|failure|disabled|issue|problem)|billing\s+account\s+(?:disabled|inactive|suspended)|余额不足|额度不足)/i.test(text);
 }
 ```
 
@@ -1221,3 +1221,62 @@ GET /v1/videos/generations/{task_id}
 5. 余额不足/额度不足是终态错误，会直接失败，不再保留 pending。
 6. 后端任务持久化后，重启可恢复已经拿到上游任务 ID 的任务。
 7. 更新原项目后，可以通过补丁脚本重新应用这些改动。
+
+## 19. Sudashui 独立视频协议
+
+新增第三种 `video_request_mode`：`sudashui-video-generations`。它与 `openai-video-generations` 共用 `POST /v1/video/generations` 和 `GET /v1/video/generations/{task_id}`，但请求体必须保持独立，不能复用现有单数 OpenAI 视频格式。
+
+创建请求外层只发送 `model`、`prompt`、数值型 `duration` 和 `metadata.payload`。`metadata.payload` 必须是 JSON 字符串，素材字段使用 `imageUrls`、`videoUrls`、`audioUrls`、`firstFrameUrl`、`lastFrameUrl`、`officialAssetIndexes`；不得把 `resolution`、`type`、`generate_audio` 或旧协议素材字段发送给上游。
+
+普通画布和智能画布继续显示分辨率控件。Sudashui 模式下控件为只读，从模型名称显示可识别的分辨率；本地任务可记录该显示值，但上游实际分辨率完全由模型决定，后端请求体必须忽略 `resolution`。切回其它视频协议后，应恢复用户原有的手动分辨率设置。
+
+素材处理规则：
+
+- 公网 HTTP(S) URL 原样提交，不主动下载或转存。
+- 受控本地素材上传到 `https://files.sudashuiapi.com`，使用当前 provider 的 Bearer Key 和 multipart `file` 字段。
+- 单个任务内相同本地素材只上传一次，但最终数组顺序必须保持不变。
+- 视频创建请求不能自动重发，避免响应丢失时重复扣费。
+- `references` 最多 9 图、3 视频、3 音频，三类总数不超过 12。
+- `frames` 必须恰好包含一个首帧和一个尾帧，不能混入其它图片、视频或音频。
+
+`sdas-gf-` 官方模型使用真人或虚拟人图片时，前端通过一基图片编号收集用户选择，本地请求转换为零基 `official_asset_indexes`，后端再写入 `metadata.payload.officialAssetIndexes`。不得复用 `trusted_asset`；官方模型的视频参考、重复或越界索引必须在提交前拒绝。
+
+结果解析除 `data.result_url` 外，还必须兼容 `data.data.creations[].url`。查询接口可能在 HTTP 成功时返回 `FAILURE`，创建错误的 `message` 也可能是字符串化 JSON，因此必须按业务状态和内层错误终止任务，不能仅判断 HTTP 状态或 `code=success`。
+
+Sudashui 查询结果中的 `NOT_START`、`SUBMITTED`、`IN_PROGRESS` 以及内层 `processing` 都属于待继续轮询状态。任务排队启动时间不固定，因此 `NOT_START` 阶段不计入生成超时；检测到实际启动时间、非零进度或运行中状态后，才开始计算既有生成超时。响应中的 `billing: "per_second"` 是正常计费方式，不能仅因出现单独的 `billing` 字样就判定失败；只有明确的 `billing_error`、`billing account disabled`、余额不足或额度不足等错误语义才属于终态。
+
+查询接口即使返回 HTTP 200，也必须检查 Sudashui 业务字段：`code=fail_to_fetch_task`、外层 `FAILURE`、内层 `state=failed`、非空 `fail_reason` 或 `err_code` 都应立即终止轮询，并从字符串化 `message` 中解析具体错误；`code=success` 且处于排队或生成状态时继续轮询。
+
+## 20. MegabyAI `/v1/videos` 独立协议
+
+新增 `video_request_mode: megabyai-v1-videos`。API 设置页可手动选择；当 Base URL 的 hostname 精确等于 MegabyAI 官方线路 `newapi.megabyai.cc` 或国内优化线路 `cn.megabyai.cc` 时，前后端会自动采用该模式。判断基于完整 hostname 白名单，不匹配伪装成子域的地址；手动模式仍允许其它实现同一协议的兼容服务。
+
+接口与字段映射：
+
+| 操作 | 路径或字段 |
+| --- | --- |
+| 创建任务 | `POST /v1/videos` |
+| 查询任务 | `GET /v1/videos/{task_id}` |
+| 画面比例 | 本地 `aspect_ratio` 转为 `ratio` |
+| 参考图片 | 本地 `images[].url` 转为 `referenceImages` |
+| 参考视频 | 本地 `videos` 转为 `referenceVideos` |
+| 参考音频 | 本地 `audios` 转为 `referenceAudios` |
+
+请求只发送 `model`、`prompt`、`duration`、`ratio`、`resolution` 和存在的三类参考素材，不发送首尾帧字段或其它平台专属开关。时长必须为 4–15 秒整数，比例仅支持 `16:9`、`9:16`、`1:1`，分辨率仅支持 `480p`、`720p`，空分辨率按 `720p` 处理；图片、视频、音频数量上限分别为 9、3、3。
+
+本地素材通过既有云端上传通道转换为公网 HTTP/HTTPS URL；`asset://`、本机地址、内网地址和无法公网化的素材会在创建任务前拒绝。两套画布选择该协议后只展示兼容参数，并在切换平台时把不兼容的旧值重置为 5 秒、16:9、720p。
+
+上游状态 `queued`、`in_progress` 继续轮询，`completed` 成功，`failed` 终止；该模式使用 8 秒轮询间隔。结果兼容顶层 `url`、`video_url` 及 `metadata.content_url` / `metadata.local_url`，错误信息保留 `error.code` 和 `error.message`。
+
+完成地址与 provider Base URL 同源时，后端下载视频会携带该 provider 的 Bearer Token；外部 CDN 地址不携带 Token，防止凭据泄漏。配置示例：
+
+```json
+{
+  "base_url": "https://cn.megabyai.cc",
+  "protocol": "openai",
+  "video_request_mode": "megabyai-v1-videos",
+  "video_models": ["videos-standard", "videos-fast", "videos-mini"]
+}
+```
+
+国内用户建议优先使用 `https://cn.megabyai.cc` 优化线路；原线路 `https://newapi.megabyai.cc` 继续支持，配置结构相同。

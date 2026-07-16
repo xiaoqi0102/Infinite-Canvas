@@ -12,6 +12,7 @@ VIDEO_SELECT_HTML = '''                                <div class="field-frame v
                                     <select id="videoRequestModeInput" title="视频接口">
                                         <option value="openai-videos-generations">视频：videos</option>
                                         <option value="openai-video-generations">视频：video</option>
+                                        <option value="sudashui-video-generations">视频：Sudashui</option>
                                     </select>
                                 </div>
 '''
@@ -20,7 +21,7 @@ VIDEO_HELPERS_PY = r'''def video_submit_url_candidates(provider, base_url):
     if is_agnes_provider(provider):
         return [f"{base_url}/v1/videos"]
     video_request_mode = effective_video_request_mode(provider)
-    if video_request_mode == "openai-video-generations":
+    if video_request_mode in {"openai-video-generations", "sudashui-video-generations"}:
         return [f"{base_url}/v1/video/generations"]
     if is_apimart_provider(provider):
         return [f"{base_url}/videos/generations" if base_url.endswith("/v1") else f"{base_url}/v1/videos/generations"]
@@ -41,7 +42,7 @@ def video_task_url_candidates(provider, base_url, task_id, submit_url=""):
             f"{base_url}/v1/videos/{quoted_id}",
         ]
     video_request_mode = effective_video_request_mode(provider)
-    if video_request_mode == "openai-video-generations":
+    if video_request_mode in {"openai-video-generations", "sudashui-video-generations"}:
         return [f"{base_url}/v1/video/generations/{quoted_id}"]
     if is_apimart_provider(provider):
         task_path = f"{base_url}/tasks/{quoted_id}" if base_url.endswith("/v1") else f"{base_url}/v1/tasks/{quoted_id}"
@@ -73,6 +74,9 @@ def effective_video_request_mode(provider) -> str:
 
 def is_openai_video_generations_mode(provider) -> bool:
     return effective_video_request_mode(provider) == "openai-video-generations"
+
+def is_sudashui_video_generations_mode(provider) -> bool:
+    return effective_video_request_mode(provider) == "sudashui-video-generations"
 
 def openai_video_generations_duration(duration) -> str:
     try:
@@ -207,7 +211,8 @@ def is_video_terminal_error(source):
         r"not\s+enough\s+credits?",
         r"quota\s+exceeded",
         r"payment\s+required",
-        r"billing",
+        r"billing[_\s-]*(?:error|failed|failure|disabled|issue|problem)",
+        r"billing\s+account\s+(?:disabled|inactive|suspended)",
         r"余额不足",
         r"额度不足",
     ))
@@ -910,15 +915,21 @@ def regex_replace(text, pattern, repl, label, required=False, flags=re.S):
 
 
 def patch_main(text):
+    had_video_protocol_support = "SUPPORTED_VIDEO_REQUEST_MODES" in text
     if "SUPPORTED_VIDEO_REQUEST_MODES" not in text:
         text = regex_replace(
             text,
             r"(SUPPORTED_IMAGE_REQUEST_MODES = \{[^\n]+\}\n)",
-            r'\1SUPPORTED_VIDEO_REQUEST_MODES = {"openai-videos-generations", "openai-video-generations"}\n',
+            r'\1SUPPORTED_VIDEO_REQUEST_MODES = {"openai-videos-generations", "openai-video-generations", "sudashui-video-generations"}\n',
             "SUPPORTED_VIDEO_REQUEST_MODES",
             required=True,
             flags=0,
         )
+
+    text = text.replace(
+        'SUPPORTED_VIDEO_REQUEST_MODES = {"openai-videos-generations", "openai-video-generations"}',
+        'SUPPORTED_VIDEO_REQUEST_MODES = {"openai-videos-generations", "openai-video-generations", "sudashui-video-generations"}',
+    )
 
     if "VIDEO_POLL_INTERVAL = 25.0" not in text:
         text = regex_replace(
@@ -930,11 +941,12 @@ def patch_main(text):
             flags=0,
         )
 
-    text = re.sub(
-        r'("image_request_mode": "openai",\n)(?![ \t]+"video_request_mode")([ \t]+)',
-        r'\1\2"video_request_mode": "openai-videos-generations",\n\2',
-        text,
-    )
+    if not had_video_protocol_support:
+        text = re.sub(
+            r'("image_request_mode": "openai",\n)(?![ \t]+"video_request_mode")([ \t]+)',
+            r'\1\2"video_request_mode": "openai-videos-generations",\n\2',
+            text,
+        )
 
     if "def normalize_video_request_mode" not in text:
         text = regex_replace(
@@ -947,6 +959,8 @@ def normalize_video_request_mode(value):
         return "openai-video-generations"
     if mode in {"openai-videos", "videos-generations"}:
         return "openai-videos-generations"
+    if mode in {"sudashui", "sudashui-video"}:
+        return "sudashui-video-generations"
     return mode if mode in SUPPORTED_VIDEO_REQUEST_MODES else "openai-videos-generations"
 ''',
             "normalize_video_request_mode",
@@ -1142,6 +1156,118 @@ def normalize_video_request_mode(value):
         "async def wait_for_video_task(client, provider, task_id, submit_url=\"\"):",
         "async def wait_for_video_task(client, provider, task_id, submit_url=\"\", on_progress=None):",
     )
+    if "def sudashui_video_task_started(raw)" not in text:
+        text = replace_once(
+            text,
+            'async def wait_for_video_task(client, provider, task_id, submit_url="", on_progress=None):\n',
+            '''def sudashui_video_task_pending(raw) -> bool:
+    if not isinstance(raw, dict):
+        return False
+    task_data = raw.get("data") if isinstance(raw.get("data"), dict) else raw
+    status = str(task_data.get("status") or task_data.get("task_status") or "").strip().upper()
+    if status in VIDEO_TASK_SUCCESS_STATUSES or status in VIDEO_TASK_FAILURE_STATUSES:
+        return False
+    if video_output_urls(raw):
+        return False
+    inner = task_data.get("data") if isinstance(task_data.get("data"), dict) else {}
+    inner_state = str(inner.get("state") or inner.get("status") or "").strip().upper()
+    return status in {
+        "NOT_START", "NOT_STARTED", "SUBMITTED", "QUEUED", "QUEUEING", "PENDING",
+        "IN_PROGRESS", "PROCESSING", "RUNNING",
+    } or inner_state in {"QUEUEING", "QUEUED", "PENDING", "IN_PROGRESS", "PROCESSING", "RUNNING"}
+
+def sudashui_video_task_started(raw) -> bool:
+    if not isinstance(raw, dict):
+        return False
+    task_data = raw.get("data") if isinstance(raw.get("data"), dict) else raw
+    status = str(task_data.get("status") or task_data.get("task_status") or "").strip().upper()
+    if status in {"NOT_START", "NOT_STARTED", "SUBMITTED", "QUEUED", "QUEUEING", "PENDING"}:
+        return False
+    try:
+        if float(task_data.get("start_time") or 0) > 0:
+            return True
+    except Exception:
+        pass
+    progress_text = str(task_data.get("progress") or "").strip()
+    progress_match = re.search(r"\\d+(?:\\.\\d+)?", progress_text)
+    if progress_match and float(progress_match.group(0)) > 0:
+        return True
+    inner = task_data.get("data") if isinstance(task_data.get("data"), dict) else {}
+    inner_state = str(inner.get("state") or inner.get("status") or "").strip().upper()
+    return status in {"IN_PROGRESS", "PROCESSING", "RUNNING"} or inner_state in {"IN_PROGRESS", "PROCESSING", "RUNNING"}
+
+async def wait_for_video_task(client, provider, task_id, submit_url="", on_progress=None):
+''',
+            "Sudashui queue start detector",
+            required=True,
+        )
+    if "recover_failed_sudashui" not in text:
+        text = replace_once(
+            text,
+            '''        if status in CANVAS_VIDEO_TERMINAL_STATUSES:
+            continue
+        if status not in CANVAS_VIDEO_RESUMABLE_STATUSES:
+            continue
+        if canvas_video_upstream_task_id(task):
+            update_canvas_video_task(task_id, {"status": "polling", "message": "服务重启后已恢复视频任务查询"})
+''',
+            '''        if status in CANVAS_VIDEO_TERMINAL_STATUSES:
+            recover_failed_sudashui = False
+            if status == "failed" and canvas_video_upstream_task_id(task):
+                try:
+                    provider = get_api_provider_exact(str(task.get("provider_id") or "").strip())
+                    recover_failed_sudashui = (
+                        is_sudashui_video_generations_mode(provider)
+                        and sudashui_video_task_pending(task.get("raw_last"))
+                    )
+                except Exception:
+                    recover_failed_sudashui = False
+            if not recover_failed_sudashui:
+                continue
+        if status not in CANVAS_VIDEO_RESUMABLE_STATUSES:
+            if status != "failed":
+                continue
+        if canvas_video_upstream_task_id(task):
+            update_canvas_video_task(task_id, {
+                "status": "polling",
+                "error": "",
+                "message": "服务重启后已恢复视频任务查询",
+            })
+''',
+            "recover pending Sudashui task after false terminal failure",
+            required=True,
+        )
+        text = replace_once(
+            text,
+            "    task_urls = video_task_url_candidates(provider, base_url, task_id, submit_url)\n    deadline = time.monotonic() + VIDEO_POLL_TIMEOUT\n",
+            "    task_urls = video_task_url_candidates(provider, base_url, task_id, submit_url)\n    wait_for_sudashui_start = is_sudashui_video_generations_mode(provider)\n    deadline = None if wait_for_sudashui_start else time.monotonic() + VIDEO_POLL_TIMEOUT\n",
+            "Sudashui queue deadline",
+            required=True,
+        )
+        text = replace_once(
+            text,
+            "    while time.monotonic() < deadline:\n",
+            "    while deadline is None or time.monotonic() < deadline:\n",
+            "Sudashui queue polling loop",
+            required=True,
+        )
+        for interval_name in ("poll_interval", "VIDEO_POLL_INTERVAL"):
+            old_delay = f"                delay = min(max({interval_name}, retry_after_delay), max(0.0, deadline - time.monotonic()))\n"
+            new_delay = (
+                f"                delay = max({interval_name}, retry_after_delay)\n"
+                "                if deadline is not None:\n"
+                "                    delay = min(delay, max(0.0, deadline - time.monotonic()))\n"
+            )
+            text = text.replace(old_delay, new_delay, 2)
+        text = replace_once(
+            text,
+            '        status = str(task_data.get("status") or task_data.get("task_status") or raw.get("status") or raw.get("task_status") or "").upper()\n',
+            '        status = str(task_data.get("status") or task_data.get("task_status") or raw.get("status") or raw.get("task_status") or "").upper()\n'
+            '        if wait_for_sudashui_start and deadline is None and sudashui_video_task_started(raw):\n'
+            '            deadline = time.monotonic() + VIDEO_POLL_TIMEOUT\n',
+            "Sudashui generation deadline start",
+            required=True,
+        )
     text = text.replace(
         "async def wait_for_agnes_video_task(client, provider, video_id, model):",
         "async def wait_for_agnes_video_task(client, provider, video_id, model, on_progress=None):",
@@ -1220,6 +1346,7 @@ def normalize_video_request_mode(value):
 
 
 def patch_html(text):
+    text = ensure_video_api_utils_script(text, "api-settings.js")
     replacements = {
         'title="Video API"': 'title="视频接口"',
         "Video: /v1/videos/generations": "视频：videos",
@@ -1230,9 +1357,41 @@ def patch_html(text):
     for old, new in replacements.items():
         text = text.replace(old, new)
     if "videoRequestModeInput" in text:
+        if 'value="sudashui-video-generations"' not in text:
+            text = text.replace(
+                '                                        <option value="openai-video-generations">视频：video</option>\n',
+                '                                        <option value="openai-video-generations">视频：video</option>\n                                        <option value="sudashui-video-generations">视频：Sudashui</option>\n',
+                1,
+            )
         return text
     pattern = r'([ \t]*<div class="field-frame image-request-mode-wrap">\n.*?<select id="imageRequestModeInput".*?</select>\n[ \t]*</div>\n)'
     return regex_replace(text, pattern, r"\1" + VIDEO_SELECT_HTML, "videoRequestModeInput HTML", required=True)
+
+
+def ensure_video_api_utils_script(text, target_script):
+    helper_path = "/static/js/video-api-utils.js"
+    target_path = f"/static/js/{target_script}"
+    if helper_path in text:
+        helper_pos = text.find(helper_path)
+        target_pos = text.find(target_path)
+        if target_pos >= 0 and helper_pos > target_pos:
+            raise PatchError(f"video-api-utils.js 必须在 {target_script} 之前加载")
+        return text
+    pattern = rf'([ \t]*<script src="{re.escape(target_path)}\?v=([^"\s]+)"></script>)'
+    match = re.search(pattern, text)
+    if not match:
+        raise PatchError(f"anchor not found: {target_script} script tag")
+    indent = re.match(r"[ \t]*", match.group(1)).group(0)
+    helper_tag = f'{indent}<script src="{helper_path}?v={match.group(2)}"></script>\n'
+    return text[:match.start(1)] + helper_tag + text[match.start(1):]
+
+
+def patch_canvas_html(text):
+    return ensure_video_api_utils_script(text, "canvas.js")
+
+
+def patch_smart_canvas_html(text):
+    return ensure_video_api_utils_script(text, "smart-canvas.js")
 
 
 def patch_css(text):
@@ -1313,12 +1472,30 @@ def patch_js(text):
     const mode = String(value || '').trim().toLowerCase();
     if(['openai-video', 'single-video', 'video-generations'].includes(mode)) return 'openai-video-generations';
     if(['openai-videos', 'videos-generations'].includes(mode)) return 'openai-videos-generations';
-    return ['openai-videos-generations', 'openai-video-generations'].includes(mode) ? mode : 'openai-videos-generations';
+    if(['sudashui', 'sudashui-video'].includes(mode)) return 'sudashui-video-generations';
+    return ['openai-videos-generations', 'openai-video-generations', 'sudashui-video-generations'].includes(mode) ? mode : 'openai-videos-generations';
 }
 ''',
             "normalizeVideoRequestMode",
             required=True,
         )
+    text = text.replace(
+        '        r"billing",\n        r"余额不足",',
+        '        r"billing[_\\s-]*(?:error|failed|failure|disabled|issue|problem)",\n'
+        '        r"billing\\s+account\\s+(?:disabled|inactive|suspended)",\n'
+        '        r"余额不足",',
+        1,
+    )
+
+    text = text.replace(
+        '    if mode in {"openai-videos", "videos-generations"}:\n        return "openai-videos-generations"\n    return mode if mode in SUPPORTED_VIDEO_REQUEST_MODES else "openai-videos-generations"',
+        '    if mode in {"openai-videos", "videos-generations"}:\n        return "openai-videos-generations"\n    if mode in {"sudashui", "sudashui-video"}:\n        return "sudashui-video-generations"\n    return mode if mode in SUPPORTED_VIDEO_REQUEST_MODES else "openai-videos-generations"',
+    )
+
+    text = text.replace(
+        "    return ['openai-videos-generations', 'openai-video-generations'].includes(mode) ? mode : 'openai-videos-generations';",
+        "    if(['sudashui', 'sudashui-video'].includes(mode)) return 'sudashui-video-generations';\n    return ['openai-videos-generations', 'openai-video-generations', 'sudashui-video-generations'].includes(mode) ? mode : 'openai-videos-generations';",
+    )
 
     if "function videoRequestModeLabel" not in text:
         text = regex_replace(
@@ -1326,11 +1503,19 @@ def patch_js(text):
             r"(function imageRequestModeLabel\(mode\)\{\n(?:    .+\n)+?\}\n)",
             r'''\1function videoRequestModeLabel(mode){
     const normalized = normalizeVideoRequestMode(mode);
+    if(normalized === 'sudashui-video-generations') return 'Sudashui /v1/video/generations';
     return normalized === 'openai-video-generations' ? '/v1/video/generations' : '/v1/videos/generations';
 }
 ''',
             "videoRequestModeLabel",
             required=True,
+        )
+
+    if "normalized === 'sudashui-video-generations'" not in text:
+        text = text.replace(
+            "    const normalized = normalizeVideoRequestMode(mode);\n    return normalized === 'openai-video-generations' ? '/v1/video/generations' : '/v1/videos/generations';",
+            "    const normalized = normalizeVideoRequestMode(mode);\n    if(normalized === 'sudashui-video-generations') return 'Sudashui /v1/video/generations';\n    return normalized === 'openai-video-generations' ? '/v1/video/generations' : '/v1/videos/generations';",
+            1,
         )
 
     text = replace_once(
@@ -1444,6 +1629,10 @@ def patch_canvas_js(text):
 
 
 def patch_smart_canvas_js(text):
+    text = text.replace(
+        "payment\\s+required|billing|余额不足|额度不足",
+        "payment\\s+required|billing[_\\s-]*(?:error|failed|failure|disabled|issue|problem)|billing\\s+account\\s+(?:disabled|inactive|suspended)|余额不足|额度不足",
+    )
     if "async function createSmartCanvasVideoTask" not in text:
         text = regex_replace(
             text,
@@ -1510,7 +1699,7 @@ def patch_smart_canvas_js(text):
         text = replace_once(
             text,
             "function providerIdForSmartTask(node, task){\n    return task?.providerId || node?.runSettings?.provider_id || settings.provider_id || 'comfly';\n}\n",
-            "function providerIdForSmartTask(node, task){\n    return task?.providerId || node?.runSettings?.provider_id || settings.provider_id || 'comfly';\n}\nfunction isSmartTerminalTaskError(message){\n    const text = String(message || '').toLowerCase();\n    return /(insufficient[_\\s-]*quota|insufficient\\s+credits?|credits[_\\s-]*remaining|not\\s+enough\\s+credits?|quota\\s+exceeded|payment\\s+required|billing|余额不足|额度不足)/i.test(text);\n}\n",
+            "function providerIdForSmartTask(node, task){\n    return task?.providerId || node?.runSettings?.provider_id || settings.provider_id || 'comfly';\n}\nfunction isSmartTerminalTaskError(message){\n    const text = String(message || '').toLowerCase();\n    return /(insufficient[_\\s-]*quota|insufficient\\s+credits?|credits[_\\s-]*remaining|not\\s+enough\\s+credits?|quota\\s+exceeded|payment\\s+required|billing[_\\s-]*(?:error|failed|failure|disabled|issue|problem)|billing\\s+account\\s+(?:disabled|inactive|suspended)|余额不足|额度不足)/i.test(text);\n}\n",
             "smart terminal task error helper",
             required=True,
         )
@@ -1604,11 +1793,23 @@ def write_if_changed(path, text, root, dry_run, backup_dir, changed):
     path.write_text(text, encoding="utf-8", newline="")
 
 
-def validate(root):
+def validate(root, overrides=None):
+    overrides = overrides or {}
     checks = {
         "main.py": [
             "SUPPORTED_VIDEO_REQUEST_MODES",
+            '"sudashui-video-generations"',
             "def effective_video_request_mode(provider)",
+            "def is_sudashui_video_generations_mode(provider)",
+            "def sudashui_video_task_pending(raw)",
+            "def sudashui_video_task_started(raw)",
+            "recover_failed_sudashui",
+            "wait_for_sudashui_start and sudashui_business_failure(raw)",
+            "def sudashui_video_body(",
+            "async def generate_sudashui_video(",
+            "official_asset_indexes: List[StrictInt]",
+            '"metadata": {"payload": json.dumps(',
+            'SUDASHUI_FILES_BASE_URL = "https://files.sudashuiapi.com"',
             "openai_video_generations_reference_urls",
             "is_single_video_generations = is_openai_video_generations_mode(provider)",
             "def video_retry_after_seconds(source):",
@@ -1619,7 +1820,19 @@ def validate(root):
             "def update_canvas_video_task",
             '@app.post("/api/canvas-video-tasks")',
         ],
-        "static/api-settings.html": ["videoRequestModeInput"],
+        "static/api-settings.html": [
+            "videoRequestModeInput",
+            'value="sudashui-video-generations"',
+            "/static/js/video-api-utils.js",
+        ],
+        "static/canvas.html": [
+            "/static/js/video-api-utils.js",
+            "/static/js/canvas.js",
+        ],
+        "static/smart-canvas.html": [
+            "/static/js/video-api-utils.js",
+            "/static/js/smart-canvas.js",
+        ],
         "static/css/api-settings.css": [
             ".video-request-mode-wrap select",
             ".video-request-mode-wrap select { min-width:118px; }",
@@ -1627,13 +1840,25 @@ def validate(root):
         "static/js/api-settings.js": [
             "const videoRequestModeInput",
             "function normalizeVideoRequestMode",
+            "sudashui-video-generations",
+            "videoRequestModeSudashuiLabel",
             "video_request_mode:item.video_request_mode || 'openai-videos-generations'",
+        ],
+        "static/js/video-api-utils.js": [
+            "global.StudioVideoApi",
+            "SUDASHUI_ASPECT_RATIOS",
+            "function parseOfficialAssetIndexes",
+            "function inferModelResolution",
+            "function effectiveVideoResolution",
         ],
         "static/js/canvas.js": [
             "async function createCanvasVideoTask",
             "async function pollCanvasVideoTask",
             "canvasTaskType:'online-video'",
             "pollCanvasVideoTask(p.canvasTaskId",
+            "validateCanvasSudashuiVideoRequest",
+            "official_asset_indexes",
+            "resolutionReadOnly",
         ],
         "static/js/smart-canvas.js": [
             "async function createSmartCanvasVideoTask",
@@ -1641,14 +1866,30 @@ def validate(root):
             "pollSmartCanvasVideoTask(task.taskId)",
             "kind:taskKind",
             "isSmartTerminalTaskError",
+            "validateSmartSudashuiVideoRequest",
+            "official_asset_indexes",
+            "resolutionReadOnly",
         ],
     }
     missing = []
     for rel, needles in checks.items():
-        text = read(root / rel)
+        path = root / rel
+        if rel not in overrides and not path.exists():
+            missing.append(f"{rel}: file missing")
+            continue
+        text = overrides.get(rel, read(path) if path.exists() else "")
         for needle in needles:
             if needle not in text:
                 missing.append(f"{rel}: {needle}")
+    for rel, target_script in (
+        ("static/api-settings.html", "api-settings.js"),
+        ("static/canvas.html", "canvas.js"),
+        ("static/smart-canvas.html", "smart-canvas.js"),
+    ):
+        path = root / rel
+        text = overrides.get(rel, read(path) if path.exists() else "")
+        if text.find("/static/js/video-api-utils.js") > text.find(f"/static/js/{target_script}"):
+            missing.append(f"{rel}: video-api-utils.js load order")
     if missing:
         raise PatchError("patch incomplete:\n" + "\n".join(missing))
 
@@ -1670,21 +1911,24 @@ def main():
     targets = [
         ("main.py", patch_main),
         ("static/api-settings.html", patch_html),
+        ("static/canvas.html", patch_canvas_html),
+        ("static/smart-canvas.html", patch_smart_canvas_html),
         ("static/css/api-settings.css", patch_css),
         ("static/js/api-settings.js", patch_js),
         ("static/js/canvas.js", patch_canvas_js),
         ("static/js/smart-canvas.js", patch_smart_canvas_js),
     ]
-    if (root / "data/api_providers.json").exists():
-        targets.append(("data/api_providers.json", patch_config))
-
+    planned = {}
     for rel, func in targets:
         path = root / rel
         if not path.exists():
             raise PatchError(f"missing file: {rel}")
-        write_if_changed(path, func(read(path)), root, args.dry_run, backup_dir, changed)
+        patched = func(read(path))
+        planned[rel] = patched
+        write_if_changed(path, patched, root, args.dry_run, backup_dir, changed)
 
     if args.dry_run:
+        validate(root, planned)
         print("DRY-RUN: would change " + (", ".join(changed) if changed else "nothing"))
         return
 

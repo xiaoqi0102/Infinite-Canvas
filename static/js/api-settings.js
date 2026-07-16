@@ -836,7 +836,7 @@ function syncEditor(){
             ? lockedApi.image_request_mode
             : (imageRequestModeInput?.value || item.image_request_mode)
     );
-    item.video_request_mode = normalizeVideoRequestMode(
+    item.video_request_mode = effectiveVideoRequestModeForProvider(item,
         item.id === 'modelscope' || item.id === 'runninghub' || item.id === 'volcengine' || CLI_PROTOCOLS.has(selectedProtocol)
             ? 'openai-videos-generations'
             : lockedApi
@@ -2535,6 +2535,7 @@ function renderEditor(){
     baseInput.value = item.base_url || '';
     const lockedApi = lockedRecommendedApi(item);
     if(lockedApi) applyLockedRecommendedProtocol(item);
+    else if(isMegabyAiBaseUrl(item.base_url)) item.video_request_mode = 'megabyai-v1-videos';
     if(protocolInput){
         protocolInput.value = item.id === 'runninghub' ? 'runninghub' : item.id === 'volcengine' ? 'volcengine' : (item.protocol || 'openai');
         protocolInput.disabled = FIXED_PROTOCOL_PROVIDER_IDS.has(item.id) || Boolean(lockedApi);
@@ -2546,7 +2547,7 @@ function renderEditor(){
         imageRequestModeInput.title = lockedApi ? '推荐平台使用固定图片协议' : '';
     }
     if(videoRequestModeInput){
-        videoRequestModeInput.value = normalizeVideoRequestMode(item.video_request_mode);
+        videoRequestModeInput.value = effectiveVideoRequestModeForProvider(item, item.video_request_mode);
         videoRequestModeInput.disabled = Boolean(lockedApi) || item.id === 'modelscope' || item.id === 'runninghub' || item.id === 'volcengine' || CLI_PROTOCOLS.has(String(protocolInput?.value || item.protocol || '').toLowerCase());
         videoRequestModeInput.title = lockedApi ? '推荐平台使用固定视频协议' : '';
     }
@@ -2928,10 +2929,36 @@ function normalizeImageRequestMode(value){
     return ['openai', 'openai-json', 'openai-video-proxy', 'openai-responses'].includes(mode) ? mode : 'openai';
 }
 function normalizeVideoRequestMode(value){
+    if(window.StudioVideoApi) return window.StudioVideoApi.normalizeVideoRequestMode(value);
     const mode = String(value || '').trim().toLowerCase();
     if(['openai-video', 'single-video', 'video-generations'].includes(mode)) return 'openai-video-generations';
     if(['openai-videos', 'videos-generations'].includes(mode)) return 'openai-videos-generations';
-    return ['openai-videos-generations', 'openai-video-generations'].includes(mode) ? mode : 'openai-videos-generations';
+    if(['sudashui', 'sudashui-video'].includes(mode)) return 'sudashui-video-generations';
+    if(['megabyai', 'megabyai-videos'].includes(mode)) return 'megabyai-v1-videos';
+    return ['openai-videos-generations', 'openai-video-generations', 'sudashui-video-generations', 'megabyai-v1-videos'].includes(mode) ? mode : 'openai-videos-generations';
+}
+function isMegabyAiBaseUrl(value){
+    if(window.StudioVideoApi) return window.StudioVideoApi.isMegabyAiBaseUrl(value);
+    const officialHostnames = new Set(['newapi.megabyai.cc', 'cn.megabyai.cc']);
+    const text = String(value || '').trim();
+    try {
+        const hostname = new URL(text).hostname.toLowerCase();
+        if(hostname) return officialHostnames.has(hostname);
+    }
+    catch (_) {}
+    try { return officialHostnames.has(new URL(`https://${text.replace(/^\/+/, '')}`).hostname.toLowerCase()); }
+    catch (_) { return false; }
+}
+function effectiveVideoRequestModeForProvider(item, requestedMode){
+    if(isMegabyAiBaseUrl(item?.base_url || baseInput?.value || '')) return 'megabyai-v1-videos';
+    return normalizeVideoRequestMode(requestedMode);
+}
+function applyMegabyAiVideoMode(baseUrl){
+    const item = provider();
+    if(!item || !isMegabyAiBaseUrl(baseUrl) || lockedRecommendedApi(item)) return false;
+    item.video_request_mode = 'megabyai-v1-videos';
+    if(videoRequestModeInput) videoRequestModeInput.value = item.video_request_mode;
+    return true;
 }
 function normalizeImageEditRoute(value){
     const route = String(value || '').trim().toLowerCase();
@@ -2946,6 +2973,8 @@ function imageRequestModeLabel(mode){
 }
 function videoRequestModeLabel(mode){
     const normalized = normalizeVideoRequestMode(mode);
+    if(normalized === 'sudashui-video-generations') return tr('api.videoRequestModeSudashuiLabel') || 'Sudashui /v1/video/generations';
+    if(normalized === 'megabyai-v1-videos') return tr('api.videoRequestModeMegabyAiLabel') || 'MegabyAI /v1/videos';
     return normalized === 'openai-video-generations' ? '/v1/video/generations' : '/v1/videos/generations';
 }
 function isRunningHubContext(item, baseUrl=''){
@@ -3029,6 +3058,7 @@ async function probeAsync(){
     if(!item) return;
     const btn = document.getElementById('probeAsyncBtn');
     const baseUrl = baseInput.value.trim();
+    applyMegabyAiVideoMode(baseUrl);
     const isCliProtocol = CLI_PROTOCOLS.has(String(protocolInput?.value || item.protocol || '').toLowerCase());
     if(!baseUrl && !isCliProtocol){ alert('请先填写请求地址'); return; }
     if(btn){ btn.disabled = true; btn.querySelector('span').textContent = '检测中...'; }
@@ -3116,6 +3146,7 @@ async function testConnection(){
     if(!item) return;
     const btn = document.getElementById('testUrlBtn');
     const baseUrl = baseInput.value.trim();
+    applyMegabyAiVideoMode(baseUrl);
     const isJimeng = (protocolInput?.value || '') === 'jimeng';
     const currentProtocol = String(protocolInput?.value || item.protocol || '').toLowerCase();
     const isCliProtocol = CLI_PROTOCOLS.has(currentProtocol);
@@ -3183,10 +3214,15 @@ let lastFetchedModelNames = {};   // {模型 id: 展示名}
 
 function setFetchedModelState(data){
     lastFetchedAll = Array.isArray(data?.all) ? data.all : [];
+    const suggestedVideoModels = new Set(data?.video_models || []);
+    lastFetchedAll.forEach(model => {
+        const id = String(model || '').trim().toLowerCase();
+        if(id.includes('seedance') || id.startsWith('sd-api-') || id.startsWith('sdas-gf-')) suggestedVideoModels.add(model);
+    });
     lastFetchedSuggestion = {
         image: new Set(data?.image_models || []),
         chat: new Set(data?.chat_models || []),
-        video: new Set(data?.video_models || []),
+        video: suggestedVideoModels,
     };
     lastFetchedModelNames = (data?.model_names && typeof data.model_names === 'object') ? {...data.model_names} : {};
 }
@@ -3796,7 +3832,7 @@ async function saveProviders(){
                 ? 'openai'
                 : item.image_request_mode
         );
-        item.video_request_mode = normalizeVideoRequestMode(
+        item.video_request_mode = effectiveVideoRequestModeForProvider(item,
             item.id === 'modelscope' || item.id === 'runninghub' || item.id === 'volcengine' || isCliProtocol
                 ? 'openai-videos-generations'
                 : item.video_request_mode
@@ -3950,7 +3986,10 @@ window.onload = () => {
     // 平台名输入时实时预览生成的 ID
     if(nameInput) nameInput.addEventListener('input', updateIdPreview);
     if(protocolInput) protocolInput.addEventListener('change', updateProtocolFromInput);
-    if(baseInput) baseInput.addEventListener('input', () => updateApimartDomesticHint());
+    if(baseInput) baseInput.addEventListener('input', () => {
+        updateApimartDomesticHint();
+        applyMegabyAiVideoMode(baseInput.value);
+    });
     if(imageRequestModeInput) imageRequestModeInput.addEventListener('change', () => {
         const item = provider();
         if(!item) return;

@@ -61,8 +61,12 @@ git status
 
 必须保留的后端能力：
 
-- `video_request_mode` 支持 `openai-videos-generations` 和 `openai-video-generations`。
+- `video_request_mode` 支持 `openai-videos-generations`、`openai-video-generations`、`sudashui-video-generations` 和 `megabyai-v1-videos`。
 - `/v1/videos/generations` 与 `/v1/video/generations` 都可按配置选择。
+- Sudashui 虽然也使用 `/v1/video/generations`，但必须保留独立的字符串化 `metadata.payload` 请求体，不能退回 OpenAI 单数视频格式。
+- Sudashui 分辨率只从模型名展示并记录在本地任务中，不能把 `resolution` 发送给上游。
+- Sudashui 本地素材上传必须使用 `files.sudashuiapi.com`，不能静默回退 Litterbox/temp.sh；创建请求不能自动重发。
+- MegabyAI 必须保留 `POST /v1/videos`、`GET /v1/videos/{task_id}`、camelCase 参考素材字段、8 秒轮询及同源 Bearer 下载，不能退回任一 `generations` 路径。
 - 本地任务 ID 使用 `canvas_video_xxx`，不要和上游任务 ID 混用。
 - 后端任务需要持久化，重启后能恢复已经拿到上游任务 ID 的任务。
 - 没有上游任务 ID 的任务不要自动重提，避免重复扣费。
@@ -91,6 +95,9 @@ git status
 - `resumeSmartPendingNode`
 - `querySmartImageTaskNow`
 - `isSmartTerminalTaskError`
+- `StudioVideoApi`
+- `sudashui-video-generations`
+- `official_asset_indexes`
 
 合并时特别注意：
 
@@ -693,9 +700,13 @@ for file_path in files:
 
 ### 6.1 视频任务化
 
-- API 设置页能看到 “视频：videos” 和 “视频：video”。
+- API 设置页能看到 “视频：videos”、“视频：video”、“视频：Sudashui” 和 “MegabyAI：/v1/videos”。
 - 选择 `视频：video` 后，提交接口应为 `/v1/video/generations`。
 - 选择 `视频：videos` 后，提交接口应为 `/v1/videos/generations`。
+- 选择 `视频：Sudashui` 后，提交接口仍为 `/v1/video/generations`，但外层只能包含 `model`、`prompt`、`duration`、`metadata`，且 `metadata.payload` 必须是字符串。
+- 选择 `MegabyAI：/v1/videos` 后，提交接口为 `/v1/videos`，查询接口为 `/v1/videos/{task_id}`，请求体使用 `ratio` 和 `referenceImages/referenceVideos/referenceAudios`。
+- Sudashui 分辨率控件应只读显示模型推导结果，切换回旧协议后恢复原手动值；抓取上游请求时不得出现 `resolution`。
+- Sudashui 本地素材应自动上传到文件站，相同素材单任务只上传一次；公网 URL 不转存，上传失败时不得继续创建任务。
 - 普通画布视频节点运行后，输出节点出现 pending。
 - 刷新普通画布后，pending 仍可继续查询。
 - 智能画布视频运行后，节点 `pendingTasks` 中 `kind` 为 `video`。

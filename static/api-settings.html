@@ -16,12 +16,12 @@
             } catch(e) {}
         })();
     </script>
-    <script src="/static/vendor/js/tailwindcss-cdn.js?v=2026.07.15.1783050005"></script>
-    <script src="/static/vendor/js/lucide.js?v=2026.07.15.1783050005"></script>
-    <script src="/static/js/theme.js?v=2026.07.15.1783301528"></script>
-    <script src="/static/js/i18n.js?v=2026.07.15.1783470936"></script>
-    <link rel="stylesheet" href="/static/css/theme.css?v=2026.07.15.1783050005">
-    <link rel="stylesheet" href="/static/css/api-settings.css?v=2026.07.15.1783993553">
+    <script src="/static/vendor/js/tailwindcss-cdn.js?v=2026.07.15.1783222828"></script>
+    <script src="/static/vendor/js/lucide.js?v=2026.07.15.1783222821"></script>
+    <script src="/static/js/theme.js?v=2026.07.15.1783222763"></script>
+    <script src="/static/js/i18n.js?v=2026.07.15.1784207842"></script>
+    <link rel="stylesheet" href="/static/css/theme.css?v=2026.07.15.1783222708">
+    <link rel="stylesheet" href="/static/css/api-settings.css?v=2026.07.15.1784200258">
 </head>
 <body>
     <div class="page">
@@ -283,9 +283,11 @@
                                     </select>
                                 </div>
                                 <div class="field-frame video-request-mode-wrap">
-                                    <select id="videoRequestModeInput" title="视频接口">
-                                        <option value="openai-videos-generations">视频：videos</option>
-                                        <option value="openai-video-generations">视频：video</option>
+                                    <select id="videoRequestModeInput" title="视频接口" data-i18n-title="api.videoRequestModeTitle">
+                                        <option value="openai-videos-generations" data-i18n="api.videoRequestModeVideos">视频：videos</option>
+                                        <option value="openai-video-generations" data-i18n="api.videoRequestModeVideo">视频：video</option>
+                                        <option value="sudashui-video-generations" data-i18n="api.videoRequestModeSudashui">视频：Sudashui</option>
+                                        <option value="megabyai-v1-videos" data-i18n="api.videoRequestModeMegabyAi">MegabyAI：/v1/videos</option>
                                     </select>
                                 </div>
                             </div>
@@ -571,6 +573,7 @@
         </div>
     </div>
 
-    <script src="/static/js/api-settings.js?v=2026.07.15.1784169432"></script>
+    <script src="/static/js/video-api-utils.js?v=2026.07.15.1784208719"></script>
+    <script src="/static/js/api-settings.js?v=2026.07.15.1784208719"></script>
 </body>
 </html>

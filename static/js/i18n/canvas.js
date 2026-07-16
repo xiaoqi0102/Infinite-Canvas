@@ -325,6 +325,24 @@
         "canvas.videoRoleReference": { zh: "参考", en: "Ref" },
         "canvas.videoRoleFirstFrame": { zh: "首帧", en: "First" },
         "canvas.videoRoleLastFrame": { zh: "尾帧", en: "Last" },
-        "canvas.videoFailed": { zh: "视频生成失败", en: "Video generation failed" }
+        "canvas.videoFailed": { zh: "视频生成失败", en: "Video generation failed" },
+        "canvas.megabyParamsReset": { zh: "MegabyAI 仅支持 4–15 秒、16:9 / 9:16 / 1:1 和 Auto / 480p / 720p，已重置为 5 秒、16:9、720p。", en: "MegabyAI supports only 4–15 seconds, 16:9 / 9:16 / 1:1, and Auto / 480p / 720p. Parameters were reset to 5 seconds, 16:9, and 720p." },
+        "canvas.videoResolutionModelValue": { zh: "模型自动：{resolution}", en: "Model-defined: {resolution}" },
+        "canvas.videoResolutionModelAuto": { zh: "模型自动", en: "Model-defined" },
+        "canvas.videoResolutionModelTip": { zh: "分辨率由模型决定，请求不会额外发送 resolution", en: "Resolution is defined by the model; resolution is not sent separately" },
+        "canvas.sudashuiOfficialAssetNumbers": { zh: "真人素材图片编号", en: "Human asset image numbers" },
+        "canvas.sudashuiOfficialAssetPlaceholder": { zh: "例如 1,3", en: "For example 1,3" },
+        "canvas.sudashuiOfficialAssetTip": { zh: "按图1、图2顺序填写；空值表示没有真人或虚拟人", en: "Use image order (Image 1, Image 2); leave empty when no human or virtual-person asset is used" },
+        "canvas.sudashuiOfficialAssetError": { zh: "真人素材图片编号不合法", en: "Invalid human asset image numbers" },
+        "canvas.sudashuiOfficialCleared": { zh: "参考图顺序或视频协议已变化，请重新填写真人素材编号", en: "Reference image order or video protocol changed; re-enter human asset numbers" },
+        "canvas.sudashuiAutoUploadTip": { zh: "本地素材提交时自动上传 Sudashui；公网 URL 直接传递", en: "Local media is uploaded to Sudashui on submit; public URLs are passed through" },
+        "canvas.sudashuiDurationError": { zh: "Sudashui 视频时长必须为 4 到 15 秒", en: "Sudashui video duration must be between 4 and 15 seconds" },
+        "canvas.sudashuiAspectError": { zh: "Sudashui 不支持当前画面比例", en: "The selected aspect ratio is not supported by Sudashui" },
+        "canvas.sudashuiImageLimit": { zh: "Sudashui 最多支持 {count} 张参考图", en: "Sudashui supports up to {count} reference images" },
+        "canvas.sudashuiVideoLimit": { zh: "Sudashui 最多支持 {count} 个参考视频", en: "Sudashui supports up to {count} reference videos" },
+        "canvas.sudashuiAudioLimit": { zh: "Sudashui 最多支持 {count} 个参考音频", en: "Sudashui supports up to {count} reference audio files" },
+        "canvas.sudashuiTotalLimit": { zh: "Sudashui 参考素材总数不能超过 {count}", en: "Sudashui allows at most {count} reference assets in total" },
+        "canvas.sudashuiFramesError": { zh: "Sudashui 首尾帧模式必须恰好包含两张图片，且不能包含视频或音频", en: "Sudashui frame mode requires exactly two images and no video or audio references" },
+        "canvas.sudashuiOfficialVideoError": { zh: "Sudashui 官方模型不支持参考视频", en: "Sudashui official models do not support video references" }
     });
 })();

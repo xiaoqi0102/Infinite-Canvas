@@ -630,7 +630,7 @@ SMART_POLL_CANVAS_VIDEO_TASK_JS = r'''async function pollSmartCanvasVideoTask(ta
     if(!taskId) throw new Error(tr('smart.errRunFailed'));
     if(activeSmartTaskPolls.has(taskId)) return activeSmartTaskPolls.get(taskId);
     const promise = (async () => {
-        for(let i = 0; i < 900; i++){
+        for(let i = 0; i < 1440; i++){
             await sleep(5000);
             const task = await fetch(`/api/canvas-video-tasks/${encodeURIComponent(taskId)}`).then(async r => {
                 if(!r.ok) throw new Error(await smartResponseErrorMessage(r, tr('smart.errRunFailed')));
@@ -916,6 +916,19 @@ def regex_replace(text, pattern, repl, label, required=False, flags=re.S):
 
 def patch_main(text):
     had_video_protocol_support = "SUPPORTED_VIDEO_REQUEST_MODES" in text
+    text = text.replace(
+        'VIDEO_POLL_TIMEOUT = float(os.getenv("VIDEO_POLL_TIMEOUT", "1800"))',
+        'VIDEO_POLL_TIMEOUT = float(os.getenv("VIDEO_POLL_TIMEOUT", "7200"))',
+    )
+    text = text.replace(
+        'async def wait_for_runninghub_openapi_task(client, provider, task_id, output_kind="", on_progress=None):\n'
+        '    query_url = runninghub_openapi_url(provider, "query")\n'
+        '    deadline = time.monotonic() + 1800\n',
+        'async def wait_for_runninghub_openapi_task(client, provider, task_id, output_kind="", on_progress=None):\n'
+        '    query_url = runninghub_openapi_url(provider, "query")\n'
+        '    timeout = VIDEO_POLL_TIMEOUT if output_kind == "video" else 1800\n'
+        '    deadline = time.monotonic() + timeout\n',
+    )
     if "SUPPORTED_VIDEO_REQUEST_MODES" not in text:
         text = regex_replace(
             text,
@@ -934,7 +947,7 @@ def patch_main(text):
     if "VIDEO_POLL_INTERVAL = 25.0" not in text:
         text = regex_replace(
             text,
-            r'(VIDEO_POLL_TIMEOUT = float\(os\.getenv\("VIDEO_POLL_TIMEOUT", "1800"\)\)\n)',
+            r'(VIDEO_POLL_TIMEOUT = float\(os\.getenv\("VIDEO_POLL_TIMEOUT", "7200"\)\)\n)',
             r'\1VIDEO_POLL_INTERVAL = 25.0\n',
             "VIDEO_POLL_INTERVAL",
             required=True,
@@ -1805,6 +1818,7 @@ def validate(root, overrides=None):
             "def sudashui_video_task_started(raw)",
             "recover_failed_sudashui",
             "wait_for_sudashui_start and sudashui_business_failure(raw)",
+            "Sudashui 视频任务查询暂时失败，将自动重试",
             "def sudashui_video_body(",
             "async def generate_sudashui_video(",
             "official_asset_indexes: List[StrictInt]",

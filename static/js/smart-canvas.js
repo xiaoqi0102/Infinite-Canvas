@@ -15423,7 +15423,7 @@ async function pollSmartCanvasVideoTask(taskId){
     if(!taskId) throw new Error(tr('smart.errRunFailed'));
     if(activeSmartTaskPolls.has(taskId)) return activeSmartTaskPolls.get(taskId);
     const promise = (async () => {
-        for(let i = 0; i < 900; i++){
+        for(let i = 0; i < 1440; i++){
             await sleep(5000);
             const task = await fetch(`/api/canvas-video-tasks/${encodeURIComponent(taskId)}`).then(async r => {
                 if(!r.ok) throw new Error(await smartResponseErrorMessage(r, tr('smart.errRunFailed')));

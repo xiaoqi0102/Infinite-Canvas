@@ -423,11 +423,13 @@ let promptTemplateGroups = [];
 let promptTemplateGroupEditMode = false;
 let canvasPromptTemplateOverrides = {hiddenBuiltinIds:[], editedBuiltins:{}};
 let canvasAssetLibrary = {categories:[]};
+let canvasAssetLibraryLoaded = false;
 let canvasAssetLibraryOpen = false;
 let activeCanvasAssetLibraryId = '';
 let activeCanvasAssetCategoryId = '';
 const LOCAL_CANVAS_ASSET_LIBRARY_ID = '__local_assets__';
 let localCanvasAssetLibrary = {items:[], tree:null};
+let activePromptMentionController = null;
 let assetManagerTab = 'assets';
 let managerSelectedAssetIds = new Set();
 let managerSelectedWorkflowIds = new Set();
@@ -853,6 +855,7 @@ function showErrorModal(message, title=tr('canvas.generationFailed')){
     }
     errorTitle.textContent = title || tr('canvas.generationFailed');
     errorMessage.textContent = message || title;
+    errorModal.classList.remove('info');
     errorModal.classList.add('open');
     refreshIcons();
 }
@@ -893,7 +896,19 @@ async function responseErrorMessage(response, fallback='请求失败'){
     }
 }
 function closeErrorModal(){
-    if(errorModal) errorModal.classList.remove('open');
+    if(errorModal) errorModal.classList.remove('open', 'info');
+}
+function showPromptDetailModal(prompt){
+    const text = String(prompt || '').trim();
+    if(!text) return;
+    if(!errorModal || !errorTitle || !errorMessage){
+        alert(text);
+        return;
+    }
+    errorTitle.textContent = tr('canvas.promptDetailTitle');
+    errorMessage.textContent = text;
+    errorModal.classList.add('info', 'open');
+    refreshIcons();
 }
 async function copyErrorMessage(){
     const text = errorMessage?.textContent || '';
@@ -1207,6 +1222,7 @@ function screenToWorld(clientX, clientY){
     return { x:(clientX - rect.left - viewport.x) / viewport.scale, y:(clientY - rect.top - viewport.y) / viewport.scale };
 }
 function applyViewport(){
+    hidePromptMentionPreview();
     world.style.transform = `translate(${viewport.x}px, ${viewport.y}px) scale(${viewport.scale})`;
     scheduleMinimapRender();
 }
@@ -2160,6 +2176,13 @@ function canvasLocalAssetUrls(){
         if(node.url) add(node.url);
         (node.images || []).forEach(add);
         (node.generatedOutputs || []).forEach(add);
+        if(node.type === 'prompt'){
+            promptRichTextPartsForNode(node).forEach(part => {
+                if(part.type !== 'mention') return;
+                add(part.ref?.url);
+                (part.ref?.assetUris || []).forEach(add);
+            });
+        }
         Object.entries(node.imageComparisons || {}).forEach(([key, value]) => {
             add(key);
             add(value);
@@ -3056,11 +3079,21 @@ async function runMsGenNode(nodeId, opts={}){
     const node = nodes.find(n => n.id === nodeId);
     if(!node || (node.running && !opts.cascade)) return;
     const cascadeTargetId = cascadeTargetIdFromOptions(opts);
-    const sources = orderedSources(node, generatorSources(node));
-    const prompt = sources.map(s => s.prompt).filter(Boolean).join('\n\n');
-    const refs = imageRefsOnly(sources.flatMap(s => s.refs || []));
     const modelKey = node.msgenModel || 'zimage';
     const msModel = MS_GEN_MODELS[modelKey] || MS_GEN_MODELS.zimage;
+    let inputs;
+    try {
+        inputs = resolveGeneratorRequestInputs(node);
+        validateMentionRequestInputs(inputs, {allowedKinds:(msModel.supportsImage || msModel.acceptsImage) ? ['image'] : [], limits:{image:CANVAS_REFERENCE_IMAGE_MAX}});
+        inputs = restrictResolvedGeneratorInputs(inputs, (msModel.supportsImage || msModel.acceptsImage) ? ['image'] : []);
+    } catch(err) {
+        if(opts.cascade) throw err;
+        showErrorModal(err.message || tr('canvas.msFailed'), tr('canvas.msFailed'));
+        return;
+    }
+    const prompt = inputs.modelPrompt;
+    const displayPrompt = inputs.displayPrompt;
+    const refs = inputs.imageRefs;
     const msModelId = currentMsModelId(modelKey, node);
     const msLoras = modelscopeLorasForModel(msModelId);
     if(!prompt){ alert(tr('canvas.needPrompt')); return; }
@@ -3069,7 +3102,7 @@ async function runMsGenNode(nodeId, opts={}){
     // 链路中间节点默认不创建 Output；链尾、手动开启或已有 Output 连接时才输出。
     let out = outputForNode(node, 460);
     const pendingIds = Array.from({length:count}, () => uid('p'));
-    const run = runSnapshot(node, prompt, refs);
+    const run = runSnapshot(node, displayPrompt, refs, prompt, inputs.promptParts);
     const size = apiImageSize(node.msRatio ?? 'square', node.msResolution || '1k', node.msCustomRatio || '', node.msCustomSize || '');
     const parsed = parseSizeValue(size);
     let width = Number(parsed?.width) || 1024;
@@ -3673,6 +3706,14 @@ function tempShUploadedUrlForNode(node, url){
     const match = (node?.tempShLinks || []).find(item => item?.source === url && item?.url);
     return match?.url || url;
 }
+function cloudUploadLinkForCanvasRef(node, ref){
+    const urls = new Set([ref?.url, ref?.originalLocalUrl].map(value => String(value || '').trim()).filter(Boolean));
+    return (node?.tempShLinks || []).find(item =>
+        item?.manual !== true
+        && item?.url
+        && (urls.has(String(item.url)) || urls.has(String(item.source || '')))
+    ) || null;
+}
 function applyUploadedUrlToRefs(refs, node){
     return (refs || []).map(ref => {
         if(!ref?.url) return ref;
@@ -3684,8 +3725,7 @@ function manualVideoUrlForNode(node){
     return (node?.manualVideoUrls || []).find(Boolean) || '';
 }
 function currentCanvasMediaLinks(node){
-    const refs = orderedSources(node, generatorSources(node)).flatMap(src => src.refs || [])
-        .filter(ref => ref?.url && ['image','video'].includes(mediaKindForRef(ref)));
+    const refs = resolveGeneratorRequestInputs(node).refs.filter(ref => ref?.url && ['image','video'].includes(mediaKindForRef(ref)));
     return refs.map(ref => {
         const uploaded = tempShUploadedUrlForNode(node, ref.url);
         return uploaded && uploaded !== ref.url ? uploaded : '';
@@ -3744,7 +3784,7 @@ async function uploadCanvasMediaRefToCloud(node, ref){
     if(!uploadedUrl) throw new Error('云端没有返回链接');
     node.tempShLinks = [
         ...(node.tempShLinks || []).filter(item => item?.source !== ref.url),
-        {source:ref.url, url:uploadedUrl, expires:data.expires || '3 days', kind}
+        {source:ref.url, url:uploadedUrl, expires:data.expires || '3 days', service:data.service || '', kind}
     ];
     applyTempShUrlToCanvasRef(ref, uploadedUrl);
     return uploadedUrl;
@@ -3752,8 +3792,7 @@ async function uploadCanvasMediaRefToCloud(node, ref){
 async function uploadCanvasVideosToCloud(nodeId){
     const node = nodes.find(n => n.id === nodeId);
     if(!node) return [];
-    const refs = orderedSources(node, generatorSources(node)).flatMap(src => src.refs || [])
-        .filter(ref => ref?.url && ['image','video'].includes(mediaKindForRef(ref)));
+    const refs = resolveGeneratorRequestInputs(node).refs.filter(ref => ref?.url && ['image','video'].includes(mediaKindForRef(ref)));
     const localRefs = refs.filter(ref => ref?.url && !isRemoteVideoReferenceUrl(ref.url));
     if(!localRefs.length){
         showErrorModal('没有需要上传的本地图片或视频', '上传云端');
@@ -3786,8 +3825,7 @@ function applyManualVideoUrlToCanvasRef(node, ref, manualUrl){
 async function setCanvasManualVideoUrl(nodeId){
     const node = nodes.find(n => n.id === nodeId);
     if(!node) return '';
-    const refs = orderedSources(node, generatorSources(node)).flatMap(src => src.refs || [])
-        .filter(ref => ref?.url && ['image','video'].includes(mediaKindForRef(ref)));
+    const refs = resolveGeneratorRequestInputs(node).refs.filter(ref => ref?.url && ['image','video'].includes(mediaKindForRef(ref)));
     const firstLocal = refs.find(ref => ref?.url && !isRemoteVideoReferenceUrl(ref.url));
     const firstAny = firstLocal || refs[0] || null;
     const current = manualVideoUrlForNode(node) || currentCanvasMediaLinks(node)[0] || (firstAny ? tempShUploadedUrlForNode(node, firstAny.url) : '');
@@ -5900,6 +5938,8 @@ function measureCanvasOriginalImageNodes(root=nodesEl){
 }
 
 function render(){
+    closeActivePromptMentionPicker();
+    hidePromptMentionPreview();
     const outputScrolls = captureOutputScrolls();
     const mediaStates = captureMediaPlaybackStates();
     const reusableMediaNodes = new Map();
@@ -6222,21 +6262,15 @@ function renderNode(node){
     }
     if(node.type === 'prompt') {
         const templateActive = promptTemplateModal?.classList.contains('open') && promptTemplateNodeId === node.id;
-        body.innerHTML = `<div class="prompt-editor"><div class="prompt-toolbar"><button class="prompt-template-btn ${templateActive ? 'active' : ''}" type="button" data-prompt-template-open data-prompt-template-node-id="${escapeAttr(node.id)}" aria-pressed="${templateActive ? 'true' : 'false'}" title="${escapeAttr(tr('canvas.promptTemplateLibrary'))}"><i data-lucide="library"></i><span>${escapeHtml(tr('canvas.promptTemplateShort'))}</span></button>${promptCounterHtml(node.text || '')}</div><textarea placeholder="${tr('canvas.promptPlaceholder')}">${escapeHtml(node.text || '')}</textarea></div>`;
-        const textarea = body.querySelector('textarea');
+        body.innerHTML = `<div class="prompt-editor"><div class="prompt-toolbar"><button class="prompt-template-btn ${templateActive ? 'active' : ''}" type="button" data-prompt-template-open data-prompt-template-node-id="${escapeAttr(node.id)}" aria-pressed="${templateActive ? 'true' : 'false'}" title="${escapeAttr(tr('canvas.promptTemplateLibrary'))}"><i data-lucide="library"></i><span>${escapeHtml(tr('canvas.promptTemplateShort'))}</span></button>${promptCounterHtml(node.text || '')}</div><div class="prompt-rich-wrap"><div class="prompt-rich-input" contenteditable="true" role="textbox" aria-multiline="true" aria-label="${escapeAttr(tr('canvas.promptAriaLabel'))}" data-placeholder="${escapeAttr(tr('canvas.promptPlaceholder'))}">${promptRichTextHtml(node)}</div></div></div>`;
+        const editor = body.querySelector('.prompt-rich-input');
         const templateBtn = body.querySelector('[data-prompt-template-open]');
         templateBtn.onclick = e => {
             e.preventDefault();
             e.stopPropagation();
             openPromptTemplateModal(node.id);
         };
-        bindScrollableText(textarea);
-        textarea.oninput = e => {
-            node.text = e.target.value;
-            refreshPromptCounter(body, node.text);
-            scheduleSave();
-            scheduleGeneratorInputSync();
-        };
+        bindPromptRichEditor(editor, body, node);
     }
     if(node.type === 'loop') body.appendChild(renderLoopBody(node));
     if(node.type === 'group') {
@@ -6677,6 +6711,549 @@ function insertLoopToken(editor, token){
         editor.appendChild(spacer);
     }
 }
+function normalizedPromptMentionRef(raw={}){
+    const kind = ['image','video','audio'].includes(String(raw.kind || '').toLowerCase()) ? String(raw.kind).toLowerCase() : mediaKindForRef(raw);
+    const url = String(raw.url || '').trim();
+    const name = String(raw.name || raw.label || kind || 'asset').trim() || 'asset';
+    const assetUris = Array.isArray(raw.assetUris) ? raw.assetUris.filter(Boolean).map(String)
+        : Array.isArray(raw.asset_uris) ? raw.asset_uris.filter(Boolean).map(String) : [];
+    return {
+        key:String(raw.key || '').trim() || `url:${url}`,
+        url,
+        name,
+        kind,
+        source:String(raw.source || 'snapshot'),
+        ...(raw.role ? {role:String(raw.role)} : {}),
+        ...(raw.nodeId ? {nodeId:String(raw.nodeId)} : {}),
+        ...(raw.outputIndex !== undefined && raw.outputIndex !== null && raw.outputIndex !== '' ? {outputIndex:Number(raw.outputIndex)} : {}),
+        ...(raw.assetId ? {assetId:String(raw.assetId)} : {}),
+        ...(assetUris.length ? {assetUris} : {})
+    };
+}
+function normalizedPromptRichTextParts(rawParts, fallback=''){
+    const parts = [];
+    const pushText = text => {
+        const value = String(text || '');
+        if(!value) return;
+        const last = parts[parts.length - 1];
+        if(last?.type === 'text') last.text += value;
+        else parts.push({type:'text', text:value});
+    };
+    (Array.isArray(rawParts) ? rawParts : []).forEach(part => {
+        if(part?.type === 'mention' && part.ref?.url) parts.push({type:'mention', ref:normalizedPromptMentionRef(part.ref)});
+        else if(part?.type === 'text') pushText(part.text);
+    });
+    if(!parts.length && fallback) pushText(fallback);
+    return parts;
+}
+function promptRichTextPartsForNode(node){
+    const rich = node?.promptRichText;
+    if(rich?.version === 1 && Array.isArray(rich.parts)) return normalizedPromptRichTextParts(rich.parts, node?.text || '');
+    return normalizedPromptRichTextParts([], node?.text || '');
+}
+function promptPlainTextFromParts(parts){
+    return normalizedPromptRichTextParts(parts).map(part => part.type === 'mention' ? `@${part.ref.name || 'asset'}` : part.text).join('');
+}
+function promptMentionRefFromToken(token){
+    try { return normalizedPromptMentionRef(JSON.parse(decodeURIComponent(token?.dataset?.promptMentionRef || ''))); }
+    catch(_) { return null; }
+}
+function promptMentionRefKey(ref){
+    const item = normalizedPromptMentionRef(ref);
+    return item.key || `url:${item.url}`;
+}
+function promptMentionRefsEqual(a, b){
+    if(!a || !b) return false;
+    const ak = promptMentionRefKey(a), bk = promptMentionRefKey(b);
+    return Boolean((ak && bk && ak === bk) || (a.url && b.url && a.url === b.url));
+}
+function uniquePromptMentionRefs(refs){
+    const out = [];
+    (refs || []).forEach(raw => {
+        const ref = normalizedPromptMentionRef(raw);
+        if(!ref.url || out.some(item => promptMentionRefsEqual(item, ref))) return;
+        out.push(ref);
+    });
+    return out;
+}
+function promptMentionRefState(promptNode, ref){
+    if(!ref?.url || isMissingAssetUrl(ref.url)) return {missing:true, detached:true};
+    if(promptConnectedMentionCandidates(promptNode).some(item => promptMentionRefsEqual(item, ref))) return {missing:false, detached:false};
+    if(ref.source === 'connected') return {missing:false, detached:true};
+    if(!canvasAssetLibraryLoaded && ['asset','local-asset'].includes(ref.source)) return {missing:false, detached:false};
+    return {missing:false, detached:!promptAllAssetMentionCandidates().some(item => promptMentionRefsEqual(item, ref))};
+}
+function promptMentionCurrentRef(promptNode, raw){
+    const ref = normalizedPromptMentionRef(raw);
+    const connected = promptConnectedMentionCandidates(promptNode).find(item => promptMentionRefKey(item) === promptMentionRefKey(ref));
+    if(connected) return {...ref, ...connected, key:ref.key || connected.key};
+    if(['asset','local-asset'].includes(ref.source)){
+        const asset = promptAllAssetMentionCandidates().find(item => promptMentionRefKey(item) === promptMentionRefKey(ref));
+        if(asset) return {...ref, ...asset, key:ref.key || asset.key};
+    }
+    return ref;
+}
+function promptMentionTokenHtml(ref, state={}){
+    const item = normalizedPromptMentionRef(ref);
+    const encoded = encodeURIComponent(JSON.stringify(item));
+    const detached = Boolean(state.detached);
+    const kindLabel = tr(`canvas.mentionKind.${item.kind}`);
+    const status = detached ? ` · ${tr('canvas.mentionDetached')}` : '';
+    const media = item.kind === 'image'
+        ? canvasPreviewImgHtml(item.url, 96, 'class="prompt-mention-thumb" alt="" draggable="false"')
+        : `<span class="prompt-mention-kind" aria-hidden="true"><i data-lucide="${item.kind === 'video' ? 'film' : 'file-audio'}"></i></span>`;
+    return `<span class="prompt-mention-token${detached ? ' is-detached' : ''}" contenteditable="false" tabindex="0" role="button" aria-label="${escapeAttr(`${kindLabel} ${item.name}${status}`)}" title="${escapeAttr(`${kindLabel} · ${item.name}${status}`)}" data-prompt-mention-ref="${escapeAttr(encoded)}">${media}<span class="prompt-mention-name">@${escapeHtml(item.name)}</span>${detached ? '<i data-lucide="unlink" class="prompt-mention-state" aria-hidden="true"></i>' : ''}</span>`;
+}
+function promptRichTextHtml(node){
+    return promptRichTextPartsForNode(node).map(part => {
+        if(part.type === 'mention'){
+            const currentRef = promptMentionCurrentRef(node, part.ref);
+            const state = promptMentionRefState(node, currentRef);
+            if(state.missing) return escapeHtml(`@${currentRef.name || 'asset'}`);
+            return promptMentionTokenHtml(currentRef, state);
+        }
+        return escapeHtml(part.text).replace(/\n/g, '<br>');
+    }).join('');
+}
+function promptEditorParts(editor){
+    const parts = [];
+    const pushText = value => {
+        const text = String(value || '');
+        if(!text) return;
+        const last = parts[parts.length - 1];
+        if(last?.type === 'text') last.text += text;
+        else parts.push({type:'text', text});
+    };
+    const blockTags = new Set(['DIV','P','LI']);
+    const plainSoFar = () => parts.map(part => part.type === 'mention' ? `@${part.ref.name || 'asset'}` : part.text).join('');
+    const walk = node => {
+        if(node.nodeType === Node.TEXT_NODE){ pushText(node.nodeValue); return; }
+        if(node.nodeType !== Node.ELEMENT_NODE) return;
+        if(node.classList?.contains('prompt-mention-token')){
+            const ref = promptMentionRefFromToken(node);
+            if(ref?.url) parts.push({type:'mention', ref});
+            else pushText(node.textContent || '');
+            return;
+        }
+        if(node.tagName === 'BR'){ pushText('\n'); return; }
+        const block = blockTags.has(node.tagName);
+        if(block && parts.length && !plainSoFar().endsWith('\n')) pushText('\n');
+        node.childNodes.forEach(walk);
+        if(block && node.nextSibling && !plainSoFar().endsWith('\n')) pushText('\n');
+    };
+    editor?.childNodes?.forEach(walk);
+    return normalizedPromptRichTextParts(parts);
+}
+function promptTargetGenerators(promptNode){
+    if(!promptNode) return [];
+    const sourceIds = new Set([promptNode.id]);
+    nodes.filter(item => ['group','promptGroup'].includes(item.type) && (item.items || []).includes(promptNode.id)).forEach(item => sourceIds.add(item.id));
+    return [...new Set(connections.filter(conn => sourceIds.has(conn.from)).map(conn => conn.to))]
+        .map(id => nodes.find(item => item.id === id))
+        .filter(item => item && CANVAS_GENERATOR_TYPES.includes(item.type));
+}
+function generatorSourcesWithoutMutation(gen){
+    const sources = generatorSources(gen);
+    const ordered = [];
+    (gen.inputs || []).forEach(id => {
+        const source = sources.find(item => item.id === id);
+        if(source && !ordered.includes(source)) ordered.push(source);
+    });
+    sources.forEach(source => { if(!ordered.includes(source)) ordered.push(source); });
+    return ordered;
+}
+function promptConnectedMentionCandidates(promptNode){
+    const refs = [];
+    promptTargetGenerators(promptNode).forEach(gen => {
+        generatorSourcesWithoutMutation(gen).forEach(source => {
+            (source.refs || []).forEach((raw, index) => {
+                const kind = mediaKindForRef(raw);
+                if(!raw?.url || !['image','video','audio'].includes(kind)) return;
+                const sourceNodeId = source.imageId || source.nodeId || raw.nodeId || (source.id && !String(source.id).includes(':') ? source.id : '');
+                refs.push(normalizedPromptMentionRef({
+                    ...raw,
+                    key:raw.key || (sourceNodeId ? `node:${sourceNodeId}:${raw.outputIndex ?? index}` : `url:${raw.url}`),
+                    name:raw.name || source.label || kind,
+                    kind,
+                    source:'connected',
+                    nodeId:sourceNodeId,
+                    outputIndex:raw.outputIndex ?? index,
+                    assetUris:raw.asset_uris || raw.assetUris || []
+                }));
+            });
+        });
+    });
+    return uniquePromptMentionRefs(refs);
+}
+function promptAllAssetMentionCandidates(){
+    const refs = [];
+    canvasAssetSourceLibraries().forEach(lib => {
+        (lib.categories || []).forEach(cat => {
+            (cat.items || []).forEach(item => {
+                const kind = canvasAssetItemKind(item);
+                if(!item?.url || !['image','video','audio'].includes(kind)) return;
+                refs.push(normalizedPromptMentionRef({
+                    key:item.id ? `asset:${item.id}` : `url:${item.url}`,
+                    url:item.url,
+                    name:item.name || item.alias || kind,
+                    kind,
+                    source:lib.id === LOCAL_CANVAS_ASSET_LIBRARY_ID ? 'local-asset' : 'asset',
+                    assetId:item.id || '',
+                    assetUris:item.asset_uris || item.assetUris || []
+                }));
+            });
+        });
+    });
+    return uniquePromptMentionRefs(refs);
+}
+function promptMentionQueryAtCaret(editor){
+    const selection = window.getSelection();
+    if(!selection?.rangeCount || !editor.contains(selection.anchorNode)) return null;
+    const caret = selection.getRangeAt(0);
+    if(!caret.collapsed) return null;
+    if(selection.anchorNode?.nodeType === Node.ELEMENT_NODE && selection.anchorOffset > 0){
+        let tail = selection.anchorNode.childNodes?.[selection.anchorOffset - 1] || null;
+        while(tail?.lastChild) tail = tail.lastChild;
+        if(tail?.nodeType === Node.TEXT_NODE){
+            const tailText = String(tail.nodeValue || '');
+            const tailMatch = tailText.match(/[@＠]([^@＠\s]{0,48})$/u);
+            if(tailMatch){
+                const range = document.createRange();
+                range.setStart(tail, tailText.length - tailMatch[0].length);
+                range.setEnd(tail, tailText.length);
+                return {query:tailMatch[1] || '', range};
+            }
+        }
+    }
+    const beforeRange = caret.cloneRange();
+    beforeRange.selectNodeContents(editor);
+    beforeRange.setEnd(caret.endContainer, caret.endOffset);
+    const before = beforeRange.toString();
+    const match = before.match(/[@＠]([^@＠\s]{0,48})$/u);
+    if(!match) return null;
+    const startOffset = before.length - match[0].length;
+    const endOffset = before.length;
+    const walker = document.createTreeWalker(editor, NodeFilter.SHOW_TEXT);
+    let current = 0;
+    let startNode = null, startNodeOffset = 0, endNode = null, endNodeOffset = 0;
+    while(walker.nextNode()){
+        const textNode = walker.currentNode;
+        const length = String(textNode.nodeValue || '').length;
+        if(!startNode && startOffset >= current && startOffset <= current + length){
+            startNode = textNode;
+            startNodeOffset = startOffset - current;
+        }
+        if(endOffset >= current && endOffset <= current + length){
+            endNode = textNode;
+            endNodeOffset = endOffset - current;
+            break;
+        }
+        current += length;
+    }
+    if(!startNode || !endNode) return null;
+    const range = document.createRange();
+    range.setStart(startNode, startNodeOffset);
+    range.setEnd(endNode, endNodeOffset);
+    return {query:match[1] || '', range};
+}
+function promptInsertTextAtSelection(text){
+    const selection = window.getSelection();
+    if(!selection?.rangeCount) return;
+    const range = selection.getRangeAt(0);
+    range.deleteContents();
+    const textNode = document.createTextNode(String(text || ''));
+    range.insertNode(textNode);
+    range.setStartAfter(textNode);
+    range.collapse(true);
+    selection.removeAllRanges();
+    selection.addRange(range);
+}
+function promptMentionLibraries(){
+    return canvasAssetSourceLibraries().filter(lib => (lib.categories || []).some(cat => (cat.items || []).some(item => ['image','video','audio'].includes(canvasAssetItemKind(item)))));
+}
+function promptMentionLibraryCategories(libraryId){
+    const libs = promptMentionLibraries();
+    const lib = libs.find(item => item.id === libraryId) || libs[0];
+    return (lib?.categories || []).filter(cat => (cat.items || []).some(item => ['image','video','audio'].includes(canvasAssetItemKind(item))));
+}
+function promptMentionOptionMediaHtml(ref){
+    if(ref.kind === 'image') return canvasPreviewImgHtml(ref.url, 160, 'alt="" draggable="false"');
+    return `<span class="prompt-mention-option-kind"><i data-lucide="${ref.kind === 'video' ? 'film' : 'file-audio'}"></i><span>${escapeHtml(tr(`canvas.mentionKind.${ref.kind}`))}</span></span>`;
+}
+function ensurePromptMentionPreview(){
+    let preview = document.getElementById('canvasPromptMentionPreview');
+    if(preview) return preview;
+    preview = document.createElement('div');
+    preview.id = 'canvasPromptMentionPreview';
+    preview.className = 'prompt-mention-preview';
+    preview.hidden = true;
+    document.body.appendChild(preview);
+    const dismissOutsideToken = event => {
+        const anchor = preview._anchorToken;
+        if(preview.hidden || !anchor) return;
+        if(!anchor.isConnected || !anchor.contains(event.target)) hidePromptMentionPreview();
+    };
+    document.addEventListener('pointerdown', dismissOutsideToken, true);
+    document.addEventListener('pointerup', dismissOutsideToken, true);
+    document.addEventListener('pointermove', event => {
+        if(event.pointerType === 'mouse') dismissOutsideToken(event);
+    }, true);
+    document.addEventListener('keydown', event => {
+        if(event.key === 'Escape') hidePromptMentionPreview();
+    }, true);
+    document.addEventListener('scroll', hidePromptMentionPreview, true);
+    document.addEventListener('visibilitychange', () => {
+        if(document.hidden) hidePromptMentionPreview();
+    });
+    window.addEventListener('blur', hidePromptMentionPreview);
+    window.addEventListener('resize', hidePromptMentionPreview);
+    return preview;
+}
+function showPromptMentionPreview(token){
+    const ref = promptMentionRefFromToken(token);
+    if(!ref?.url || !token?.isConnected) return;
+    const preview = ensurePromptMentionPreview();
+    preview._anchorToken = token;
+    preview.innerHTML = ref.kind === 'video'
+        ? `${canvasVideoPreviewHtml(ref.url, 640, 'controls autoplay muted')}<div class="prompt-mention-preview-name">${escapeHtml(ref.name)}</div>`
+        : ref.kind === 'audio'
+            ? `<div class="prompt-mention-audio-preview"><i data-lucide="file-audio"></i><span>${escapeHtml(ref.name)}</span><audio src="${escapeAttr(ref.url)}" controls></audio></div>`
+            : `${canvasPreviewImgHtml(ref.url, 640, `alt="${escapeAttr(ref.name)}"`)}<div class="prompt-mention-preview-name">${escapeHtml(ref.name)}</div>`;
+    const rect = token.getBoundingClientRect();
+    preview.hidden = false;
+    const width = preview.offsetWidth || 240;
+    const height = preview.offsetHeight || 220;
+    preview.style.left = `${Math.max(12, Math.min(window.innerWidth - width - 12, rect.left))}px`;
+    preview.style.top = `${Math.max(12, Math.min(window.innerHeight - height - 12, rect.bottom + 8))}px`;
+    lucide.createIcons({attrs:{'stroke-width':1.7}});
+}
+function hidePromptMentionPreview(){
+    const preview = document.getElementById('canvasPromptMentionPreview');
+    if(!preview) return;
+    preview.hidden = true;
+    preview._anchorToken = null;
+    preview.querySelectorAll('video,audio').forEach(media => media.pause?.());
+    preview.innerHTML = '';
+}
+function ensurePromptMentionPicker(){
+    let picker = document.getElementById('canvasPromptMentionPicker');
+    if(picker) return picker;
+    picker = document.createElement('div');
+    picker.id = 'canvasPromptMentionPicker';
+    picker.className = 'prompt-mention-picker';
+    picker.setAttribute('role', 'listbox');
+    picker.setAttribute('aria-label', tr('canvas.mentionPickerLabel'));
+    picker.hidden = true;
+    picker.addEventListener('pointerdown', event => event.stopPropagation());
+    picker.addEventListener('mousedown', event => event.stopPropagation());
+    document.body.appendChild(picker);
+    return picker;
+}
+function closeActivePromptMentionPicker(){
+    activePromptMentionController?.close?.();
+}
+function bindPromptRichEditor(editor, body, node){
+    if(!editor) return;
+    const picker = ensurePromptMentionPicker();
+    const state = {open:false, source:'connected', query:'', triggerRange:null, activeIndex:0, libraryId:activeCanvasAssetLibraryId || '', categoryId:''};
+    let composing = false;
+    const sync = () => {
+        const parts = promptEditorParts(editor);
+        node.promptRichText = {version:1, parts};
+        node.text = promptPlainTextFromParts(parts);
+        refreshPromptCounter(body, node.text);
+        scheduleSave();
+        scheduleGeneratorInputSync();
+    };
+    const close = () => {
+        state.open = false;
+        state.triggerRange = null;
+        if(activePromptMentionController?.editor === editor) activePromptMentionController = null;
+        picker.hidden = true;
+        picker.innerHTML = '';
+        editor.setAttribute('aria-expanded', 'false');
+    };
+    const controller = {editor, close};
+    const positionPicker = () => {
+        const editorRect = editor.getBoundingClientRect();
+        const anchorRect = state.triggerRange?.getBoundingClientRect?.();
+        const rect = anchorRect?.width || anchorRect?.height ? anchorRect : editorRect;
+        const width = Math.min(360, Math.max(280, editorRect.width));
+        picker.style.width = `${width}px`;
+        const height = picker.offsetHeight || 260;
+        let left = Math.max(12, Math.min(window.innerWidth - width - 12, rect.left));
+        let top = rect.bottom + 8;
+        if(top + height > window.innerHeight - 12) top = Math.max(12, rect.top - height - 8);
+        picker.style.left = `${left}px`;
+        picker.style.top = `${top}px`;
+    };
+    const assetCandidates = () => {
+        const libs = promptMentionLibraries();
+        if(!state.libraryId || !libs.some(lib => lib.id === state.libraryId)) state.libraryId = libs[0]?.id || '';
+        const cats = promptMentionLibraryCategories(state.libraryId);
+        if(!state.categoryId || !cats.some(cat => cat.id === state.categoryId)) state.categoryId = cats[0]?.id || '';
+        const cat = cats.find(item => item.id === state.categoryId) || cats[0];
+        return uniquePromptMentionRefs((cat?.items || []).map(item => normalizedPromptMentionRef({
+            key:item.id ? `asset:${item.id}` : `url:${item.url}`,
+            url:item.url,
+            name:item.name || item.alias || canvasAssetItemKind(item),
+            kind:canvasAssetItemKind(item),
+            source:state.libraryId === LOCAL_CANVAS_ASSET_LIBRARY_ID ? 'local-asset' : 'asset',
+            assetId:item.id || '',
+            assetUris:item.asset_uris || item.assetUris || []
+        })).filter(item => item.url && ['image','video','audio'].includes(item.kind)));
+    };
+    const filteredCandidates = () => {
+        const all = state.source === 'asset' ? assetCandidates() : promptConnectedMentionCandidates(node);
+        const query = state.query.trim().toLocaleLowerCase();
+        return (query ? all.filter(item => `${item.name} ${item.kind}`.toLocaleLowerCase().includes(query)) : all).slice(0, 60);
+    };
+    const insert = ref => {
+        if(!state.triggerRange || !ref) return;
+        editor.focus();
+        const selection = window.getSelection();
+        selection.removeAllRanges();
+        selection.addRange(state.triggerRange);
+        state.triggerRange.deleteContents();
+        const holder = document.createElement('div');
+        holder.innerHTML = promptMentionTokenHtml(ref, {detached:false});
+        const token = holder.firstElementChild;
+        const spacer = document.createTextNode(' ');
+        state.triggerRange.insertNode(spacer);
+        state.triggerRange.insertNode(token);
+        state.triggerRange.setStartAfter(spacer);
+        state.triggerRange.collapse(true);
+        selection.removeAllRanges();
+        selection.addRange(state.triggerRange);
+        close();
+        sync();
+        bindCanvasPreviewImageFallbacks(editor);
+        lucide.createIcons({attrs:{'stroke-width':1.7}});
+    };
+    const renderPicker = () => {
+        if(!state.open) return;
+        const connected = promptConnectedMentionCandidates(node);
+        const libs = promptMentionLibraries();
+        if(state.source === 'connected' && !connected.length && libs.length) state.source = 'asset';
+        if(state.source === 'asset' && !libs.length && connected.length) state.source = 'connected';
+        const items = filteredCandidates();
+        state.activeIndex = Math.max(0, Math.min(state.activeIndex, Math.max(0, items.length - 1)));
+        const cats = promptMentionLibraryCategories(state.libraryId);
+        picker.innerHTML = `<div class="prompt-mention-picker-shell">
+            <div class="prompt-mention-tabs">
+                <button type="button" data-mention-source="connected" class="${state.source === 'connected' ? 'active' : ''}" ${connected.length ? '' : 'disabled'}><i data-lucide="git-merge"></i><span>${escapeHtml(tr('canvas.mentionConnected'))}</span></button>
+                <button type="button" data-mention-source="asset" class="${state.source === 'asset' ? 'active' : ''}" ${libs.length ? '' : 'disabled'}><i data-lucide="library"></i><span>${escapeHtml(tr('canvas.mentionAssets'))}</span></button>
+            </div>
+            ${state.source === 'asset' && libs.length ? `<div class="prompt-mention-filters"><select data-mention-library aria-label="${escapeAttr(tr('canvas.mentionAssetLibrary'))}">${libs.map(lib => `<option value="${escapeAttr(lib.id)}" ${lib.id === state.libraryId ? 'selected' : ''}>${escapeHtml(lib.name || tr('canvas.mentionAssets'))}</option>`).join('')}</select><select data-mention-category aria-label="${escapeAttr(tr('canvas.mentionAssetCategory'))}">${cats.map(cat => `<option value="${escapeAttr(cat.id)}" ${cat.id === state.categoryId ? 'selected' : ''}>${escapeHtml(cat.name || tr('canvas.mentionAssets'))}</option>`).join('')}</select></div>` : ''}
+            <div class="prompt-mention-query">${state.query ? `${escapeHtml(tr('canvas.mentionSearch'))}: ${escapeHtml(state.query)}` : escapeHtml(tr('canvas.mentionSearchHint'))}</div>
+            <div class="prompt-mention-options">${items.length ? items.map((ref, index) => `<button type="button" role="option" aria-selected="${index === state.activeIndex ? 'true' : 'false'}" class="prompt-mention-option ${index === state.activeIndex ? 'active' : ''}" data-mention-index="${index}">${promptMentionOptionMediaHtml(ref)}<span class="prompt-mention-option-name">${escapeHtml(ref.name)}</span><span class="prompt-mention-option-type">${escapeHtml(tr(`canvas.mentionKind.${ref.kind}`))}</span></button>`).join('') : `<div class="prompt-mention-empty">${escapeHtml(tr(state.source === 'asset' ? 'canvas.mentionAssetEmpty' : 'canvas.mentionConnectedEmpty'))}</div>`}</div>
+        </div>`;
+        picker._mentionItems = items;
+        picker.hidden = false;
+        editor.setAttribute('aria-expanded', 'true');
+        picker.querySelectorAll('[data-mention-source]').forEach(button => button.onclick = event => {
+            event.preventDefault(); event.stopPropagation();
+            state.source = button.dataset.mentionSource;
+            state.activeIndex = 0;
+            renderPicker();
+        });
+        const librarySelect = picker.querySelector('[data-mention-library]');
+        if(librarySelect) librarySelect.onchange = event => { state.libraryId = event.target.value; state.categoryId = ''; state.activeIndex = 0; renderPicker(); };
+        const categorySelect = picker.querySelector('[data-mention-category]');
+        if(categorySelect) categorySelect.onchange = event => { state.categoryId = event.target.value; state.activeIndex = 0; renderPicker(); };
+        picker.querySelectorAll('[data-mention-index]').forEach(button => {
+            button.onmouseenter = () => {
+                state.activeIndex = Number(button.dataset.mentionIndex || 0);
+                picker.querySelectorAll('[data-mention-index]').forEach((item, index) => item.classList.toggle('active', index === state.activeIndex));
+            };
+            button.onclick = event => { event.preventDefault(); event.stopPropagation(); insert(picker._mentionItems?.[Number(button.dataset.mentionIndex)]); };
+        });
+        bindCanvasPreviewImageFallbacks(picker);
+        lucide.createIcons({attrs:{'stroke-width':1.7}});
+        requestAnimationFrame(positionPicker);
+    };
+    const openFromCaret = async () => {
+        if(composing) return;
+        const match = promptMentionQueryAtCaret(editor);
+        if(!match){ close(); return; }
+        if(activePromptMentionController && activePromptMentionController.editor !== editor) closeActivePromptMentionPicker();
+        activePromptMentionController = controller;
+        state.open = true;
+        state.query = match.query;
+        state.triggerRange = match.range.cloneRange();
+        state.activeIndex = 0;
+        if(!canvasAssetLibraryLoaded) await loadCanvasAssetLibrary({renderPanel:false});
+        if(!editor.isConnected) return;
+        renderPicker();
+    };
+    bindScrollableText(editor);
+    editor.setAttribute('aria-haspopup', 'listbox');
+    editor.setAttribute('aria-expanded', 'false');
+    editor.addEventListener('compositionstart', () => { composing = true; });
+    editor.addEventListener('compositionend', () => { composing = false; sync(); openFromCaret(); });
+    editor.addEventListener('input', () => { if(!composing){ sync(); openFromCaret(); } });
+    editor.addEventListener('keyup', event => { if(!composing && !['ArrowUp','ArrowDown','Enter','Tab','Escape'].includes(event.key)) openFromCaret(); });
+    editor.addEventListener('keydown', event => {
+        if(!state.open) return;
+        const items = picker._mentionItems || [];
+        if(event.key === 'ArrowDown' || event.key === 'ArrowUp'){
+            event.preventDefault(); event.stopPropagation();
+            if(items.length) state.activeIndex = (state.activeIndex + (event.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length;
+            renderPicker();
+        } else if((event.key === 'Enter' || event.key === 'Tab') && items.length){
+            event.preventDefault(); event.stopPropagation(); insert(items[state.activeIndex]);
+        } else if(event.key === 'Escape'){
+            event.preventDefault(); event.stopPropagation(); close();
+        }
+    });
+    editor.addEventListener('paste', event => {
+        event.preventDefault(); event.stopPropagation();
+        promptInsertTextAtSelection(event.clipboardData?.getData('text/plain') || '');
+        sync();
+    });
+    editor.addEventListener('copy', event => {
+        const selection = window.getSelection();
+        if(!selection?.rangeCount || selection.isCollapsed || !editor.contains(selection.anchorNode)) return;
+        const box = document.createElement('div');
+        box.appendChild(selection.getRangeAt(0).cloneContents());
+        event.preventDefault(); event.stopPropagation();
+        event.clipboardData?.setData('text/plain', promptPlainTextFromParts(promptEditorParts(box)));
+    });
+    editor.addEventListener('cut', event => {
+        const selection = window.getSelection();
+        if(!selection?.rangeCount || selection.isCollapsed || !editor.contains(selection.anchorNode)) return;
+        const box = document.createElement('div');
+        box.appendChild(selection.getRangeAt(0).cloneContents());
+        event.preventDefault(); event.stopPropagation();
+        event.clipboardData?.setData('text/plain', promptPlainTextFromParts(promptEditorParts(box)));
+        selection.getRangeAt(0).deleteContents();
+        sync();
+    });
+    editor.addEventListener('blur', () => setTimeout(() => { if(!picker.matches(':hover')) close(); }, 0));
+    editor.addEventListener('mouseover', event => { const token = event.target.closest?.('.prompt-mention-token'); if(token) showPromptMentionPreview(token); });
+    editor.addEventListener('mouseout', event => {
+        const token = event.target.closest?.('.prompt-mention-token');
+        if(token && !token.contains(event.relatedTarget)) hidePromptMentionPreview();
+    });
+    editor.addEventListener('focusin', event => { const token = event.target.closest?.('.prompt-mention-token'); if(token) showPromptMentionPreview(token); });
+    editor.addEventListener('focusout', event => {
+        const token = event.target.closest?.('.prompt-mention-token');
+        if(token && !token.contains(event.relatedTarget)) hidePromptMentionPreview();
+    });
+    editor.addEventListener('keydown', event => {
+        const token = event.target.closest?.('.prompt-mention-token');
+        if(token && (event.key === 'Backspace' || event.key === 'Delete')){
+            event.preventDefault();
+            token.remove();
+            editor.focus();
+            sync();
+        } else if(token && (event.key === 'Enter' || event.key === ' ')){
+            event.preventDefault();
+            showPromptMentionPreview(token);
+        }
+    });
+    bindCanvasPreviewImageFallbacks(editor);
+}
 function promptTextLength(text){
     return Array.from(String(text || '')).length;
 }
@@ -6703,8 +7280,8 @@ function localCanvasAssetFolderCategories(){
         result.push({
             id: node.id || (node.path ? node.path : '__root__'),
             name: node.name || (node.path ? node.path.split('/').pop() : '全部上传'),
-            type: 'image',
-            items: (isRoot ? (localCanvasAssetLibrary.items || []) : (node.items || [])).filter(item => canvasAssetItemKind(item) === 'image'),
+            type: 'media',
+            items: (isRoot ? (localCanvasAssetLibrary.items || []) : (node.items || [])).filter(item => ['image','video','audio'].includes(canvasAssetItemKind(item))),
             readonly: true,
             source: 'local',
         });
@@ -6867,6 +7444,7 @@ async function loadCanvasAssetLibrary({renderPanel=true}={}){
         ]);
         canvasAssetLibrary = data.library || canvasAssetLibrary;
         localCanvasAssetLibrary = {items:Array.isArray(localData.items) ? localData.items : [], tree:localData.tree || null};
+        canvasAssetLibraryLoaded = true;
         const libs = canvasAssetLibraries();
         if(!activeCanvasAssetLibraryId) activeCanvasAssetLibraryId = canvasAssetLibrary.active_library_id || libs[0]?.id || '';
         if(activeCanvasAssetLibraryId !== LOCAL_CANVAS_ASSET_LIBRARY_ID && !libs.some(lib => lib.id === activeCanvasAssetLibraryId)) activeCanvasAssetLibraryId = libs[0]?.id || '';
@@ -7720,6 +8298,7 @@ function applyPromptTemplateToPromptNode(mode='positive'){
     const node = nodes.find(n => n.id === promptTemplateNodeId && n.type === 'prompt');
     if(!template || !node) return;
     node.text = canvasPromptTemplateText(template, mode);
+    node.promptRichText = {version:1, parts:normalizedPromptRichTextParts([], node.text)};
     closePromptTemplateModal();
     scheduleSave();
     syncGeneratorInputs();
@@ -8574,7 +9153,7 @@ function renderVideoBody(node){
     node.model = node.model || 'veo3-fast';
     const profile = canvasVideoProtocolProfile(node);
     const isMegaby = isMegabyVideoProvider(node.apiProvider);
-    const currentImageRefs = imageRefsOnly(ordered.flatMap(src => src.refs || []));
+    const currentImageRefs = resolveGeneratorRequestInputs(node).imageRefs;
     syncCanvasOfficialAssetState(node, currentImageRefs, profile, true);
     if(profile.isSudashui){
         node.duration = Math.max(4, Math.min(15, Number(node.duration) || 5));
@@ -8598,6 +9177,7 @@ function renderVideoBody(node){
             </div>
         </div>
         <div class="input-list video-img-list"></div>
+        <div class="video-cloud-links" aria-live="polite"></div>
         <div class="gen-settings">
             <div class="gen-settings-row">
                 <select class="select-lite video-provider" style="flex:1">${videoProviderOptions(node.apiProvider)}</select>
@@ -8717,6 +9297,7 @@ function renderVideoBody(node){
     });
     const list = wrap.querySelector('.video-img-list');
     renderVideoImageInputs(list, node, mediaInputs);
+    renderVideoCloudLinks(wrap.querySelector('.video-cloud-links'), node, mediaInputs);
     renderPromptPreview(wrap.querySelector('.prompt-list'), promptInputs);
     wrap.querySelector('.gen-btn').onclick = e => { e.stopPropagation(); runCanvasGenerate(node.id); };
     bindCascadeButtons(wrap, node.id);
@@ -8724,7 +9305,24 @@ function renderVideoBody(node){
 }
 function renderPromptPreview(container, promptInputs){
     if(!container) return;
-    container.innerHTML = promptInputs.length ? `<div class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Prompts</div>${promptInputs.map(src => `<div class="text-[11px] text-slate-500 bg-slate-50 border border-slate-100 rounded-xl px-3 py-2 line-clamp-2">${escapeHtml(src.label)}</div>`).join('')}` : '';
+    container.innerHTML = promptInputs.length ? `<div class="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Prompts</div>${promptInputs.map((src, index) => {
+        const preview = String(src.label || src.prompt || '').trim();
+        return `<div class="prompt-preview-card" role="button" tabindex="0" data-prompt-preview-index="${index}" aria-label="${escapeAttr(tr('canvas.promptDetailOpen'))}" title="${escapeAttr(tr('canvas.promptDetailOpen'))}">${escapeHtml(preview)}</div>`;
+    }).join('')}` : '';
+    container.querySelectorAll('[data-prompt-preview-index]').forEach(card => {
+        card.onmousedown = event => event.stopPropagation();
+        card.onclick = event => event.stopPropagation();
+        const open = event => {
+            event.preventDefault();
+            event.stopPropagation();
+            const source = promptInputs[Number(card.dataset.promptPreviewIndex || 0)];
+            showPromptDetailModal(source?.prompt || source?.label || '');
+        };
+        card.ondblclick = open;
+        card.onkeydown = event => {
+            if(event.key === 'Enter' || event.key === ' ') open(event);
+        };
+    });
 }
 function renderImageInputList(list, node, imageInputs, emptyText=null){
     if(!list) return;
@@ -8788,6 +9386,57 @@ function renderVideoImageInputs(list, node, imageInputs){
         item.ondragover = e => { e.preventDefault(); e.stopPropagation(); };
         item.ondrop = e => { e.preventDefault(); e.stopPropagation(); reorderInput(node, e.dataTransfer.getData('application/x-canvas-input'), src.id); internalDrag = false; };
         list.appendChild(item);
+    });
+    refreshIcons();
+}
+function renderVideoCloudLinks(host, node, imageInputs){
+    if(!host) return;
+    const counters = {image:0, video:0, audio:0};
+    const links = (imageInputs || []).map(src => {
+        const ref = src.refs?.[0] || {url:src.preview || ''};
+        const kind = mediaKindForRef(ref);
+        counters[kind] = Number(counters[kind] || 0) + 1;
+        const kindIndex = counters[kind];
+        const label = trf(`canvas.mentionRefLabel.${kind}`, {n:kindIndex});
+        const uploaded = cloudUploadLinkForCanvasRef(node, ref);
+        return uploaded ? {label, ...uploaded} : null;
+    }).filter(Boolean);
+    host.innerHTML = links.map(link => {
+        const url = String(link.url || '');
+        const expires = link.expires ? trf('canvas.cloudLinkExpires', {value:link.expires}) : '';
+        const meta = [link.service, expires].filter(Boolean).join(' · ');
+        return `<div class="video-cloud-link-row">
+            <span class="video-cloud-link-label">${escapeHtml(link.label)}</span>
+            <a class="video-cloud-link-url" href="${escapeAttr(url)}" target="_blank" rel="noopener noreferrer" title="${escapeAttr(url)}" aria-label="${escapeAttr(trf('canvas.cloudLinkOpenAria', {label:link.label}))}">${escapeHtml(url)}</a>
+            ${meta ? `<span class="video-cloud-link-expiry">${escapeHtml(meta)}</span>` : ''}
+            <button type="button" class="video-cloud-link-copy" data-copy-cloud-url="${escapeAttr(url)}" title="${escapeAttr(tr('canvas.cloudLinkCopy'))}" aria-label="${escapeAttr(trf('canvas.cloudLinkCopyAria', {label:link.label}))}"><i data-lucide="copy"></i></button>
+        </div>`;
+    }).join('');
+    host.querySelectorAll('a,button').forEach(el => {
+        el.onmousedown = event => event.stopPropagation();
+        el.onclick = event => event.stopPropagation();
+    });
+    host.querySelectorAll('[data-copy-cloud-url]').forEach(btn => {
+        btn.onclick = async event => {
+            event.preventDefault();
+            event.stopPropagation();
+            const copied = await copyTextToClipboard(btn.dataset.copyCloudUrl || '');
+            if(!copied){
+                showErrorModal(tr('canvas.copyFailed'), tr('canvas.cloudLink'));
+                return;
+            }
+            btn.classList.add('copied');
+            btn.innerHTML = '<i data-lucide="check"></i>';
+            btn.title = tr('canvas.copied');
+            refreshIcons();
+            setTimeout(() => {
+                if(!btn.isConnected) return;
+                btn.classList.remove('copied');
+                btn.innerHTML = '<i data-lucide="copy"></i>';
+                btn.title = tr('canvas.cloudLinkCopy');
+                refreshIcons();
+            }, 1200);
+        };
     });
     refreshIcons();
 }
@@ -9315,15 +9964,17 @@ async function ensureRunningHubWorkflowConfigForNode(node){
     return currentRunningHubWorkflowConfig(node);
 }
 function rhMediaSources(node){
-    const sources = orderedSources(node, generatorSources(node));
-    const refs = sources.flatMap(src => src.refs || []).filter(ref => ref?.url);
+    const inputs = resolveGeneratorRequestInputs(node);
+    const refs = inputs.refs;
     return {
-        sources,
+        inputs,
+        sources:inputs.sources,
         refs,
-        image:imageRefsOnly(refs),
-        video:videoRefsOnly(refs),
-        audio:audioRefsOnly(refs),
-        prompt:sources.map(src => src.prompt).filter(Boolean).join('\n\n')
+        image:inputs.imageRefs,
+        video:inputs.videoRefs,
+        audio:inputs.audioRefs,
+        prompt:inputs.modelPrompt,
+        displayPrompt:inputs.displayPrompt
     };
 }
 function rhFieldIndexes(fields){
@@ -9371,7 +10022,9 @@ function rhFieldValue(node, field, media=null){
         return node.rhRandomValues[key];
     }
     if(rhFieldRole(field) === 'prompt'){
-        const upstreamPrompt = (media || rhMediaSources(node)).prompt || '';
+        const resolvedMedia = media || rhMediaSources(node);
+        const upstreamPrompt = resolvedMedia.prompt || '';
+        if(resolvedMedia.inputs?.mentionedRefs?.length) return upstreamPrompt;
         return param?.value ?? (upstreamPrompt || rhDefaultValue(field));
     }
     return param?.value ?? rhDefaultValue(field);
@@ -9906,9 +10559,26 @@ async function runRhNode(nodeId, opts={}){
         return;
     }
     const media = rhMediaSources(node);
+    const fields = rhActiveFields(node);
+    const capacities = {
+        image:fields.filter(field => rhFieldKind(field) === 'image').length,
+        video:fields.filter(field => rhFieldKind(field) === 'video').length,
+        audio:fields.filter(field => rhFieldKind(field) === 'audio').length
+    };
+    try {
+        validateMentionRequestInputs(media.inputs, {
+            allowedKinds:Object.entries(capacities).filter(([, count]) => count > 0).map(([kind]) => kind),
+            limits:capacities,
+            requirePromptConsumer:fields.some(field => rhFieldKind(field) === 'prompt')
+        });
+    } catch(err) {
+        if(opts.cascade) throw err;
+        showErrorModal(err.message || tr('canvas.rhFailed'), tr('canvas.rhFailed'));
+        return;
+    }
     let out = outputForNode(node, 500);
     const pendingId = uid('p');
-    const run = runSnapshot(node, media.prompt || 'RunningHub', media.refs);
+    const run = runSnapshot(node, media.displayPrompt || 'RunningHub', media.refs, media.prompt || 'RunningHub', media.inputs.promptParts);
     run.taskLabel = 'RunningHub';
     if(out) out._pending = [...(out._pending || []), makePendingForRun(pendingId, run, node, {refs:media.refs, cascadeTargetId})];
     if(!opts.cascade) node.running = true;
@@ -9991,12 +10661,26 @@ async function runRhModelNode(node, opts={}){
     node.model = model;
     node.apiProvider = 'runninghub';
     const media = rhMediaSources(node);
+    try {
+        validateMentionRequestInputs(media.inputs, {allowedKinds:['image'], limits:{image:CANVAS_REFERENCE_IMAGE_MAX}});
+        media.inputs = restrictResolvedGeneratorInputs(media.inputs, ['image']);
+        media.refs = media.inputs.refs;
+        media.image = media.inputs.imageRefs;
+        media.video = [];
+        media.audio = [];
+        media.prompt = media.inputs.modelPrompt;
+    }
+    catch(err) {
+        if(opts.cascade) throw err;
+        showErrorModal(err.message || tr('canvas.generationFailed'), tr('canvas.apiFailed'));
+        return;
+    }
     const prompt = media.prompt || '';
-    const refs = imageRefsOnly(media.refs || []);
+    const refs = media.image;
     if(!prompt && !refs.length){ alert(tr('canvas.needPromptOrImage')); return; }
     const count = Math.max(1, Math.min(8, Number(node.count || 1)));
     let out = outputForNode(node, 500);
-    const run = runSnapshot(node, prompt || 'Edit the reference images.', refs);
+    const run = runSnapshot(node, media.displayPrompt || 'Edit the reference images.', refs, prompt || 'Edit the reference images.', media.inputs.promptParts);
     run.taskLabel = 'RunningHub';
     const payload = {
         prompt:prompt || 'Edit the reference images.',
@@ -10378,7 +11062,7 @@ function generatorSources(gen){
         }
         if(n.type === 'image' && n.url) {
             const kind = mediaKindForNode(n);
-            return {id:n.id, type:kind, label:n.name || kind, preview:n.url, refs:[{url:n.url, name:n.name || kind, role:n.role || '', kind}], prompt:''};
+            return {id:n.id, type:kind, nodeId:n.id, label:n.name || kind, preview:n.url, refs:[{url:n.url, name:n.name || kind, role:n.role || '', kind, nodeId:n.id}], prompt:''};
         }
         if(n.type === 'group') {
             const items = (n.items || []).map(id => nodes.find(x => x.id === id)).filter(Boolean);
@@ -10389,24 +11073,31 @@ function generatorSources(gen){
                 imageId:img.id,
                 label:img.name || mediaKindForNode(img),
                 preview:img.url,
-                refs:[{url:img.url, name:img.name || mediaKindForNode(img), role:img.role || '', kind:mediaKindForNode(img)}],
+                refs:[{url:img.url, name:img.name || mediaKindForNode(img), role:img.role || '', kind:mediaKindForNode(img), nodeId:img.id}],
                 prompt:''
             }));
-            const prompts = items.filter(x => x.type === 'prompt').map(p => p.text || '').filter(Boolean);
-            if(prompts.length){
-                const combined = prompts.join('\n\n');
+            const promptNodes = items.filter(x => x.type === 'prompt' && (x.text || x.promptRichText));
+            if(promptNodes.length){
+                const combined = promptNodes.map(p => p.text || '').filter(Boolean).join('\n\n');
+                const promptParts = [];
+                promptNodes.forEach((promptNode, index) => {
+                    if(index) promptParts.push({type:'text', text:'\n\n'});
+                    promptParts.push(...promptRichTextPartsForNode(promptNode));
+                });
                 sources.push({
                     id:`${n.id}:prompts`,
                     type:'groupPrompt',
                     groupId:n.id,
                     label:combined.slice(0, 32),
                     refs:[],
-                    prompt:combined
+                    prompt:combined,
+                    promptParts,
+                    promptNodeIds:promptNodes.map(item => item.id)
                 });
             }
             return sources;
         }
-        if(n.type === 'prompt') return {id:n.id, type:'prompt', label:(n.text || '提示词').slice(0, 32), refs:[], prompt:n.text || ''};
+        if(n.type === 'prompt') return {id:n.id, type:'prompt', label:(n.text || '提示词').slice(0, 32), refs:[], prompt:n.text || '', promptParts:promptRichTextPartsForNode(n), promptNodeIds:[n.id]};
         if(n.type === 'loop') {
             const ctx = gen?._activeLoopCtx || loopContext || null;
             const prompt = renderLoopPrompt(n, ctx);
@@ -10429,8 +11120,14 @@ function generatorSources(gen){
             return {id:n.id, type:'loop', label:`${tr('canvas.loopNode')} ${loopCount(n)}x`, refs:[], prompt};
         }
         if(n.type === 'promptGroup') {
-            const prompts = (n.items || []).map(id => nodes.find(x => x.id === id)).filter(Boolean).map(p => p.text || '').filter(Boolean);
-            return {id:n.id, type:'promptGroup', label:`提示词 ${prompts.length} 个`, refs:[], prompt:prompts.join('\n\n')};
+            const promptNodes = (n.items || []).map(id => nodes.find(x => x.id === id)).filter(item => item?.type === 'prompt');
+            const prompts = promptNodes.map(p => p.text || '').filter(Boolean);
+            const promptParts = [];
+            promptNodes.forEach((promptNode, index) => {
+                if(index) promptParts.push({type:'text', text:'\n\n'});
+                promptParts.push(...promptRichTextPartsForNode(promptNode));
+            });
+            return {id:n.id, type:'promptGroup', label:`提示词 ${prompts.length} 个`, refs:[], prompt:prompts.join('\n\n'), promptParts, promptNodeIds:promptNodes.map(item => item.id)};
         }
         if(n.type === 'llm' && (n.mode || 'node') === 'node' && n.outputText) return {id:n.id, type:'llm', label:(n.outputText || 'LLM').slice(0, 32), refs:[], prompt:n.outputText || ''};
         return null;
@@ -10440,6 +11137,121 @@ function orderedSources(gen, sources){
     gen.inputs = (gen.inputs || []).filter(id => sources.some(s => s.id === id));
     sources.forEach(s => { if(!gen.inputs.includes(s.id)) gen.inputs.push(s.id); });
     return gen.inputs.map(id => sources.find(s => s.id === id)).filter(Boolean);
+}
+function promptSourceParts(source){
+    if(Array.isArray(source?.promptParts)) return normalizedPromptRichTextParts(source.promptParts, source.prompt || '');
+    return normalizedPromptRichTextParts([], source?.prompt || '');
+}
+function promptRequestRefFromSource(source, raw, index=0){
+    const nodeId = raw?.nodeId || source?.imageId || source?.nodeId || (source?.id && !String(source.id).includes(':') ? source.id : '');
+    return normalizedPromptMentionRef({
+        ...raw,
+        key:raw?.key || (nodeId ? `node:${nodeId}:${raw?.outputIndex ?? index}` : `url:${raw?.url || ''}`),
+        name:raw?.name || source?.label || mediaKindForRef(raw),
+        kind:mediaKindForRef(raw),
+        source:raw?.source || 'connected',
+        nodeId,
+        outputIndex:raw?.outputIndex ?? index,
+        assetUris:raw?.asset_uris || raw?.assetUris || []
+    });
+}
+function promptMentionLabel(kind, index){
+    return trf(`canvas.mentionRefLabel.${kind}`, {n:index});
+}
+function resolveGeneratorRequestInputs(gen){
+    const sources = orderedSources(gen, generatorSources(gen));
+    const promptParts = [];
+    sources.filter(source => source.prompt || source.promptParts?.length).forEach((source, index) => {
+        if(index) promptParts.push({type:'text', text:'\n\n'});
+        promptParts.push(...promptSourceParts(source));
+    });
+    const baseRefs = [];
+    sources.forEach(source => (source.refs || []).forEach((ref, index) => {
+        const normalized = promptRequestRefFromSource(source, ref, index);
+        if(normalized.url && !baseRefs.some(item => promptMentionRefsEqual(item, normalized))) baseRefs.push(normalized);
+    }));
+    const validMentionRefs = [];
+    const invalidMentions = [];
+    promptParts.forEach(part => {
+        if(part.type !== 'mention') return;
+        const snapshot = normalizedPromptMentionRef(part.ref);
+        const baseMatch = baseRefs.find(item => promptMentionRefKey(item) === promptMentionRefKey(snapshot));
+        const assetMatch = ['asset','local-asset'].includes(snapshot.source)
+            ? promptAllAssetMentionCandidates().find(item => promptMentionRefKey(item) === promptMentionRefKey(snapshot))
+            : null;
+        const ref = baseMatch ? {...snapshot, ...baseMatch, key:snapshot.key || baseMatch.key}
+            : assetMatch ? {...snapshot, ...assetMatch, key:snapshot.key || assetMatch.key}
+            : snapshot;
+        if(!ref.url || isMissingAssetUrl(ref.url)) invalidMentions.push(ref);
+        else if(!validMentionRefs.some(item => promptMentionRefsEqual(item, ref))) validMentionRefs.push(ref);
+    });
+    const refs = [...baseRefs];
+    validMentionRefs.forEach(ref => { if(!refs.some(item => promptMentionRefsEqual(item, ref))) refs.push(ref); });
+    const counters = {image:0, video:0, audio:0};
+    const labelledRefs = refs.map(ref => ({ref, label:promptMentionLabel(ref.kind, ++counters[ref.kind])}));
+    const labelFor = ref => labelledRefs.find(item => promptMentionRefsEqual(item.ref, ref))?.label || `@${ref.name || 'asset'}`;
+    const displayPrompt = promptPlainTextFromParts(promptParts);
+    const modelBody = promptParts.map(part => {
+        if(part.type !== 'mention') return part.text;
+        const snapshot = normalizedPromptMentionRef(part.ref);
+        const ref = validMentionRefs.find(item => promptMentionRefKey(item) === promptMentionRefKey(snapshot) || promptMentionRefsEqual(item, snapshot));
+        return !ref ? `@${snapshot.name || 'asset'}` : labelFor(ref);
+    }).join('');
+    const modelPrompt = validMentionRefs.length
+        ? `${tr('canvas.mentionModelHeader')}\n${labelledRefs.map(item => `${item.label}：${item.ref.name || item.ref.kind}`).join('\n')}\n\n${tr('canvas.mentionUserRequest')}\n${modelBody}`
+        : modelBody;
+    return {
+        sources,
+        promptParts,
+        displayPrompt,
+        modelPrompt,
+        refs,
+        imageRefs:refs.filter(ref => ref.kind === 'image'),
+        videoRefs:refs.filter(ref => ref.kind === 'video'),
+        audioRefs:refs.filter(ref => ref.kind === 'audio'),
+        mentionedRefs:validMentionRefs,
+        invalidMentions
+    };
+}
+function restrictResolvedGeneratorInputs(inputs, allowedKinds){
+    const allowed = new Set(allowedKinds || ['image','video','audio']);
+    const refs = inputs.refs.filter(ref => allowed.has(ref.kind));
+    const counters = {image:0, video:0, audio:0};
+    const labelledRefs = refs.map(ref => ({ref, label:promptMentionLabel(ref.kind, ++counters[ref.kind])}));
+    const labelFor = ref => labelledRefs.find(item => promptMentionRefsEqual(item.ref, ref))?.label || `@${ref.name || 'asset'}`;
+    const mappedMentions = inputs.mentionedRefs.filter(ref => refs.some(item => promptMentionRefsEqual(item, ref)));
+    const modelBody = inputs.promptParts.map(part => {
+        if(part.type !== 'mention') return part.text;
+        const snapshot = normalizedPromptMentionRef(part.ref);
+        const ref = mappedMentions.find(item => promptMentionRefKey(item) === promptMentionRefKey(snapshot) || promptMentionRefsEqual(item, snapshot));
+        return !ref ? `@${snapshot.name || 'asset'}` : labelFor(ref);
+    }).join('');
+    const modelPrompt = mappedMentions.length
+        ? `${tr('canvas.mentionModelHeader')}\n${labelledRefs.map(item => `${item.label}：${item.ref.name || item.ref.kind}`).join('\n')}\n\n${tr('canvas.mentionUserRequest')}\n${modelBody}`
+        : modelBody;
+    return {
+        ...inputs,
+        refs,
+        imageRefs:refs.filter(ref => ref.kind === 'image'),
+        videoRefs:refs.filter(ref => ref.kind === 'video'),
+        audioRefs:refs.filter(ref => ref.kind === 'audio'),
+        mentionedRefs:mappedMentions,
+        modelPrompt
+    };
+}
+function validateMentionRequestInputs(inputs, options={}){
+    if(!inputs?.mentionedRefs?.length) return;
+    const allowedKinds = new Set(options.allowedKinds || ['image','video','audio']);
+    const unsupported = inputs.mentionedRefs.find(ref => !allowedKinds.has(ref.kind));
+    if(unsupported) throw new Error(trf('canvas.mentionUnsupportedKind', {name:unsupported.name, kind:tr(`canvas.mentionKind.${unsupported.kind}`)}));
+    const limits = options.limits || {};
+    for(const kind of ['image','video','audio']){
+        const limit = Number(limits[kind] || 0);
+        if(limit > 0 && inputs[`${kind}Refs`]?.length > limit) throw new Error(trf('canvas.mentionLimitExceeded', {kind:tr(`canvas.mentionKind.${kind}`), count:limit}));
+    }
+    if(options.requirePromptConsumer === false) throw new Error(tr('canvas.mentionPromptNotSupported'));
+    const lengthInputs = Array.isArray(options.allowedKinds) ? restrictResolvedGeneratorInputs(inputs, options.allowedKinds) : inputs;
+    if(promptTextLength(lengthInputs.modelPrompt) > PROMPT_TEXT_MAX_LENGTH) throw new Error(trf('canvas.mentionPromptTooLong', {count:PROMPT_TEXT_MAX_LENGTH.toLocaleString()}));
 }
 function reorderInput(gen, movedId, targetId){
     if(!movedId || movedId === targetId) return;
@@ -10501,13 +11313,23 @@ async function runGenerator(genId, opts={}){
     const gen = nodes.find(n => n.id === genId);
     if(!gen || (gen.running && !opts.cascade)) return;
     const cascadeTargetId = cascadeTargetIdFromOptions(opts);
-    const sources = orderedSources(gen, generatorSources(gen));
-    const prompt = sources.map(s => s.prompt).filter(Boolean).join('\n\n');
-    const refs = imageRefsOnly(sources.flatMap(s => s.refs || []));
+    let inputs;
+    try {
+        inputs = resolveGeneratorRequestInputs(gen);
+        validateMentionRequestInputs(inputs, {allowedKinds:['image'], limits:{image:CANVAS_REFERENCE_IMAGE_MAX}});
+        inputs = restrictResolvedGeneratorInputs(inputs, ['image']);
+    } catch(err) {
+        if(opts.cascade) throw err;
+        showErrorModal(err.message || tr('canvas.generationFailed'), tr('canvas.apiFailed'));
+        return;
+    }
+    const prompt = inputs.modelPrompt;
+    const displayPrompt = inputs.displayPrompt;
+    const refs = inputs.imageRefs;
     if(!prompt && !refs.length){ alert(tr('canvas.needPromptOrImage')); return; }
     const count = Math.max(1, Math.min(8, Number(gen.count || 1)));
     let out = outputForNode(gen, 460);
-    const run = runSnapshot(gen, prompt || 'Edit the reference images.', refs);
+    const run = runSnapshot(gen, displayPrompt || 'Edit the reference images.', refs, prompt || 'Edit the reference images.', inputs.promptParts);
     const payload = {
         prompt: prompt || 'Edit the reference images.',
         provider_id:resolveImageProviderId(gen.apiProvider || 'comfly'),
@@ -10587,14 +11409,24 @@ async function runGenerator(genId, opts={}){
 async function runGeneratorLegacy(genId, opts={}){
     const gen = nodes.find(n => n.id === genId);
     if(!gen || (gen.running && !opts.cascade)) return;
-    const sources = orderedSources(gen, generatorSources(gen));
-    const prompt = sources.map(s => s.prompt).filter(Boolean).join('\n\n');
-    const refs = imageRefsOnly(sources.flatMap(s => s.refs || []));
+    let inputs;
+    try {
+        inputs = resolveGeneratorRequestInputs(gen);
+        validateMentionRequestInputs(inputs, {allowedKinds:['image'], limits:{image:CANVAS_REFERENCE_IMAGE_MAX}});
+        inputs = restrictResolvedGeneratorInputs(inputs, ['image']);
+    } catch(err) {
+        if(opts.cascade) throw err;
+        showErrorModal(err.message || tr('canvas.generationFailed'), tr('canvas.apiFailed'));
+        return;
+    }
+    const prompt = inputs.modelPrompt;
+    const displayPrompt = inputs.displayPrompt;
+    const refs = inputs.imageRefs;
     if(!prompt && !refs.length){ alert(tr('canvas.needPromptOrImage')); return; }
     const count = Math.max(1, Math.min(8, Number(gen.count || 1)));
     let out = outputForNode(gen, 460);
     const pendingIds = Array.from({length:count}, () => uid('p'));
-    const run = runSnapshot(gen, prompt || 'Edit the reference images.', refs);
+    const run = runSnapshot(gen, displayPrompt || 'Edit the reference images.', refs, prompt || 'Edit the reference images.', inputs.promptParts);
     const requestSize = await generatorSizeForRun(gen, refs);
     if(out) out._pending = [...(out._pending||[]), ...pendingIds.map(id => makePendingForRun(id, run, gen, {refs, requestSize}))];
     if(!opts.cascade){
@@ -10665,10 +11497,16 @@ async function runVideoNode(nodeId, opts={}){
     if(!node || (node.running && !opts.cascade)) return;
     normalizeMegabyVideoNodeSettings(node, {resetInvalidGroup:true});
     const cascadeTargetId = cascadeTargetIdFromOptions(opts);
-    const sources = orderedSources(node, generatorSources(node));
-    const prompt = sources.map(s => s.prompt).filter(Boolean).join('\n\n');
-    const allRefs = sources.flatMap(s => s.refs || []);
-    const mediaRefs = applyUploadedUrlToRefs((allRefs || []).filter(ref => ['image','video','audio'].includes(mediaKindForRef(ref))), node);
+    let inputs;
+    try { inputs = resolveGeneratorRequestInputs(node); validateMentionRequestInputs(inputs); }
+    catch(err) {
+        if(opts.cascade) throw err;
+        showErrorModal(err.message || tr('canvas.videoFailed'), tr('canvas.apiFailed'));
+        return;
+    }
+    const prompt = inputs.modelPrompt;
+    const displayPrompt = inputs.displayPrompt;
+    const mediaRefs = applyUploadedUrlToRefs(inputs.refs, node);
     const refs = imageRefsOnly(mediaRefs);
     const videoRefs = videoRefsOnly(mediaRefs);
     const audioRefs = audioRefsOnly(mediaRefs);
@@ -10677,16 +11515,15 @@ async function runVideoNode(nodeId, opts={}){
     if(!prompt){ alert(tr('canvas.videoNeedsPrompt')); return; }
     let out = outputForNode(node, 460);
     const pendingId = uid('p');
-    const run = runSnapshot(node, prompt, refs);
+    const run = runSnapshot(node, displayPrompt, mediaRefs, prompt, inputs.promptParts);
     const manualVideoUrl = manualVideoUrlForNode(node);
     const providerId = resolveVideoProviderId(node.apiProvider || 'comfly');
     const provider = videoProviderConfig(providerId);
     const profile = window.StudioVideoApi?.videoProtocolProfile
         ? window.StudioVideoApi.videoProtocolProfile(provider, node.model || '', node.resolution || '')
         : {isSudashui:false, resolution:node.resolution || '', officialAssetsEnabled:false};
-    const videoUrls = manualVideoUrl
-        ? [manualVideoUrl]
-        : videoRefs.map(ref => tempShUploadedUrlForNode(node, ref.url)).filter(Boolean);
+    const videoUrls = videoRefs.map(ref => tempShUploadedUrlForNode(node, ref.url)).filter(Boolean);
+    if(manualVideoUrl && !videoUrls.includes(manualVideoUrl)) videoUrls.push(manualVideoUrl);
     const audioUrls = audioRefs.map(ref => ref.url).filter(Boolean);
     let sudashui;
     try {
@@ -11357,9 +12194,15 @@ async function runLTXDirectorNode(nodeId, opts={}){
     clearStuckGeneratorRunning(node);
     if(node.running && !opts.cascade) return;
     ltxFlushTimelineToNode(node);
-    const sources = orderedSources(node, generatorSources(node));
-    const upstreamPrompt = sources.map(s => s.prompt).filter(Boolean).join('\n\n');
-    const globalPrompt = [node.globalPrompt, upstreamPrompt].filter(Boolean).join('\n\n').trim();
+    let inputs;
+    try { inputs = resolveGeneratorRequestInputs(node); validateMentionRequestInputs(inputs, {allowedKinds:[]}); }
+    catch(err) {
+        if(opts.cascade) throw err;
+        showErrorModal(err.message || tr('canvas.ltxFailed'), tr('canvas.ltxFailed'));
+        return;
+    }
+    const globalPrompt = [node.globalPrompt, inputs.modelPrompt].filter(Boolean).join('\n\n').trim();
+    const displayGlobalPrompt = [node.globalPrompt, inputs.displayPrompt].filter(Boolean).join('\n\n').trim();
     const segments = ltxDirectorTimelineSegments(node);
     const hasSegPrompt = segments.some(s => (s.prompt || '').trim());
     const hasImageSeg = segments.some(s => s.type === 'image' && (s.imageFile || s.imageB64));
@@ -11378,8 +12221,8 @@ async function runLTXDirectorNode(nodeId, opts={}){
     ltxDirectorSyncSeconds(node);
     let out = outputForNode(node, 520);
     const pendingId = uid('p');
-    const refs = sources.flatMap(s => s.refs || []);
-    const run = runSnapshot(node, globalPrompt || segments.map(s => s.prompt).join(' | '), refs);
+    const refs = inputs.refs;
+    const run = runSnapshot(node, displayGlobalPrompt || segments.map(s => s.prompt).join(' | '), refs, globalPrompt || segments.map(s => s.prompt).join(' | '));
     run.taskLabel = tr('canvas.ltxDirector');
     if(out) out._pending = [...(out._pending || []), makePendingForRun(pendingId, run, node, {refs, cascadeTargetId})];
     if(!opts.cascade){
@@ -11439,22 +12282,39 @@ async function runComfyNode(nodeId, opts={}){
     const node = nodes.find(n => n.id === nodeId);
     if(!node || (node.running && !opts.cascade)) return;
     const cascadeTargetId = cascadeTargetIdFromOptions(opts);
-    const sources = orderedSources(node, generatorSources(node));
-    const prompt = sources.map(s => s.prompt).filter(Boolean).join('\n\n');
-    const allRefs = sources.flatMap(s => s.refs || []);
-    const refs = imageRefsOnly(allRefs);
     const mode = node.mode || 'text';
     const customImageFields = mode === 'custom' ? comfyFields(node, 'image') : [];
     const customVideoFields = mode === 'custom' ? comfyFields(node, 'video') : [];
     const customAudioFields = mode === 'custom' ? comfyFields(node, 'audio') : [];
     const customPromptFields = mode === 'custom' ? comfyFields(node, 'prompt') : [];
+    let inputs;
+    try {
+        inputs = resolveGeneratorRequestInputs(node);
+        if(mode === 'custom') validateMentionRequestInputs(inputs, {
+            allowedKinds:[...(customImageFields.length ? ['image'] : []), ...(customVideoFields.length ? ['video'] : []), ...(customAudioFields.length ? ['audio'] : [])],
+            limits:{image:customImageFields.length, video:customVideoFields.length, audio:customAudioFields.length},
+            requirePromptConsumer:Boolean(customPromptFields.length)
+        });
+        else if(mode === 'edit') validateMentionRequestInputs(inputs, {allowedKinds:['image'], limits:{image:3}});
+        else validateMentionRequestInputs(inputs, {allowedKinds:[]});
+        if(mode === 'custom') inputs = restrictResolvedGeneratorInputs(inputs, [...(customImageFields.length ? ['image'] : []), ...(customVideoFields.length ? ['video'] : []), ...(customAudioFields.length ? ['audio'] : [])]);
+        else if(mode === 'edit') inputs = restrictResolvedGeneratorInputs(inputs, ['image']);
+    } catch(err) {
+        if(opts.cascade) throw err;
+        showErrorModal(err.message || actionFailed('canvas.comfyGenerate'), tr('canvas.comfyGenerate'));
+        return;
+    }
+    const prompt = inputs.modelPrompt;
+    const displayPrompt = inputs.displayPrompt;
+    const allRefs = inputs.refs;
+    const refs = inputs.imageRefs;
     if((mode === 'text' || (mode === 'custom' && customPromptFields.length)) && !prompt){ alert(tr('canvas.needPrompt')); return; }
     if((mode !== 'text' && mode !== 'custom' && !refs.length) || (mode === 'custom' && refs.length < customImageFields.length)){ alert(tr('canvas.needImage')); return; }
     if(mode === 'custom' && videoRefsOnly(allRefs).length < customVideoFields.length){ alert(langIsEn() ? 'Please connect enough video inputs for this ComfyUI workflow.' : '请为这个 ComfyUI 工作流连接足够的视频输入'); return; }
     if(mode === 'custom' && audioRefsOnly(allRefs).length < customAudioFields.length){ alert(langIsEn() ? 'Please connect enough audio inputs for this ComfyUI workflow.' : '请为这个 ComfyUI 工作流连接足够的音频输入'); return; }
     let out = outputForNode(node, 480);
     const pendingId = uid('p');
-    const run = runSnapshot(node, prompt, refs);
+    const run = runSnapshot(node, displayPrompt, allRefs, prompt, inputs.promptParts);
     run.taskLabel = comfyRunLabel(node);
     const requestSize = mode === 'text' ? {width:Number(node.width || 1024), height:Number(node.height || 1024)} : null;
     if(out) out._pending = [...(out._pending||[]), makePendingForRun(pendingId, run, node, {refs, requestSize, cascadeTargetId})];
@@ -12164,18 +13024,21 @@ function outputMetaFor(url, out){
     const item = (out?.images || []).find(x => outputUrlValue(x) === url);
     return item && typeof item === 'object' ? item : {};
 }
-function runSnapshot(node, prompt, refs=[]){
+function runSnapshot(node, prompt, refs=[], modelPrompt=prompt, promptParts=null){
     const clone = JSON.parse(JSON.stringify(node || {}));
     delete clone.running;
     delete clone.runStatus;
     delete clone.runError;
     delete clone.inputs;
-    return {
+    const snapshot = {
         nodeType: node?.type || '',
         node: clone,
         prompt: prompt || '',
-        refs: (refs || []).map(ref => ({url:ref.url, name:ref.name || 'image'})).filter(ref => ref.url),
+        modelPrompt: modelPrompt || prompt || '',
+        refs: (refs || []).map(ref => normalizedPromptMentionRef(ref)).filter(ref => ref.url),
     };
+    if(Array.isArray(promptParts)) snapshot.promptRichText = {version:1, parts:normalizedPromptRichTextParts(promptParts)};
+    return snapshot;
 }
 function comfyRunLabel(node){
     const mode = node?.mode || 'text';
@@ -12244,6 +13107,7 @@ function addGenerationLog({run, outputs=[], runMs=0, error=''}) {
         model:run?.taskLabel || runTaskLabel(run),
         request:run?.request || {},
         prompt:run?.prompt || '',
+        modelPrompt:run?.modelPrompt || run?.prompt || '',
         outputs:(outputs || []).filter(Boolean),
         refs:run?.refs || [],
         runMs:Number(runMs || 0),
@@ -13467,11 +14331,12 @@ function rerunFromOutputMeta(meta){
     const prompt = meta.run.prompt || '';
     if(prompt){
         const promptNode = {id:uid('pr'), type:'prompt', x:p.x - 340, y:p.y, text:prompt};
+        if(meta.run.promptRichText?.version === 1) promptNode.promptRichText = JSON.parse(JSON.stringify(meta.run.promptRichText));
         nodes.push(promptNode);
         connections.push({id:uid('c'), from:promptNode.id, to:node.id});
     }
     (meta.run.refs || []).slice(0, 8).forEach((ref, i) => {
-        const imgNode = {id:uid('img'), type:'image', x:p.x - 340, y:p.y + 110 + i * 86, url:ref.url, name:ref.name || 'image'};
+        const imgNode = {id:uid('img'), type:'image', x:p.x - 340, y:p.y + 110 + i * 86, url:ref.url, name:ref.name || ref.kind || 'image', mediaKind:ref.kind || mediaKindForRef(ref)};
         nodes.push(imgNode);
         connections.push({id:uid('c'), from:imgNode.id, to:node.id});
     });
@@ -13806,6 +14671,19 @@ function cloneNode(n, dx, dy){
     copy.running = false;
     return copy;
 }
+function remapPromptMentionNodeIds(node, idMap){
+    if(node?.type !== 'prompt' || node.promptRichText?.version !== 1 || !Array.isArray(node.promptRichText.parts)) return;
+    node.promptRichText.parts.forEach(part => {
+        if(part?.type !== 'mention' || !part.ref?.nodeId) return;
+        const oldId = part.ref.nodeId;
+        const mapped = idMap.get(oldId);
+        if(mapped){
+            part.ref.nodeId = mapped;
+            if(String(part.ref.key || '').startsWith(`node:${oldId}:`)) part.ref.key = `node:${mapped}:${String(part.ref.key).slice(`node:${oldId}:`.length)}`;
+        }
+        else part.ref.source = 'snapshot';
+    });
+}
 function duplicateNodesForAltDrag(node, preserveConnections=false){
     const copy = cloneNode(node, 0, 0);
     const sourceIds = new Set([node.id]);
@@ -13824,8 +14702,10 @@ function duplicateNodesForAltDrag(node, preserveConnections=false){
                 return childCopy;
             });
         copy.items = copy.items.map(id => idMap.get(id) || id);
+        copies.forEach(item => remapPromptMentionNodeIds(item, idMap));
         nodes.push(...childCopies, copy);
     } else {
+        remapPromptMentionNodeIds(copy, idMap);
         nodes.push(copy);
     }
     if(preserveConnections){
@@ -13849,7 +14729,7 @@ function duplicateNodesForAltDrag(node, preserveConnections=false){
 function copySelectedNodes(){
     if(!canvas || !selected.size) return;
     const el = document.activeElement;
-    if(el && (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT')) return;
+    if(el && (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT' || el.isContentEditable)) return;
     const toCopy = [...selected].map(id => nodes.find(n => n.id === id)).filter(Boolean);
     if(!toCopy.length) return;
     const ids = new Set(toCopy.map(n => n.id));
@@ -13880,6 +14760,7 @@ function pasteNodes(){
     copies.forEach(c => {
         if((c.type === 'group' || c.type === 'promptGroup') && c.items)
             c.items = c.items.map(id => idMap.get(id) || id);
+        remapPromptMentionNodeIds(c, idMap);
     });
     const newConnections = clipConnections
         .map(c => ({...c, id:uid('c'), from:idMap.get(c.from), to:idMap.get(c.to)}))
@@ -14979,7 +15860,7 @@ board.addEventListener('drop', async e => {
 window.addEventListener('dragend', () => dropOverlay.classList.remove('active'));
 window.addEventListener('drop', () => dropOverlay.classList.remove('active'));
 window.addEventListener('paste', e => {
-    if(!canvas) return;
+    if(!canvas || e.defaultPrevented || isEditableTarget(e.target)) return;
     const files = [...(e.clipboardData?.items || [])].filter(x => x.kind === 'file' && /^(image|video|audio)\//.test(String(x.type || ''))).map(x => x.getAsFile());
     if(!files.length) return;
     e.preventDefault();
@@ -15016,7 +15897,7 @@ window.addEventListener('keydown', e => {
         toggleZoomPreview();
         return;
     }
-    if((e.ctrlKey || e.metaKey) && key === 'g') { e.preventDefault(); groupSelectedImages(); }
+    if((e.ctrlKey || e.metaKey) && key === 'g' && !isEditableTarget(e.target)) { e.preventDefault(); groupSelectedImages(); }
     if((e.ctrlKey || e.metaKey) && key === 'c') {
         // 在输入框/可编辑元素里时，让浏览器原生 Ctrl+C 工作
         const tag = document.activeElement?.tagName;

@@ -404,13 +404,13 @@ v2_task = f"{base_url}/v2/videos/generations/{quoted_id}"
 后端视频轮询超时由环境变量控制：
 
 ```python
-VIDEO_POLL_TIMEOUT = float(os.getenv("VIDEO_POLL_TIMEOUT", "1800"))
+VIDEO_POLL_TIMEOUT = float(os.getenv("VIDEO_POLL_TIMEOUT", "7200"))
 ```
 
 默认：
 
 ```text
-1800 秒，也就是 30 分钟
+7200 秒，也就是 2 小时
 ```
 
 ### 7.2 轮询间隔
@@ -791,7 +791,7 @@ async function pollSmartCanvasVideoTask(taskId)
 核心行为：
 
 1. 防重复：复用 `activeSmartTaskPolls`。
-2. 最多循环 900 次。
+2. 最多循环 1440 次，即按 5 秒间隔覆盖 2 小时。
 3. 每次等待 5 秒：
 
 ```javascript
@@ -1246,6 +1246,8 @@ GET /v1/videos/generations/{task_id}
 Sudashui 查询结果中的 `NOT_START`、`SUBMITTED`、`IN_PROGRESS` 以及内层 `processing` 都属于待继续轮询状态。任务排队启动时间不固定，因此 `NOT_START` 阶段不计入生成超时；检测到实际启动时间、非零进度或运行中状态后，才开始计算既有生成超时。响应中的 `billing: "per_second"` 是正常计费方式，不能仅因出现单独的 `billing` 字样就判定失败；只有明确的 `billing_error`、`billing account disabled`、余额不足或额度不足等错误语义才属于终态。
 
 查询接口即使返回 HTTP 200，也必须检查 Sudashui 业务字段：`code=fail_to_fetch_task`、外层 `FAILURE`、内层 `state=failed`、非空 `fail_reason` 或 `err_code` 都应立即终止轮询，并从字符串化 `message` 中解析具体错误；`code=success` 且处于排队或生成状态时继续轮询。
+
+Sudashui 查询期间出现单次连接超时、读取超时、连接中断或其它 `httpx.TransportError` 时，不得把本地任务标记为失败。后端保留最后一次上游状态并按轮询间隔自动重试；HTTP 参数错误、鉴权错误和明确业务失败仍立即终止。这样上游网站仍在执行时，本地不会因一次临时网络抖动提前显示失败。
 
 ## 20. MegabyAI `/v1/videos` 独立协议
 

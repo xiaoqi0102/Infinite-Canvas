@@ -731,7 +731,7 @@ COMFYUI_DOWNLOAD_TIMEOUT = float(os.getenv("COMFYUI_DOWNLOAD_TIMEOUT", "120"))
 APIMART_IMAGE_TASK_TIMEOUT = float(os.getenv("APIMART_IMAGE_TASK_TIMEOUT", "1800"))
 APIMART_IMAGE_POLL_INTERVAL = float(os.getenv("APIMART_IMAGE_POLL_INTERVAL", "5"))
 APIMART_IMAGE_INITIAL_POLL_DELAY = float(os.getenv("APIMART_IMAGE_INITIAL_POLL_DELAY", "10"))
-VIDEO_POLL_TIMEOUT = float(os.getenv("VIDEO_POLL_TIMEOUT", "1800"))
+VIDEO_POLL_TIMEOUT = float(os.getenv("VIDEO_POLL_TIMEOUT", "7200"))
 VIDEO_POLL_INTERVAL = 25.0
 ONLINE_IMAGE_PROMPT_MAX_LENGTH = int(os.getenv("ONLINE_IMAGE_PROMPT_MAX_LENGTH", "20000"))
 VIDEO_PROMPT_MAX_LENGTH = int(os.getenv("VIDEO_PROMPT_MAX_LENGTH", "4000"))
@@ -11096,7 +11096,8 @@ async def generate_runninghub_provider_image(prompt, size, model, reference_imag
 
 async def wait_for_runninghub_openapi_task(client, provider, task_id, output_kind="", on_progress=None):
     query_url = runninghub_openapi_url(provider, "query")
-    deadline = time.monotonic() + 1800
+    timeout = VIDEO_POLL_TIMEOUT if output_kind == "video" else 1800
+    deadline = time.monotonic() + timeout
     last_payload = None
     while time.monotonic() < deadline:
         interval = VIDEO_POLL_INTERVAL if output_kind == "video" else 3.0
@@ -15266,6 +15267,15 @@ async def wait_for_video_task(client, provider, task_id, submit_url="", on_progr
                 })
                 continue
             if last_error:
+                if wait_for_sudashui_start and isinstance(last_error, (httpx.TransportError, TimeoutError)):
+                    delay = poll_interval
+                    transient_message = str(last_error).strip() or type(last_error).__name__
+                    report_canvas_video_progress(on_progress, {
+                        "status": "polling",
+                        "message": f"Sudashui 视频任务查询暂时失败，将自动重试：{transient_message}",
+                        "next_poll_at": time.time() + delay,
+                    })
+                    continue
                 raise last_error
             raise HTTPException(status_code=502, detail=f"视频任务查询失败：{task_id}")
         last_payload = raw

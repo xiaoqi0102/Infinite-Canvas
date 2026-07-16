@@ -1,22 +1,18 @@
 {
-  "version": "2026.07.14",
-  "updated_at": "2026-07-13T23:41:36+08:00",
+  "version": "2026.07.15",
+  "updated_at": "2026-07-15T21:14:36+08:00",
   "items": [
     {
       "type": "feature",
-      "text": "发现客户端新版本后，侧栏更新入口会显示绿色提示和目标版本；选择稍后仍会保留提醒"
+      "text": "增加素材库批量管理/更换存储位置功能"
     },
     {
       "type": "feature",
-      "text": "修复EXELLOME的本地多图参考bug"
+      "text": "增加智能画布shift批量断开连线功能"
     },
     {
       "type": "feature",
-      "text": "修复FHL的生图报错bug"
-    },
-    {
-      "type": "feature",
-      "text": "增加RunningHub拉取模型的翻译功能"
+      "text": "修复RunningHub调用API生成视频报错问题"
     }
   ]
 }

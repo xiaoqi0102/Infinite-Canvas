@@ -9840,12 +9840,13 @@ async function runRhNode(nodeId, opts={}){
         });
         const taskId = submit.taskId;
         if(!taskId) throw new Error(tr('canvas.rhNoTaskId'));
-        run.request = {task_id:taskId, webappId:node.webappId, workflowId:node.workflowId, backend:'runninghub', mode};
+        const useWallet = rhUseWallet(node);
+        run.request = {task_id:taskId, webappId:node.webappId, workflowId:node.workflowId, backend:'runninghub', mode, useWallet};
         let result = null;
         for(let i = 0; i < 720; i++){
             if(cascadeTargetId) ensureCascadeActive(cascadeTargetId);
             await sleep(2500);
-            const data = await cascadeFetch(`/api/runninghub/query?taskId=${encodeURIComponent(taskId)}`, {}, {cascadeTargetId}).then(async r => {
+            const data = await cascadeFetch(`/api/runninghub/query?taskId=${encodeURIComponent(taskId)}&useWallet=${useWallet ? '1' : '0'}`, {}, {cascadeTargetId}).then(async r => {
                 const json = await r.json();
                 if(!r.ok || json.success === false) throw new Error(json.detail || json.error || tr('canvas.rhFailed'));
                 return json.data || json;

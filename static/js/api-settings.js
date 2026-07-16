@@ -964,6 +964,7 @@ async function removeRhEntry(kind, index){
     ensureRunningHubLists(item);
     const entry = item[listKey][index];
     if(!entry) return;
+    const entryId = String((kind === 'workflow' ? (entry.workflowId || entry.id) : (entry.appId || entry.id)) || '').trim();
     if(isStaticRunningHubEntry(kind, entry)){
         item[listKey][index] = {
             ...entry,
@@ -975,6 +976,11 @@ async function removeRhEntry(kind, index){
     }
     renderRunningHubCards();
     setStatus('已删除，正在保存...');
+    if(kind === 'workflow' && entryId){
+        try {
+            await fetch(`/api/runninghub/workflows/${encodeURIComponent(entryId)}`, {method:'DELETE'});
+        } catch(_) {}
+    }
     const ok = await saveProviders();
     setStatus(ok ? '已删除并保存' : '已删除，但自动保存失败');
 }

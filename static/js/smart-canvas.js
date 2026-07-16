@@ -92,6 +92,7 @@ let mentionInsertMode = 'token';
 let panState = null;
 let didPan = false;
 let portDragState = null;
+let connectionEraseState = null;
 let saveTimer = null;
 let apiProviders = [];
 let comfyWorkflows = [];
@@ -6169,7 +6170,7 @@ function renderConnections(){
         const color = isCascade ? '#16a34a' : isHistory ? 'rgba(100,116,139,0.46)' : kind === 'input' ? 'rgba(100,116,139,0.62)' : 'rgba(148,163,184,0.62)';
         const opacity = isPendingLine ? '.82' : '1';
         const width = kind === 'input' ? '1.9' : '1.6';
-        return `<path class="${cls}" d="${curve}" stroke="${color}" stroke-width="${width}" fill="none" opacity="${opacity}"></path><path class="conn-hit" data-conn-index="${dataIndex}" d="${curve}" stroke="transparent" stroke-width="14" fill="none"></path><circle cx="${tx}" cy="${ty}" r="3.5" fill="${color}" opacity=".66"></circle><g class="conn-cut" data-conn-index="${dataIndex}" transform="translate(${mx} ${my})"><circle r="8" fill="var(--card)" stroke="${color}" stroke-width="1.4"></circle><path d="M-3 -3 L3 3 M3 -3 L-3 3" stroke="${color}" stroke-width="1.5" stroke-linecap="round"></path></g>`;
+        return `<path class="${cls} conn-line" data-conn-index="${dataIndex}" d="${curve}" stroke="${color}" stroke-width="${width}" fill="none" opacity="${opacity}"></path><path class="conn-hit" data-conn-index="${dataIndex}" d="${curve}" stroke="transparent" stroke-width="14" fill="none"></path><circle class="conn-end" data-conn-index="${dataIndex}" cx="${tx}" cy="${ty}" r="3.5" fill="${color}" opacity=".66"></circle><g class="conn-cut" data-conn-index="${dataIndex}" transform="translate(${mx} ${my})"><circle r="8" fill="var(--card)" stroke="${color}" stroke-width="1.4"></circle><path d="M-3 -3 L3 3 M3 -3 L-3 3" stroke="${color}" stroke-width="1.5" stroke-linecap="round"></path></g>`;
     }).join('');
     return `<svg class="connection-layer ${reduceMotion ? 'conn-reduce-motion' : ''}" width="6000" height="4000" viewBox="0 0 6000 4000" xmlns="http://www.w3.org/2000/svg">${paths}</svg>`;
 }
@@ -8537,6 +8538,96 @@ function disconnectConnections(spec){
     });
     render();
     scheduleSave();
+}
+function connectionIndexSpecFromPoint(clientX, clientY){
+    const el = document.elementFromPoint(clientX, clientY);
+    const connEl = el?.closest?.('[data-conn-index]');
+    return connEl?.dataset?.connIndex || '';
+}
+function eraseConnectionsAtClientPoint(clientX, clientY){
+    if(!connectionEraseState || !canvas || !Array.isArray(canvas.connections)) return false;
+    const spec = connectionIndexSpecFromPoint(clientX, clientY);
+    if(!spec) return false;
+    const indices = String(spec).split(',')
+        .map(v => Number(v))
+        .filter(n => Number.isInteger(n) && n >= 0 && n < canvas.connections.length && !connectionEraseState.indices.has(n));
+    if(!indices.length) return false;
+    indices.forEach(index => connectionEraseState.indices.add(index));
+    connectionEraseState.started = true;
+    connectionEraseState.count = connectionEraseState.indices.size;
+    world.querySelectorAll('[data-conn-index]').forEach(el => {
+        const hasHit = String(el.dataset.connIndex || '').split(',').some(v => connectionEraseState.indices.has(Number(v)));
+        if(hasHit) el.classList.add('conn-erasing-mark');
+    });
+    return true;
+}
+function finishConnectionErase(){
+    if(!connectionEraseState || !canvas || !Array.isArray(canvas.connections)) return false;
+    const set = new Set(connectionEraseState.indices || []);
+    if(!set.size) return false;
+    const removed = canvas.connections.filter((_, i) => set.has(i));
+    if(!removed.length) return false;
+    pushUndo();
+    removed.forEach(conn => {
+        const toNode = nodes.find(n => n.id === conn.to);
+        if(toNode && Array.isArray(toNode.inputNodeIds)){
+            toNode.inputNodeIds = toNode.inputNodeIds.filter(id => id !== conn.from);
+        }
+        if(toNode && ['input','flow'].includes(conn.kind || 'flow')) clearDetachedRunInputRefs(toNode);
+        if((conn.kind || 'flow') === 'history'){
+            const group = nodes.find(n => n.id === conn.to && isHistoryGroupNode(n) && n.historyFor === conn.from);
+            demoteHistoryGroupNode(group);
+        }
+    });
+    canvas.connections = canvas.connections.filter((_, i) => !set.has(i));
+    render();
+    return true;
+}
+function eraseConnectionsAtPoint(event){
+    return eraseConnectionsAtClientPoint(event.clientX, event.clientY);
+}
+function eraseConnectionsAlongPointer(event){
+    if(!connectionEraseState) return false;
+    const lastX = Number.isFinite(connectionEraseState.lastX) ? connectionEraseState.lastX : event.clientX;
+    const lastY = Number.isFinite(connectionEraseState.lastY) ? connectionEraseState.lastY : event.clientY;
+    const dx = event.clientX - lastX;
+    const dy = event.clientY - lastY;
+    const steps = Math.max(1, Math.min(12, Math.ceil(Math.hypot(dx, dy) / 8)));
+    let changed = false;
+    for(let i = 1; i <= steps; i++){
+        const t = i / steps;
+        changed = eraseConnectionsAtClientPoint(lastX + dx * t, lastY + dy * t) || changed;
+    }
+    connectionEraseState.lastX = event.clientX;
+    connectionEraseState.lastY = event.clientY;
+    return changed;
+}
+function ensureConnectionEraseTrail(){
+    let svg = shell.querySelector(':scope > svg.connection-erase-trail');
+    if(svg) return svg;
+    svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('class', 'connection-erase-trail');
+    svg.setAttribute('aria-hidden', 'true');
+    svg.innerHTML = '<path class="connection-erase-trail-glow" fill="none"></path><path class="connection-erase-trail-line" fill="none"></path>';
+    shell.appendChild(svg);
+    return svg;
+}
+function updateConnectionEraseTrail(event){
+    if(!connectionEraseState) return;
+    const p = shellPoint(event);
+    connectionEraseState.trail = [...(connectionEraseState.trail || []), p].slice(-80);
+    const points = connectionEraseState.trail;
+    const svg = ensureConnectionEraseTrail();
+    const rect = shell.getBoundingClientRect();
+    svg.setAttribute('viewBox', `0 0 ${Math.max(1, rect.width)} ${Math.max(1, rect.height)}`);
+    const d = points.map((pt, index) => `${index ? 'L' : 'M'}${pt.x.toFixed(1)} ${pt.y.toFixed(1)}`).join(' ');
+    svg.querySelectorAll('path').forEach(path => path.setAttribute('d', d));
+}
+function clearConnectionEraseTrail(){
+    const svg = shell.querySelector(':scope > svg.connection-erase-trail');
+    if(!svg) return;
+    svg.classList.add('fading');
+    setTimeout(() => svg.remove(), 180);
 }
 function connectionMidpoint(conn){
     const fromNode = nodes.find(n => n.id === conn?.from);
@@ -14660,9 +14751,10 @@ async function runRunningHubGeneration(prompt, refs, runSettings=settings){
     });
     const taskId = submit.taskId;
     if(!taskId) throw new Error(tr('smart.rhNoTaskId'));
+    const useWallet = runSettings.rhPayment === 'wallet';
     for(let i = 0; i < 720; i++){
         await sleep(2500);
-        const data = await fetch(`/api/runninghub/query?taskId=${encodeURIComponent(taskId)}`).then(async r => {
+        const data = await fetch(`/api/runninghub/query?taskId=${encodeURIComponent(taskId)}&useWallet=${useWallet ? '1' : '0'}`).then(async r => {
             const json = await r.json();
             if(!r.ok || json.success === false) throw new Error(json.detail || json.error || tr('smart.rhFailed'));
             return json.data || json;
@@ -15582,6 +15674,15 @@ shell.onmousedown = e => {
     if(zoomPreviewState && e.button === 0 && !e.target.closest('.composer,.smart-back,.asset-panel,.asset-toggle,.smart-log-toggle,.smart-shortcut-toggle,.smart-workflow-toggle,.log-modal,.shortcut-modal,.image-edit-modal,.create-menu,.smart-minimap')) return;
     if(e.target.closest('.image-node,.composer,.smart-back,.asset-panel,.asset-toggle,.smart-log-toggle,.smart-shortcut-toggle,.smart-workflow-toggle,.log-modal,.shortcut-modal,.create-menu,.smart-minimap')) return;
     closeCreateMenu();
+    if(e.button === 0 && e.shiftKey){
+        e.preventDefault();
+        didPan = false;
+        connectionEraseState = {started:false, count:0, indices:new Set(), lastX:e.clientX, lastY:e.clientY, trail:[]};
+        shell.classList.add('connection-erasing');
+        updateConnectionEraseTrail(e);
+        eraseConnectionsAtPoint(e);
+        return;
+    }
     if(e.button === 0 && isRKeyDown){
         e.preventDefault();
         didPan = false;
@@ -15656,6 +15757,12 @@ window.onmousemove = e => {
     if(smartMinimapDrag){
         e.preventDefault();
         centerViewportOnWorldPoint(minimapEventToWorld(e));
+        return;
+    }
+    if(connectionEraseState){
+        e.preventDefault();
+        updateConnectionEraseTrail(e);
+        eraseConnectionsAlongPointer(e);
         return;
     }
     if(portDragState){
@@ -15924,6 +16031,14 @@ window.onmousemove = e => {
 window.onmouseup = e => {
     document.body.classList.remove('smart-node-drag');
     document.body.classList.remove('smart-node-resize');
+    if(connectionEraseState){
+        const changed = finishConnectionErase();
+        connectionEraseState = null;
+        shell.classList.remove('connection-erasing');
+        clearConnectionEraseTrail();
+        if(changed) scheduleSave();
+        return;
+    }
     if(portDragState){
         const drag = portDragState;
         portDragState = null;

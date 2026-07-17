@@ -2697,10 +2697,10 @@ function renderVideoToggleControl(key, label){
     return `<button type="button" class="setting-check ${on ? 'active' : ''}" data-toggle-param="${escapeHtml(key)}"><span class="check-box"></span><span>${escapeHtml(label)}</span></button>`;
 }
 function renderTempShUploadControl(){
-    return `<button type="button" class="smart-pill cloud-upload-pill" data-temp-sh-upload-video title="上传当前输入图片或视频到云端直链"><i data-lucide="upload-cloud"></i><span>上传云端</span></button>`;
+    return `<button type="button" class="smart-pill cloud-upload-pill" data-temp-sh-upload-video title="${escapeHtml(tr('smart.cloudUploadTip'))}"><i data-lucide="upload-cloud"></i><span>${escapeHtml(tr('smart.cloudUpload'))}</span></button>`;
 }
 function renderManualVideoUrlControl(){
-    return `<button type="button" class="smart-pill manual-video-url-pill" data-manual-video-url title="手动输入媒体 URL"><i data-lucide="link"></i><span>输入网址</span></button>`;
+    return `<button type="button" class="smart-pill manual-video-url-pill" data-manual-video-url title="${escapeHtml(tr('smart.manualMediaUrlTip'))}"><i data-lucide="link"></i><span>${escapeHtml(tr('smart.manualMediaUrl'))}</span></button>`;
 }
 // 可信素材模式：打开后可选择素材来源——素材库认证链接 / 自行上传云端 / 自行输入网址。
 function renderVideoTrustedAssetControl(){
@@ -11711,6 +11711,7 @@ function renderInputThumbsRow(node){
     const dedup = node ? visibleReferenceImagesFor(node) : [];
     const manualRefKeys = new Set(manualReferenceImagesFor(node).map(img => inputRefKey(img)));
     const addActive = mentionInsertMode === 'manual-ref';
+    const showCloudUpload = Boolean(node) && isApiLikeEngine(settings.engine) && settings.apiKind === 'video';
     // 仅当参考图集合/状态真正变化时才重建缩略图 DOM。否则每敲一个字都重建并重新解码所有图片，
     // 参考图多时会让输入框打字明显卡顿。
     const thumbsSignature = JSON.stringify({
@@ -11718,6 +11719,7 @@ function renderInputThumbsRow(node){
         items: dedup.map(img => `${inputRefKey(img)}@${img.url || ''}`),
         manual: [...manualRefKeys],
         add: addActive,
+        cloudUpload: showCloudUpload,
         mode: node ? smartImageMode(node) : ''
     });
     if(inputThumbsRow.dataset.thumbsSig === thumbsSignature) return;
@@ -11725,9 +11727,12 @@ function renderInputThumbsRow(node){
     inputThumbsRow.classList.toggle('has-items', Boolean(node));
     if(!node){ inputThumbsRow.innerHTML = ''; return; }
     const addButton = `<button class="input-thumb-add ${addActive ? 'active' : ''}" type="button" data-input-add-reference title="${escapeHtml(addActive ? '收起参考图' : '添加参考图')}" aria-label="${escapeHtml(addActive ? '收起参考图' : '添加参考图')}"><i data-lucide="image-plus"></i></button>`;
+    const mediaLinkButtons = showCloudUpload ? `${renderManualVideoUrlControl()}${renderTempShUploadControl()}` : '';
+    const actionsHtml = `<div class="input-thumb-actions">${addButton}${mediaLinkButtons}</div>`;
     if(!dedup.length){
-        inputThumbsRow.innerHTML = `<div class="input-thumb-list empty"></div><div class="input-thumb-actions">${addButton}</div>`;
+        inputThumbsRow.innerHTML = `<div class="input-thumb-list empty"></div>${actionsHtml}`;
         bindInputThumbReferenceActions();
+        bindInputThumbVideoActions();
         refreshIcons();
         return;
     }
@@ -11752,10 +11757,11 @@ function renderInputThumbsRow(node){
         const removeBtn = removable ? `<button class="input-thumb-remove" type="button" data-input-remove-reference="${escapeHtml(inputRefKey(img))}" title="删除参考图" aria-label="删除参考图">×</button>` : '';
         return `<div class="input-thumb ${isSelf ? 'input-self' : ''} ${removable ? 'input-manual-ref' : ''}" draggable="false" data-thumb-index="${i}" data-node-id="${escapeHtml(img.nodeId || '')}" data-image-index="${img.imageIndex ?? ''}" data-url="${escapeHtml(img.url || '')}" data-source-url="${escapeHtml(sourceUrl)}" title="${escapeHtml(`${img.name || tr('smart.inputNum').replace('{n}', String(i + 1))} · ${title}`)}">${inner}<span class="input-thumb-label">${escapeHtml(label)}</span>${removeBtn}</div>`;
     }).join('');
-    inputThumbsRow.innerHTML = `<div class="input-thumb-list">${thumbsHtml}${dedup.length > 1 ? `<span class="input-thumb-count">${escapeHtml(tr('smart.inputCount').replace('{n}', String(dedup.length)))}</span>` : ''}</div><div class="input-thumb-actions">${addButton}</div>`;
+    inputThumbsRow.innerHTML = `<div class="input-thumb-list">${thumbsHtml}${dedup.length > 1 ? `<span class="input-thumb-count">${escapeHtml(tr('smart.inputCount').replace('{n}', String(dedup.length)))}</span>` : ''}</div>${actionsHtml}`;
     bindSmartPreviewImageFallbacks(inputThumbsRow);
     bindInputThumbsDrag(node, dedup, manualRefKeys);
     bindInputThumbReferenceActions();
+    bindInputThumbVideoActions();
     refreshIcons();
 }
 function bindInputThumbReferenceActions(){

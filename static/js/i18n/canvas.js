@@ -77,6 +77,8 @@
         "canvas.logDetails": { zh: "日志详情", en: "Log Details" },
         "canvas.logOpenDetails": { zh: "双击查看日志详情", en: "Double-click to view log details" },
         "canvas.logCopyDetails": { zh: "复制全部详情", en: "Copy all details" },
+        "canvas.logCurlRequest": { zh: "脱敏输入请求（cURL / Bash）", en: "Redacted input request (cURL / Bash)" },
+        "canvas.logCopyCurl": { zh: "复制 cURL", en: "Copy cURL" },
         "canvas.logRequest": { zh: "请求快照", en: "Request Snapshot" },
         "canvas.logResponse": { zh: "响应摘要", en: "Response Summary" },
         "canvas.logPrompt": { zh: "提示词", en: "Prompt" },

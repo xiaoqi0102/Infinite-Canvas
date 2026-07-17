@@ -3064,6 +3064,17 @@ def canvas_video_result_urls(result):
         return []
     return [url for url in result.get("videos") or [] if url]
 
+def canvas_video_result_with_request_details(task_id: str, result):
+    if not isinstance(result, dict):
+        return result
+    with CANVAS_TASK_LOCK:
+        request_details = (CANVAS_TASKS.get(task_id) or {}).get("request_details")
+    if not isinstance(request_details, dict) or not request_details:
+        return result
+    merged = dict(result)
+    merged["request_details"] = request_details
+    return merged
+
 def canvas_video_upstream_task_id(task: Dict[str, Any]):
     for key in ("upstream_task_id", "submit_id", "video_id"):
         value = str((task or {}).get(key) or "").strip()
@@ -3251,6 +3262,7 @@ async def run_canvas_video_task(task_id: str, payload: Optional["CanvasVideoRequ
             "jimeng_pending": False,
         })
         return
+    result = canvas_video_result_with_request_details(task_id, result)
     update_canvas_video_task(task_id, {
         "status": "succeeded",
         "result": result,

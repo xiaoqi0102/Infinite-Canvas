@@ -11622,6 +11622,7 @@ async function runVideoNode(nodeId, opts={}){
             const outputUrls = canvasVideoOutputItems(result);
             if(!outputUrls.length) throw new Error(tr('canvas.videoFailed'));
             run.request = requestMetaFromResult(result);
+            run.requestDetails = result?.request_details || null;
             mergeGeneratedOutputs(node, outputUrls, Boolean(opts.cascade));
             addGenerationLog({run, outputs:outputUrls, runMs:nowMs() - startedAt});
             node.runStatus = 'done';
@@ -11648,6 +11649,7 @@ async function runVideoNode(nodeId, opts={}){
         if(status === 'aborted') throw cascadeAbortError(cascadeStopMessage());
         if(status === 'failed') throw new Error(node.runError || tr('canvas.videoFailed'));
     } catch(err) {
+        if(err?.requestDetails) run.requestDetails = err.requestDetails;
         const pending = pendingById(out, pendingId);
         if(pending && !(pending.failed && pending.recoverTaskId)){
             const meta = collectRunMeta(out, pendingId);
@@ -13153,6 +13155,9 @@ function generationLogRequestFields(run){
 }
 function generationLogRequestDetails(run){
     const detail = window.StudioGenerationLogDetail;
+    if(run?.requestDetails && typeof run.requestDetails === 'object'){
+        return detail?.sanitizeRequestDetails?.(run.requestDetails) || run.requestDetails;
+    }
     const snapshot = {method:'POST', endpoint:generationLogRequestEndpoint(run), parameters:generationLogRequestFields(run)};
     return detail?.sanitize?.(snapshot) || snapshot;
 }
@@ -13647,7 +13652,11 @@ async function waitCanvasVideoTaskResult(taskId, options={}){
         }
         const data = await res.json();
         if(data.status === 'succeeded') return data.result || data;
-        if(data.status === 'failed') throw new Error(data.error || tr('canvas.videoFailed'));
+        if(data.status === 'failed'){
+            const error = new Error(data.error || tr('canvas.videoFailed'));
+            error.requestDetails = data.request_details || null;
+            throw error;
+        }
         await sleep(5000);
     }
 }
@@ -13661,6 +13670,7 @@ function completeCanvasVideoTask(taskId, result){
         kind: 'video',
     };
     meta.run.request = requestMetaFromResult(result);
+    meta.run.requestDetails = result?.request_details || null;
     const outputUrls = canvasVideoOutputItems(result);
     if(!outputUrls.length){
         failCanvasVideoTask(taskId, tr('canvas.videoFailed'));
@@ -13684,6 +13694,7 @@ function failCanvasVideoTask(taskId, message, taskData={}){
     if(!found) return;
     const {out, pending} = found;
     const run = pending.run || {};
+    run.requestDetails = taskData?.request_details || run.requestDetails || null;
     const runMs = nowMs() - Number(pending.startedAt || nowMs());
     const recoverTaskId = taskData?.upstream_task_id || taskData?.task_id || taskData?.submit_id || pending.canvasTaskId || extractUpstreamTaskId(message);
     const gen = nodes.find(n => n.id === run?.node?.id);

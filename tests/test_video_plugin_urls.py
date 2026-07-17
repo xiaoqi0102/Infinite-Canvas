@@ -357,6 +357,58 @@ class VideoDownloadUrlTests(unittest.IsolatedAsyncioTestCase):
             ["https://litter.catbox.moe/example.jpg"],
         )
 
+    async def test_megabyai_reports_redacted_upstream_request_details(self):
+        client = _RecordingClient()
+        patches = []
+
+        async def publish(value):
+            raw = value.get("url") if isinstance(value, dict) else value
+            return f"https://media.example.com/{str(raw).rsplit('/', 1)[-1]}?token=signed-secret"
+
+        await megabyai.generate_megabyai_video(
+            client,
+            {
+                "model": "videos-mini",
+                "prompt": "图片和音频参考",
+                "duration": 5,
+                "aspect_ratio": "16:9",
+                "resolution": "720p",
+                "images": [{"url": "/assets/person.jpg"}],
+                "videos": ["/assets/action.mp4"],
+                "audios": ["/assets/voice.mp3"],
+            },
+            base_url="https://api.example.com/v1",
+            headers={"Authorization": "Bearer real-secret"},
+            progress=patches.append,
+            public_reference_url=publish,
+            save_video=self._save_video,
+            poll_timeout=1,
+            poll_interval=0,
+        )
+
+        details = next(item["request_details"] for item in patches if "request_details" in item)
+        self.assertEqual(details["method"], "POST")
+        self.assertEqual(details["url"], "https://api.example.com/v1/videos")
+        self.assertEqual(details["headers"]["Authorization"], "Bearer YOUR_API_KEY")
+        self.assertNotIn("real-secret", str(details))
+        self.assertEqual(
+            megabyai._request_preview_url("https://user:password@media.example.com/person.jpg?token=secret#frame"),
+            "https://media.example.com/person.jpg",
+        )
+        self.assertEqual(
+            details["body"],
+            {
+                "model": "videos-mini",
+                "prompt": "图片和音频参考",
+                "duration": 5,
+                "ratio": "16:9",
+                "resolution": "720p",
+                "referenceImages": ["https://media.example.com/person.jpg"],
+                "referenceVideos": ["https://media.example.com/action.mp4"],
+                "referenceAudios": ["https://media.example.com/voice.mp3"],
+            },
+        )
+
 
 class PublicReferenceSafetyTests(unittest.IsolatedAsyncioTestCase):
     @staticmethod

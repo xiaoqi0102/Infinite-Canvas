@@ -6940,6 +6940,9 @@ function smartGenerationLogRequestFields(run){
 }
 function smartGenerationLogRequestDetails(run){
     const detail = window.StudioGenerationLogDetail;
+    if(run?.requestDetails && typeof run.requestDetails === 'object'){
+        return detail?.sanitizeRequestDetails?.(run.requestDetails) || run.requestDetails;
+    }
     const snapshot = {method:'POST', endpoint:smartGenerationLogRequestEndpoint(run), parameters:smartGenerationLogRequestFields(run)};
     return detail?.sanitize?.(snapshot) || snapshot;
 }
@@ -14121,7 +14124,7 @@ async function generateUrlsForCurrentSettings(node, prompt, refs, runSettings=se
         if(taskIds.length){
             const settled = await Promise.all(taskIds.map(taskId => pollSmartCanvasVideoTask(taskId)));
             const urls = settled.flatMap(result => resultMediaUrls(result?.videos?.length ? result.videos : (result?.result || result))).filter(Boolean);
-            return {urls, kind:'video', taskIds};
+            return {urls, kind:'video', taskIds, requestDetails:settled.find(result => result?.request_details)?.request_details || null};
         }
         const urls = resultMediaUrls(taskResult);
         return {urls, kind:'video'};
@@ -14262,7 +14265,7 @@ async function runCascadeStepIntoNode(sourceNode, targetNode, inputRefs, ctx=sma
         const result = await generateUrlsForCurrentSettings(outputNode, prompt, request.refs || [], runSettings);
         if(!result.urls?.length) throw new Error(result.kind === 'video' ? tr('smart.errNoOutVideos') : tr('smart.errNoOutImages'));
         if(outpaintSize) delete requestNode.outpaintSize;
-        addSmartGenerationLog({run:{...runLog, kind:result.kind || logKind, taskIds:result.taskIds || []}, outputs:result.urls, runMs:nowMs() - runLogStart});
+        addSmartGenerationLog({run:{...runLog, kind:result.kind || logKind, taskIds:result.taskIds || [], requestDetails:result.requestDetails || runLog.requestDetails}, outputs:result.urls, runMs:nowMs() - runLogStart});
         const ext = result.kind === 'video' ? 'mp4' : result.kind === 'audio' ? 'mp3' : result.kind === 'text' ? 'txt' : 'png';
         const additions = result.urls.map((item, i) => {
             const url = typeof item === 'string' ? item : item?.url || '';
@@ -14397,7 +14400,7 @@ async function runLoopRoundIntoSlot(loopNode, rootNode, outputSlot, loopIndex, c
             runPath.states[edgeKey] = 'done';
             scheduleConnectionLayerRefresh();
         }
-        addSmartGenerationLog({run:{...runLog, kind:result.kind || logKind, taskIds:result.taskIds || []}, outputs:result.urls, runMs:nowMs() - runLogStart});
+        addSmartGenerationLog({run:{...runLog, kind:result.kind || logKind, taskIds:result.taskIds || [], requestDetails:result.requestDetails || runLog.requestDetails}, outputs:result.urls, runMs:nowMs() - runLogStart});
         return rememberRoundOutputs(ctx, outputSlot, additions);
     } catch(e) {
         if(handleJimengPendingSignal(outputSlot, e)){
@@ -15517,11 +15520,22 @@ async function pollSmartCanvasVideoTask(taskId){
                 if(!r.ok) throw new Error(await smartResponseErrorMessage(r, tr('smart.errRunFailed')));
                 return r.json();
             });
-            if(task.status === 'succeeded') return task.result || task;
+            if(task.status === 'succeeded'){
+                const result = task.result || task;
+                return task.request_details && result && typeof result === 'object'
+                    ? {...result, request_details:task.request_details}
+                    : result;
+            }
             if(task.status === 'failed'){
                 const recoverTaskId = task.upstream_task_id || task.submit_id || '';
-                if(recoverTaskId && !isSmartTerminalTaskError(task.error)) throw new ImageTaskRecoverSignal({taskId, recoverTaskId, providerId:task.provider_id, kind:'video', message:task.error || tr('smart.errRunFailed')});
-                throw new Error(task.error || tr('smart.errRunFailed'));
+                if(recoverTaskId && !isSmartTerminalTaskError(task.error)){
+                    const signal = new ImageTaskRecoverSignal({taskId, recoverTaskId, providerId:task.provider_id, kind:'video', message:task.error || tr('smart.errRunFailed')});
+                    signal.requestDetails = task.request_details || null;
+                    throw signal;
+                }
+                const error = new Error(task.error || tr('smart.errRunFailed'));
+                error.requestDetails = task.request_details || null;
+                throw error;
             }
         }
         throw new Error(tr('smart.errRunTimeout'));
@@ -15591,6 +15605,9 @@ async function resumeSmartPendingNode(node, logContext={}){
             const result = taskKind === 'video'
                 ? await pollSmartCanvasVideoTask(task.taskId)
                 : await pollSmartCanvasTask(task.taskId);
+            if(taskKind === 'video' && result?.request_details && logContext?.run){
+                logContext.run.requestDetails = result.request_details;
+            }
             const media = taskKind === 'video'
                 ? (result?.videos?.length ? result.videos : (result?.result || result))
                 : (result?.image_items?.length ? result.image_items : (result?.images?.length ? result.images : result));
@@ -15598,6 +15615,7 @@ async function resumeSmartPendingNode(node, logContext={}){
             render();
             scheduleSave();
         } catch(e) {
+            if(e?.requestDetails && logContext?.run) logContext.run.requestDetails = e.requestDetails;
             if(e && e.jimengPending && e.submitId){
                 node.pendingTasks = smartPendingTasks(node).filter(item => item.taskId !== task.taskId);
                 setNodeJimengPending(node, e);

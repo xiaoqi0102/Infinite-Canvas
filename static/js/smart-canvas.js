@@ -6887,10 +6887,61 @@ function smartRunPlatformLabel(run){
 }
 function smartRunRequestMeta(run){
     const s = run?.settings || {};
-    if(s.engine === 'comfy') return {workflow_json:s.comfyWorkflow || '', mode:s.comfyMode || 'text'};
-    if(s.engine === 'modelscope') return {backend:'Modelscope', model:s.msgenModel || '', custom_model:s.msCustomModel || ''};
-    if(run?.kind === 'video') return {provider_id:s.videoProvider || '', model:s.videoModel || '', duration:s.videoDuration || '', aspect_ratio:s.videoAspect || '', resolution:s.videoResolution || ''};
-    return {provider_id:s.provider_id || '', model:s.model || '', size:run?.size || '', quality:s.quality || '', n:s.count || 1};
+    const taskIds = Array.isArray(run?.taskIds) ? run.taskIds.filter(Boolean) : [];
+    let meta;
+    if(s.engine === 'comfy') meta = {workflow_json:s.comfyWorkflow || '', mode:s.comfyMode || 'text'};
+    else if(s.engine === 'modelscope') meta = {backend:'Modelscope', model:s.msgenModel || '', custom_model:s.msCustomModel || ''};
+    else if(s.engine === 'runninghub'){
+        const model = runningHubSelectedModel(s);
+        meta = model ? {provider_id:'runninghub', model} : {backend:'runninghub', config:s.rhConfigKey || ''};
+    }
+    else if(run?.kind === 'video') meta = {provider_id:s.videoProvider || '', model:s.videoModel || '', duration:s.videoDuration || '', aspect_ratio:s.videoAspect || '', resolution:s.videoResolution || ''};
+    else meta = {provider_id:s.provider_id || '', model:s.model || '', size:run?.size || '', quality:s.quality || '', n:s.count || 1};
+    if(taskIds.length) meta.task_ids = taskIds;
+    return meta;
+}
+function smartGenerationLogRequestEndpoint(run){
+    const settings = run?.settings || {};
+    if(settings.engine === 'comfy') return '/api/canvas-comfy-tasks';
+    if(settings.engine === 'modelscope'){
+        return settings.msgenModel === 'qwen_edit' ? '/api/angle/generate' : '/api/ms/generate';
+    }
+    if(settings.engine === 'runninghub'){
+        const selected = selectedRunningHubRef(settings);
+        if(selected?.kind === 'model') return '/api/canvas-image-tasks';
+        return selected?.kind === 'workflow' ? '/api/runninghub/workflow-submit' : '/api/runninghub/submit';
+    }
+    if(run?.kind === 'video' || (isApiLikeEngine(settings.engine) && settings.apiKind === 'video')) return '/api/canvas-video-tasks';
+    if(isApiLikeEngine(settings.engine)) return '/api/canvas-image-tasks';
+    return '';
+}
+function smartGenerationLogRequestFields(run){
+    const settings = run?.settings || {};
+    let keys = [];
+    if(settings.engine === 'comfy') keys = ['engine','comfyMode','comfyWorkflow','comfyParams','width','height','enhanceStrength'];
+    else if(settings.engine === 'modelscope') keys = ['engine','msgenModel','msCustomModel','msRatio','msResolution','msCustomRatio','msCustomSize','count'];
+    else if(settings.engine === 'runninghub') keys = ['engine','rhConfigKey','rhPayment','rhInstanceType','rhParams'];
+    else if(run?.kind === 'video' || settings.apiKind === 'video') keys = ['engine','apiKind','videoProvider','videoModel','videoDuration','videoAspect','videoResolution','videoEnhancePrompt','videoEnableUpsample','videoWatermark','videoCameraFixed','videoGenerateAudio','videoUseFrameRoles','videoMultimodal','videoTrustedAsset','videoTrustedSource','videoOfficialAssetImageNumbers'];
+    else keys = ['engine','apiKind','provider_id','model','quality','count','resolution','ratio','customRatio','customSize','customWidth','customHeight'];
+    const request = {};
+    keys.forEach(key => {
+        const value = settings[key];
+        if(value !== undefined && value !== null && value !== '') request[key] = value;
+    });
+    if(settings.engine === 'runninghub'){
+        const model = runningHubSelectedModel(settings);
+        if(model){
+            request.provider_id = 'runninghub';
+            request.model = model;
+        }
+    }
+    if(run?.size) request.size = run.size;
+    return request;
+}
+function smartGenerationLogRequestDetails(run){
+    const detail = window.StudioGenerationLogDetail;
+    const snapshot = {method:'POST', endpoint:smartGenerationLogRequestEndpoint(run), parameters:smartGenerationLogRequestFields(run)};
+    return detail?.sanitize?.(snapshot) || snapshot;
 }
 function smartRunSnapshot(node, prompt, refs=[], kind='image'){
     const settingsSnapshot = cloneSmartSettings(settings);
@@ -6928,6 +6979,7 @@ function addSmartGenerationLog({run, outputs=[], runMs=0, error=''}) {
         nodeType:run?.nodeType || 'smart-image',
         model:smartRunTaskLabel(run),
         request:smartRunRequestMeta(run),
+        requestDetails:smartGenerationLogRequestDetails(run),
         prompt:run?.prompt || '',
         outputs:outputItems,
         refs:run?.refs || [],
@@ -7040,7 +7092,7 @@ function renderSmartCanvasLog(){
             taskId ? `ID ${taskId}` : '',
             backend
         ].filter(Boolean);
-        return `<div class="log-item ${log.status === 'failed' ? 'failed' : ''}">
+        return `<div class="log-item ${log.status === 'failed' ? 'failed' : ''}" tabindex="0" title="${escapeAttr(tr('canvas.logOpenDetails'))}">
             <div class="log-main">
                 <div class="log-meta">
                     <span class="log-chip ${log.status === 'failed' ? 'status-failed' : 'status-ok'}">${escapeHtml(log.status === 'failed' ? tr('canvas.failed') : tr('canvas.success'))}</span>
@@ -7080,6 +7132,18 @@ function renderSmartCanvasLog(){
     };
     bindLogCopy('[data-prompt]', 'prompt');
     bindLogCopy('[data-error]', 'error');
+    smartLogList.querySelectorAll('.log-item').forEach((el, index) => {
+        const openDetail = event => {
+            if(event?.target?.closest?.('[data-url],[data-prompt],[data-error]')) return;
+            window.StudioGenerationLogDetail?.open?.(logs[index]);
+        };
+        el.addEventListener('dblclick', openDetail);
+        el.addEventListener('keydown', event => {
+            if(event.key !== 'Enter') return;
+            event.preventDefault();
+            openDetail(event);
+        });
+    });
     refreshIcons();
 }
 function openSmartCanvasLog(){
@@ -14057,7 +14121,7 @@ async function generateUrlsForCurrentSettings(node, prompt, refs, runSettings=se
         if(taskIds.length){
             const settled = await Promise.all(taskIds.map(taskId => pollSmartCanvasVideoTask(taskId)));
             const urls = settled.flatMap(result => resultMediaUrls(result?.videos?.length ? result.videos : (result?.result || result))).filter(Boolean);
-            return {urls, kind:'video'};
+            return {urls, kind:'video', taskIds};
         }
         const urls = resultMediaUrls(taskResult);
         return {urls, kind:'video'};
@@ -14068,7 +14132,7 @@ async function generateUrlsForCurrentSettings(node, prompt, refs, runSettings=se
         if(taskIds.length){
             const settled = await Promise.all(taskIds.map(taskId => pollSmartCanvasTask(taskId)));
             const urls = settled.flatMap(result => resultMediaUrls(result?.image_items?.length ? result.image_items : (result?.images?.length ? result.images : result))).filter(Boolean);
-            return {urls, kind:mediaKindForUrls(urls, 'image')};
+            return {urls, kind:mediaKindForUrls(urls, 'image'), taskIds};
         }
         const urls = resultMediaUrls(taskResult);
         return {urls, kind:mediaKindForUrls(urls, 'image')};
@@ -14198,7 +14262,7 @@ async function runCascadeStepIntoNode(sourceNode, targetNode, inputRefs, ctx=sma
         const result = await generateUrlsForCurrentSettings(outputNode, prompt, request.refs || [], runSettings);
         if(!result.urls?.length) throw new Error(result.kind === 'video' ? tr('smart.errNoOutVideos') : tr('smart.errNoOutImages'));
         if(outpaintSize) delete requestNode.outpaintSize;
-        addSmartGenerationLog({run:{...runLog, kind:result.kind || logKind}, outputs:result.urls, runMs:nowMs() - runLogStart});
+        addSmartGenerationLog({run:{...runLog, kind:result.kind || logKind, taskIds:result.taskIds || []}, outputs:result.urls, runMs:nowMs() - runLogStart});
         const ext = result.kind === 'video' ? 'mp4' : result.kind === 'audio' ? 'mp3' : result.kind === 'text' ? 'txt' : 'png';
         const additions = result.urls.map((item, i) => {
             const url = typeof item === 'string' ? item : item?.url || '';
@@ -14333,7 +14397,7 @@ async function runLoopRoundIntoSlot(loopNode, rootNode, outputSlot, loopIndex, c
             runPath.states[edgeKey] = 'done';
             scheduleConnectionLayerRefresh();
         }
-        addSmartGenerationLog({run:{...runLog, kind:result.kind || logKind}, outputs:result.urls, runMs:nowMs() - runLogStart});
+        addSmartGenerationLog({run:{...runLog, kind:result.kind || logKind, taskIds:result.taskIds || []}, outputs:result.urls, runMs:nowMs() - runLogStart});
         return rememberRoundOutputs(ctx, outputSlot, additions);
     } catch(e) {
         if(handleJimengPendingSignal(outputSlot, e)){
@@ -14739,6 +14803,7 @@ async function runGeneration(){
         if(isApiLikeEngine(settings.engine) || rhModelMode){
             const taskIds = Array.isArray(outImages?.taskIds) ? outImages.taskIds : [];
             if(!taskIds.length) throw new Error(tr('smart.errRunFailed'));
+            runLog.taskIds = taskIds.slice();
             const taskKind = outImages.kind || 'image';
             pendingNode.pendingTasks = taskIds.map(taskId => ({taskId, kind:taskKind, providerId:outImages.providerId, model:outImages.model}));
             pendingNode.pending = Math.max(taskIds.length, Number(pendingNode.pending || 0) || taskIds.length);

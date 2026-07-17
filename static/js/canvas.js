@@ -13125,6 +13125,37 @@ function requestMetaFromResult(result={}){
         seed: result.seed || '',
     };
 }
+function generationLogRequestEndpoint(run){
+    const node = run?.node || {};
+    if(run?.nodeType === 'generator') return '/api/canvas-image-tasks';
+    if(run?.nodeType === 'video') return '/api/canvas-video-tasks';
+    if(run?.nodeType === 'comfy' || run?.nodeType === 'ltxDirector') return '/api/canvas-comfy-tasks';
+    if(run?.nodeType === 'msgen') return node.msgenModel === 'qwen_edit' ? '/api/angle/generate' : '/api/ms/generate';
+    if(run?.nodeType === 'rh') return node.rhMode === 'workflow' ? '/api/runninghub/workflow-submit' : '/api/runninghub/submit';
+    return '';
+}
+function generationLogRequestFields(run){
+    const node = run?.node || {};
+    const fieldsByType = {
+        generator:['apiProvider','model','ratio','resolution','customRatio','customSize','customRatioWidth','customRatioHeight','customWidth','customHeight','quality','count'],
+        video:['apiProvider','model','duration','aspectRatio','resolution','enhancePrompt','enableUpsample','watermark','cameraFixed','generateAudio','useFrameRoles','multimodal','trustedAsset','trustedSource','officialAssetImageNumbers'],
+        msgen:['msgenModel','msCustomModel','msRatio','msResolution','msCustomRatio','msCustomSize','msWidth','msHeight','count','fitImage'],
+        comfy:['mode','comfyWorkflow','comfyParams','width','height','enhanceStrength'],
+        ltxDirector:['durationFrames','durationSeconds','frameRate','customWidth','customHeight','useCustomAudio','imgCompression','epsilon','divisibleBy','noiseSeed','ltxSegments'],
+        rh:['rhMode','rhPayment','webappId','workflowId','instanceType','rhParams']
+    };
+    const request = {};
+    (fieldsByType[run?.nodeType] || []).forEach(key => {
+        const value = node[key];
+        if(value !== undefined && value !== null && value !== '') request[key] = value;
+    });
+    return request;
+}
+function generationLogRequestDetails(run){
+    const detail = window.StudioGenerationLogDetail;
+    const snapshot = {method:'POST', endpoint:generationLogRequestEndpoint(run), parameters:generationLogRequestFields(run)};
+    return detail?.sanitize?.(snapshot) || snapshot;
+}
 function runPlatformLabel(run){
     const node = run?.node || {};
     if(run?.nodeType === 'generator') return providerById(node.apiProvider || 'comfly')?.name || node.apiProvider || 'API';
@@ -13162,6 +13193,7 @@ function addGenerationLog({run, outputs=[], runMs=0, error=''}) {
         nodeType:run?.nodeType || '',
         model:run?.taskLabel || runTaskLabel(run),
         request:run?.request || {},
+        requestDetails:generationLogRequestDetails(run),
         prompt:run?.prompt || '',
         modelPrompt:run?.modelPrompt || run?.prompt || '',
         outputs:(outputs || []).filter(Boolean),
@@ -13199,7 +13231,7 @@ function renderCanvasLog(){
             idText ? `ID ${idText}` : '',
             backendText,
         ].filter(Boolean);
-        return `<div class="log-item ${log.status === 'failed' ? 'failed' : ''}">
+        return `<div class="log-item ${log.status === 'failed' ? 'failed' : ''}" tabindex="0" title="${escapeAttr(tr('canvas.logOpenDetails'))}">
             <div class="log-main">
                 <div class="log-meta">
                     <span class="log-chip ${log.status === 'failed' ? 'status-failed' : 'status-ok'}">${escapeHtml(log.status === 'failed' ? tr('canvas.failed') : tr('canvas.success'))}</span>
@@ -13239,6 +13271,18 @@ function renderCanvasLog(){
     };
     bindCanvasLogCopy('[data-prompt]', 'prompt');
     bindCanvasLogCopy('[data-error]', 'error');
+    list.querySelectorAll('.log-item').forEach((el, index) => {
+        const openDetail = event => {
+            if(event?.target?.closest?.('[data-url],[data-prompt],[data-error]')) return;
+            window.StudioGenerationLogDetail?.open?.(logs[index]);
+        };
+        el.addEventListener('dblclick', openDetail);
+        el.addEventListener('keydown', event => {
+            if(event.key !== 'Enter') return;
+            event.preventDefault();
+            openDetail(event);
+        });
+    });
     refreshIcons();
 }
 async function importWorkflowAssetUrl(url, name='workflow'){

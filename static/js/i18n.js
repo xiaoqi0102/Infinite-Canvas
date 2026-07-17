@@ -1,5 +1,5 @@
 (function(){
-    const VERSION = '2026.07.17.4';
+    const VERSION = '2026.07.17.5';
     const scripts = [
         '/static/js/i18n-core.js',
         '/static/js/i18n/common.js',

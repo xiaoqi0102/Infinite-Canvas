@@ -12,7 +12,7 @@ VIDEO_SELECT_HTML = '''                                <div class="field-frame v
                                     <select id="videoRequestModeInput" title="视频接口">
                                         <option value="openai-videos-generations">视频：videos</option>
                                         <option value="openai-video-generations">视频：video</option>
-                                        <option value="sudashui-video-generations">视频：Sudashui</option>
+                                        <option value="sudashui-video-generations">Sudashui：Seedance</option>
                                     </select>
                                 </div>
 '''
@@ -1366,6 +1366,8 @@ def patch_html(text):
         "Video: /v1/video/generations": "视频：video",
         "视频：/v1/videos/generations": "视频：videos",
         "视频：/v1/video/generations": "视频：video",
+        "Video: Sudashui": "Sudashui: Seedance",
+        "视频：Sudashui": "Sudashui：Seedance",
     }
     for old, new in replacements.items():
         text = text.replace(old, new)
@@ -1373,7 +1375,7 @@ def patch_html(text):
         if 'value="sudashui-video-generations"' not in text:
             text = text.replace(
                 '                                        <option value="openai-video-generations">视频：video</option>\n',
-                '                                        <option value="openai-video-generations">视频：video</option>\n                                        <option value="sudashui-video-generations">视频：Sudashui</option>\n',
+                '                                        <option value="openai-video-generations">视频：video</option>\n                                        <option value="sudashui-video-generations">Sudashui：Seedance</option>\n',
                 1,
             )
         return text
@@ -1509,6 +1511,10 @@ def patch_js(text):
         "    return ['openai-videos-generations', 'openai-video-generations'].includes(mode) ? mode : 'openai-videos-generations';",
         "    if(['sudashui', 'sudashui-video'].includes(mode)) return 'sudashui-video-generations';\n    return ['openai-videos-generations', 'openai-video-generations', 'sudashui-video-generations'].includes(mode) ? mode : 'openai-videos-generations';",
     )
+    text = text.replace(
+        "if(normalized === 'sudashui-video-generations') return 'Sudashui /v1/video/generations';",
+        "if(normalized === 'sudashui-video-generations') return 'Sudashui: Seedance';",
+    )
 
     if "function videoRequestModeLabel" not in text:
         text = regex_replace(
@@ -1516,7 +1522,7 @@ def patch_js(text):
             r"(function imageRequestModeLabel\(mode\)\{\n(?:    .+\n)+?\}\n)",
             r'''\1function videoRequestModeLabel(mode){
     const normalized = normalizeVideoRequestMode(mode);
-    if(normalized === 'sudashui-video-generations') return 'Sudashui /v1/video/generations';
+    if(normalized === 'sudashui-video-generations') return 'Sudashui: Seedance';
     return normalized === 'openai-video-generations' ? '/v1/video/generations' : '/v1/videos/generations';
 }
 ''',
@@ -1527,7 +1533,7 @@ def patch_js(text):
     if "normalized === 'sudashui-video-generations'" not in text:
         text = text.replace(
             "    const normalized = normalizeVideoRequestMode(mode);\n    return normalized === 'openai-video-generations' ? '/v1/video/generations' : '/v1/videos/generations';",
-            "    const normalized = normalizeVideoRequestMode(mode);\n    if(normalized === 'sudashui-video-generations') return 'Sudashui /v1/video/generations';\n    return normalized === 'openai-video-generations' ? '/v1/video/generations' : '/v1/videos/generations';",
+            "    const normalized = normalizeVideoRequestMode(mode);\n    if(normalized === 'sudashui-video-generations') return 'Sudashui: Seedance';\n    return normalized === 'openai-video-generations' ? '/v1/video/generations' : '/v1/videos/generations';",
             1,
         )
 

@@ -3014,11 +3014,11 @@ function imageRequestModeLabel(mode){
 }
 function videoRequestModeLabel(mode){
     const normalized = normalizeVideoRequestMode(mode);
-    if(normalized === 'sudashui-video-generations') return tr('api.videoRequestModeSudashuiLabel') || 'Sudashui /v1/video/generations';
-    if(normalized === 'megabyai-v1-videos') return tr('api.videoRequestModeMegabyAiLabel') || 'MegabyAI /v1/videos';
+    if(normalized === 'sudashui-video-generations') return tr('api.videoRequestModeSudashuiLabel') || 'Sudashui: Seedance';
+    if(normalized === 'megabyai-v1-videos') return tr('api.videoRequestModeMegabyAiLabel') || 'MegabyAI: Seedance';
     if(normalized === 'geeknow-v1-videos') return tr('api.videoRequestModeGeekNowLabel') || 'GeekNow Kling / Grok';
     if(normalized === 'tudou-video') return tr('api.videoRequestModeTudouLabel') || 'Tudou Grok / Sora2';
-    if(normalized === 'aicost-video') return tr('api.videoRequestModeAICostLabel') || 'aicost Seedance / Grok / 通用兜底';
+    if(normalized === 'aicost-video') return tr('api.videoRequestModeAICostLabel') || 'aicost: Seedance / Grok';
     return normalized === 'openai-video-generations' ? '/v1/video/generations' : '/v1/videos/generations';
 }
 function isRunningHubContext(item, baseUrl=''){

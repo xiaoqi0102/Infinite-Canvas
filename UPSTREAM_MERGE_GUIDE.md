@@ -708,11 +708,11 @@ for file_path in files:
 
 ### 6.1 视频任务化
 
-- API 设置页能看到 “视频：videos”、“视频：video”、“视频：Sudashui” 和 “MegabyAI：/v1/videos”。
+- API 设置页能看到 “视频：videos”、“视频：video”、“Sudashui：Seedance” 和 “MegabyAI：Seedance”。
 - 选择 `视频：video` 后，提交接口应为 `/v1/video/generations`。
 - 选择 `视频：videos` 后，提交接口应为 `/v1/videos/generations`。
-- 选择 `视频：Sudashui` 后，提交接口仍为 `/v1/video/generations`，但外层只能包含 `model`、`prompt`、`duration`、`metadata`，且 `metadata.payload` 必须是字符串。
-- 选择 `MegabyAI：/v1/videos` 后，提交接口为 `/v1/videos`，查询接口为 `/v1/videos/{task_id}`，请求体使用 `ratio` 和 `referenceImages/referenceVideos/referenceAudios`。
+- 选择 `Sudashui：Seedance` 后，提交接口仍为 `/v1/video/generations`，但外层只能包含 `model`、`prompt`、`duration`、`metadata`，且 `metadata.payload` 必须是字符串。
+- 选择 `MegabyAI：Seedance` 后，提交接口为 `/v1/videos`，查询接口为 `/v1/videos/{task_id}`，请求体使用 `ratio` 和 `referenceImages/referenceVideos/referenceAudios`。
 - Sudashui 分辨率控件应只读显示模型推导结果，切换回旧协议后恢复原手动值；抓取上游请求时不得出现 `resolution`。
 - Sudashui 本地素材应自动上传到文件站，相同素材单任务只上传一次；公网 URL 不转存，上传失败时不得继续创建任务。
 - 普通画布视频节点运行后，输出节点出现 pending。

@@ -1,6 +1,12 @@
 """视频接口插件包。"""
 
-from .common import canonical_video_api_root, humanize_video_task_failure, resolve_video_download_url
+from .common import (
+    UnsafePublicUrlError,
+    canonical_video_api_root,
+    humanize_video_task_failure,
+    public_http_get,
+    resolve_video_download_url,
+)
 from .aicost import (
     AICOST_VIDEO_REQUEST_MODE,
     AICostProtocolError,
@@ -40,7 +46,9 @@ from .tudou import (
 __all__ = [
     "humanize_video_task_failure",
     "canonical_video_api_root",
+    "public_http_get",
     "resolve_video_download_url",
+    "UnsafePublicUrlError",
     "AICOST_VIDEO_REQUEST_MODE",
     "AICostProtocolError",
     "generate_aicost_video",

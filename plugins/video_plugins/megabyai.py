@@ -68,7 +68,7 @@ class MegabyAIProtocolError(Exception):
 
 
 ProgressCallback = Optional[Callable[[Dict[str, Any]], None]]
-PublicReferenceUrl = Callable[[str], Awaitable[str]]
+PublicReferenceUrl = Callable[[Any], Awaitable[str]]
 SaveVideo = Callable[[str], Awaitable[str]]
 
 
@@ -119,7 +119,7 @@ async def _public_reference_url(
     label: str,
     public_reference_url: PublicReferenceUrl,
 ) -> str:
-    text = str(value or "").strip()
+    text = _reference_text(value)
     if not text:
         return ""
     if text.startswith("asset://"):
@@ -128,10 +128,11 @@ async def _public_reference_url(
             f"MegabyAI {label}只支持公网 HTTP/HTTPS URL，不支持 asset:// 认证素材",
         )
     try:
-        url = str(await public_reference_url(text) or "").strip()
+        url = str(await public_reference_url(value) or "").strip()
     except Exception as exc:
         detail = getattr(exc, "detail", None) or str(exc)
-        raise MegabyAIProtocolError(400, f"MegabyAI {label}无法转换为公网 URL：{detail}") from exc
+        status_code = int(getattr(exc, "status_code", 400) or 400)
+        raise MegabyAIProtocolError(status_code, f"MegabyAI {label}无法转换为公网 URL：{detail}") from exc
     parsed = urllib.parse.urlsplit(url)
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
         raise MegabyAIProtocolError(400, f"MegabyAI {label}不是有效的公网 HTTP/HTTPS URL")
@@ -149,7 +150,7 @@ async def _reference_urls(
     limit: int,
     public_reference_url: PublicReferenceUrl,
 ) -> List[str]:
-    cleaned = [value for value in (values or []) if str(value or "").strip()]
+    cleaned = [value for value in (values or []) if _reference_text(value)]
     if len(cleaned) > limit:
         raise MegabyAIProtocolError(400, f"MegabyAI {label}最多支持 {limit} 个，当前为 {len(cleaned)} 个")
     return [
@@ -158,16 +159,26 @@ async def _reference_urls(
     ]
 
 
-def _request_images(request: Mapping[str, Any]) -> List[str]:
-    urls = []
+def _reference_text(value: Any) -> str:
+    if isinstance(value, Mapping):
+        value = value.get("url")
+    else:
+        value = getattr(value, "url", value)
+    return str(value or "").strip()
+
+
+def _request_images(request: Mapping[str, Any]) -> List[Dict[str, Any]]:
+    images = []
     for item in request.get("images") or []:
         if isinstance(item, Mapping):
             value = str(item.get("url") or "").strip()
+            if value:
+                images.append(dict(item))
         else:
             value = str(getattr(item, "url", "") or "").strip()
-        if value:
-            urls.append(value)
-    return urls
+            if value:
+                images.append({"url": value})
+    return images
 
 
 def _collect_urls(value: Any, urls: List[str], key_hint: str = "") -> None:

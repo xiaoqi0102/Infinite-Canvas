@@ -30,10 +30,12 @@ class _Response:
 class _RecordingClient:
     def __init__(self):
         self.posts = []
+        self.post_requests = []
         self.gets = []
 
     async def post(self, url, **kwargs):
         self.posts.append(url)
+        self.post_requests.append((url, kwargs))
         return _Response()
 
     async def get(self, url, **kwargs):
@@ -318,6 +320,43 @@ class VideoDownloadUrlTests(unittest.IsolatedAsyncioTestCase):
         for actual, expected in cases:
             self.assertEqual(actual, [expected])
 
+    async def test_megabyai_preserves_local_image_source_for_publication(self):
+        client = _RecordingClient()
+        reference = {
+            "url": "https://temp.sh/example/reference.png",
+            "originalLocalUrl": "/assets/reference.png",
+        }
+        received = []
+
+        async def publish(value):
+            received.append(value)
+            return "https://litter.catbox.moe/example.jpg"
+
+        await megabyai.generate_megabyai_video(
+            client,
+            {
+                "model": "videos-mini",
+                "prompt": "x",
+                "duration": 5,
+                "aspect_ratio": "16:9",
+                "resolution": "720p",
+                "images": [reference],
+            },
+            base_url="https://api.example.com",
+            headers={},
+            progress=None,
+            public_reference_url=publish,
+            save_video=self._save_video,
+            poll_timeout=1,
+            poll_interval=0,
+        )
+
+        self.assertEqual(received, [reference])
+        self.assertEqual(
+            client.post_requests[0][1]["json"]["referenceImages"],
+            ["https://litter.catbox.moe/example.jpg"],
+        )
+
 
 class PublicReferenceSafetyTests(unittest.IsolatedAsyncioTestCase):
     @staticmethod
@@ -407,6 +446,102 @@ class PublicReferenceSafetyTests(unittest.IsolatedAsyncioTestCase):
             "public.example",
         )
         self.assertFalse(kwargs["follow_redirects"])
+
+    async def test_megabyai_republishes_temp_link_from_original_local_image(self):
+        uploaded = {"url": "https://litter.catbox.moe/example.jpg"}
+        with (
+            patch(
+                "main.output_file_from_url",
+                side_effect=lambda value: (
+                    "D:/tmp/reference.png" if value == "/assets/reference.png" else None
+                ),
+            ),
+            patch("main.local_asset_public_url", return_value=""),
+            patch("main.upload_video_to_litterbox", new=AsyncMock(return_value=uploaded)) as upload,
+            patch(
+                "main.public_http_get",
+                new=AsyncMock(return_value=type("ImageResponse", (), {
+                    "status_code": 200,
+                    "headers": {"content-type": "image/jpeg"},
+                })()),
+            ),
+        ):
+            result = await main.megabyai_image_public_reference_url({
+                "url": "https://temp.sh/example/reference.png",
+                "originalLocalUrl": "/assets/reference.png",
+            })
+
+        self.assertEqual(result, uploaded["url"])
+        upload.assert_awaited_once_with("D:/tmp/reference.png", "/assets/reference.png")
+
+    async def test_megabyai_keeps_existing_image_host_without_reupload(self):
+        with patch("main.upload_video_to_litterbox", new=AsyncMock()) as upload:
+            result = await main.megabyai_image_public_reference_url({
+                "url": "https://litter.catbox.moe/example.jpg",
+                "originalLocalUrl": "/assets/reference.png",
+            })
+
+        self.assertEqual(result, "https://litter.catbox.moe/example.jpg")
+        upload.assert_not_awaited()
+
+    async def test_megabyai_rejects_uploaded_link_with_non_image_content_type(self):
+        response = type("FileResponse", (), {
+            "status_code": 200,
+            "headers": {"content-type": "application/octet-stream"},
+        })()
+        with (
+            patch(
+                "main.output_file_from_url",
+                return_value="D:/tmp/reference.png",
+            ),
+            patch("main.local_asset_public_url", return_value=""),
+            patch(
+                "main.upload_video_to_litterbox",
+                new=AsyncMock(return_value={"url": "https://litter.catbox.moe/example.png"}),
+            ),
+            patch("main.public_http_get", new=AsyncMock(return_value=response)),
+        ):
+            with self.assertRaisesRegex(main.HTTPException, "application/octet-stream"):
+                await main.megabyai_image_public_reference_url({
+                    "url": "https://temp.sh/example/reference.png",
+                    "originalLocalUrl": "/assets/reference.png",
+                })
+
+    async def test_megabyai_rejects_temp_link_without_local_image(self):
+        with patch("main.output_file_from_url", return_value=None):
+            with self.assertRaisesRegex(main.HTTPException, "temp.sh"):
+                await main.megabyai_image_public_reference_url(
+                    {"url": "https://temp.sh/example/reference.png"}
+                )
+
+    async def test_megabyai_reference_failure_happens_before_submit(self):
+        client = _RecordingClient()
+
+        async def reject_reference(_value):
+            raise main.HTTPException(status_code=502, detail="invalid image content type")
+
+        with self.assertRaises(megabyai.MegabyAIProtocolError) as captured:
+            await megabyai.generate_megabyai_video(
+                client,
+                {
+                    "model": "videos-mini",
+                    "prompt": "x",
+                    "duration": 5,
+                    "aspect_ratio": "16:9",
+                    "resolution": "720p",
+                    "images": [{"url": "https://temp.sh/example/reference.png"}],
+                },
+                base_url="https://api.example.com",
+                headers={},
+                progress=None,
+                public_reference_url=reject_reference,
+                save_video=AsyncMock(return_value="/output/video.mp4"),
+                poll_timeout=1,
+                poll_interval=0,
+            )
+
+        self.assertEqual(captured.exception.status_code, 502)
+        self.assertEqual(client.posts, [])
 
 
 class CanvasVideoTaskPersistenceTests(unittest.IsolatedAsyncioTestCase):

@@ -49,6 +49,7 @@ from plugins.video_plugins import (
     SudashuiProtocolError,
     TUDOU_VIDEO_REQUEST_MODE,
     TudouProtocolError,
+    UnsafePublicUrlError,
     canonical_video_api_root,
     generate_aicost_video,
     generate_geeknow_video,
@@ -60,6 +61,7 @@ from plugins.video_plugins import (
     is_geeknow_official_provider,
     is_megabyai_official_provider,
     is_tudou_official_provider,
+    public_http_get,
     resume_aicost_video,
     resume_geeknow_video,
     resume_megabyai_video,
@@ -8911,6 +8913,107 @@ async def openai_video_proxy_public_reference_url(ref) -> str:
         )
     raise HTTPException(status_code=400, detail=f"参考图不是公网 URL，无法传给上游：{text[:160]}")
 
+
+async def megabyai_image_public_reference_url(ref) -> str:
+    """为 MegabyAI 生成可被上游识别为图片的公网引用。"""
+    if not isinstance(ref, dict):
+        return await openai_video_proxy_public_reference_url(ref)
+
+    item = ref
+    raw = item.get("url", "")
+    text = str(raw or "").strip()
+    try:
+        parsed = urllib.parse.urlsplit(text)
+        host = (parsed.hostname or "").lower()
+    except Exception:
+        parsed = urllib.parse.SplitResult("", "", "", "", "")
+        host = ""
+    is_temp_sh = host == "temp.sh" or host.endswith(".temp.sh")
+    is_private_host = host in {"127.0.0.1", "localhost", "::1"} or bool(
+        re.match(r"^(192\.168\.|10\.|172\.(1[6-9]|2\d|3[01])\.)", host)
+    )
+    if parsed.scheme in {"http", "https"} and not is_temp_sh and not is_private_host:
+        return await openai_video_proxy_public_reference_url(text)
+
+    local_url = ""
+    local_path = ""
+    for candidate in (
+        item.get("originalLocalUrl"),
+        item.get("sourceUrl"),
+        item.get("original_local_url"),
+        item.get("source_url"),
+        text,
+    ):
+        candidate = str(candidate or "").strip()
+        path = output_file_from_url(candidate) if candidate else ""
+        if path:
+            local_url = candidate
+            local_path = path
+            break
+
+    if local_url:
+        mime = content_type_for_path(local_path).split(";", 1)[0].strip().lower()
+        if mime not in {"image/jpeg", "image/png", "image/webp"}:
+            raise HTTPException(
+                status_code=400,
+                detail="MegabyAI 参考图仅支持 JPG、PNG 或 WEBP，请转换格式后重试。",
+            )
+        public_url = local_asset_public_url(local_url)
+        if public_url:
+            return public_url
+        upload_error = None
+        uploaded = None
+        for attempt in range(3):
+            try:
+                uploaded = await upload_video_to_litterbox(local_path, local_url)
+                break
+            except HTTPException as exc:
+                upload_error = exc
+                retryable = exc.status_code == 429 or exc.status_code >= 500
+                if not retryable or attempt == 2:
+                    break
+                await asyncio.sleep(2 ** attempt)
+        if not uploaded:
+            detail = str(getattr(upload_error, "detail", None) or "未知错误")
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    "MegabyAI 参考图无法上传为标准图片直链："
+                    f"{detail[:240]}。已停止创建视频任务，避免素材类型错误和重复扣费。"
+                ),
+            ) from upload_error
+        url = str((uploaded or {}).get("url") or "").strip()
+        if not url.startswith(("http://", "https://")):
+            raise HTTPException(status_code=502, detail="MegabyAI 参考图上传后未返回有效公网 URL")
+        try:
+            response = await public_http_get(url, timeout=60.0)
+        except (UnsafePublicUrlError, httpx.HTTPError) as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"MegabyAI 参考图直链验证失败：{str(exc)[:240]}",
+            ) from exc
+        content_type = str(response.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
+        if response.status_code >= 400 or content_type not in {"image/jpeg", "image/png", "image/webp"}:
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    "MegabyAI 参考图直链返回了不受支持的响应："
+                    f"HTTP {response.status_code}，Content-Type={content_type or '(empty)'}"
+                ),
+            )
+        return url
+
+    if is_temp_sh:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "MegabyAI 不接受当前 temp.sh 参考图的响应类型，且本地原图已不可用。"
+                "请重新连接原图后再生成。"
+            ),
+        )
+    return await openai_video_proxy_public_reference_url(text)
+
+
 def openai_video_proxy_local_image_path(ref) -> str:
     raw = ref.get("url", "") if isinstance(ref, dict) else ref
     text = str(raw or "").strip()
@@ -15523,7 +15626,11 @@ async def build_canvas_video_result(payload: CanvasVideoRequest, progress=None):
                         base_url=base_url,
                         headers=api_headers(json_body=False, provider=provider),
                         progress=progress,
-                        public_reference_url=lambda value: openai_video_proxy_public_reference_url(value),
+                        public_reference_url=(
+                            megabyai_image_public_reference_url
+                            if is_megabyai_provider(provider)
+                            else lambda value: openai_video_proxy_public_reference_url(value)
+                        ),
                         save_video=lambda url: save_remote_video_to_output(url, provider=provider),
                         poll_timeout=VIDEO_POLL_TIMEOUT,
                         poll_interval=video_poll_interval(provider),

@@ -31,6 +31,7 @@ _FAILURE_STATUSES = {
     "FAILURE", "FAILED", "FAIL", "ERROR", "ERRORED",
     "CANCELED", "CANCELLED", "TIMEOUT", "TIMEDOUT", "REJECTED", "EXPIRED",
 }
+_TRANSIENT_QUERY_HTTP_STATUSES = {408, 425, 429}
 _URL_KEYS = {
     "url", "video_url", "videoUrl", "mp4_url", "mp4Url",
     "output", "result", "content", "video",
@@ -297,6 +298,27 @@ def _is_terminal_error(value: Any) -> bool:
     return bool(text) and any(re.search(pattern, text, re.IGNORECASE) for pattern in _TERMINAL_ERROR_PATTERNS)
 
 
+def megabyai_video_task_retryable(task: Any) -> bool:
+    """识别被旧轮询逻辑误写为失败、但仍可安全恢复查询的任务。"""
+    if not isinstance(task, Mapping):
+        return False
+    error = str(task.get("error") or "").strip()
+    if not error.startswith("MegabyAI 视频任务查询失败："):
+        return False
+    try:
+        status_code = int(task.get("status_code") or 0)
+    except (TypeError, ValueError):
+        status_code = 0
+    if status_code and status_code not in _TRANSIENT_QUERY_HTTP_STATUSES and status_code < 500:
+        return False
+    raw_last = task.get("raw_last")
+    if isinstance(raw_last, Mapping):
+        state = _status(raw_last)
+        if state in _FAILURE_STATUSES or _is_terminal_error(raw_last):
+            return False
+    return True
+
+
 def _failure_reason(payload: Mapping[str, Any]) -> str:
     values: List[str] = []
 
@@ -434,8 +456,14 @@ async def _poll_video(
             await asyncio.sleep(min(delay, max(0.0, deadline - time.monotonic())))
         try:
             response = await client.get(status_url, headers=dict(headers))
-        except httpx.TransportError as exc:
-            raise MegabyAIProtocolError(502, f"MegabyAI 视频任务查询失败：{exc}") from exc
+        except (httpx.TransportError, TimeoutError) as exc:
+            delay = max(float(poll_interval), delay)
+            _report(progress, {
+                "status": "polling",
+                "message": f"MegabyAI 视频任务查询暂时失败，将自动重试：{str(exc).strip() or type(exc).__name__}",
+                "next_poll_at": time.time() + delay,
+            })
+            continue
         retry_after = _retry_after_seconds(response, poll_timeout)
         if response.status_code >= 400:
             try:
@@ -447,11 +475,12 @@ async def _poll_video(
                     response.status_code,
                     humanize_video_task_failure(_failure_reason(error_payload)),
                 )
-            if retry_after:
-                delay = max(float(poll_interval), retry_after)
+            if response.status_code in _TRANSIENT_QUERY_HTTP_STATUSES or response.status_code >= 500:
+                delay = max(float(poll_interval), retry_after or 0.0)
                 last_payload = error_payload if isinstance(error_payload, dict) else {"error": error_payload}
                 _report(progress, {
                     "status": "polling",
+                    "message": f"MegabyAI 视频任务查询暂时失败（HTTP {response.status_code}），将自动重试",
                     "retry_after": retry_after,
                     "next_poll_at": time.time() + delay,
                     "raw_last": last_payload,

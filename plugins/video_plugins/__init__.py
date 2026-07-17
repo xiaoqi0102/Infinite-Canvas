@@ -26,6 +26,7 @@ from .megabyai import (
     MegabyAIProtocolError,
     generate_megabyai_video,
     is_megabyai_official_provider,
+    megabyai_video_task_retryable,
     resume_megabyai_video,
 )
 from .sudashui import (
@@ -63,6 +64,7 @@ __all__ = [
     "MegabyAIProtocolError",
     "generate_megabyai_video",
     "is_megabyai_official_provider",
+    "megabyai_video_task_retryable",
     "resume_megabyai_video",
     "SUDASHUI_VIDEO_REQUEST_MODE",
     "SudashuiProtocolError",

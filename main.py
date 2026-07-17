@@ -61,6 +61,7 @@ from plugins.video_plugins import (
     is_geeknow_official_provider,
     is_megabyai_official_provider,
     is_tudou_official_provider,
+    megabyai_video_task_retryable,
     public_http_get,
     resume_aicost_video,
     resume_geeknow_video,
@@ -3085,6 +3086,23 @@ def canvas_video_upstream_task_id(task: Dict[str, Any]):
         return legacy_task_id
     return ""
 
+
+def canvas_video_failed_task_resumable(task: Dict[str, Any]) -> bool:
+    if str((task or {}).get("status") or "").strip().lower() != "failed":
+        return False
+    if not canvas_video_upstream_task_id(task):
+        return False
+    try:
+        provider = get_api_provider_exact(str(task.get("provider_id") or "").strip())
+    except Exception:
+        return False
+    if is_sudashui_video_generations_mode(provider):
+        return sudashui_video_task_pending(task.get("raw_last"))
+    if is_megabyai_video_mode(provider):
+        return megabyai_video_task_retryable(task)
+    return False
+
+
 async def resume_canvas_video_task_result(task_id: str):
     with CANVAS_TASK_LOCK:
         task = dict(CANVAS_TASKS.get(task_id) or {})
@@ -3283,17 +3301,7 @@ async def resume_canvas_video_tasks_on_startup():
     for task_id, task in restored.items():
         status = str(task.get("status") or "").strip().lower()
         if status in CANVAS_VIDEO_TERMINAL_STATUSES:
-            recover_failed_sudashui = False
-            if status == "failed" and canvas_video_upstream_task_id(task):
-                try:
-                    provider = get_api_provider_exact(str(task.get("provider_id") or "").strip())
-                    recover_failed_sudashui = (
-                        is_sudashui_video_generations_mode(provider)
-                        and sudashui_video_task_pending(task.get("raw_last"))
-                    )
-                except Exception:
-                    recover_failed_sudashui = False
-            if not recover_failed_sudashui:
+            if not canvas_video_failed_task_resumable(task):
                 continue
         if status not in CANVAS_VIDEO_RESUMABLE_STATUSES:
             if status != "failed":
@@ -16133,6 +16141,14 @@ async def get_canvas_video_task(task_id: str):
             task = dict(CANVAS_TASKS.get(task_id) or {})
     if not task:
         raise HTTPException(status_code=404, detail="视频任务不存在，可能服务已重启或任务已过期")
+    if canvas_video_failed_task_resumable(task):
+        task = update_canvas_video_task(task_id, {
+            "status": "polling",
+            "error": "",
+            "message": "正在恢复视频任务查询",
+            "status_code": None,
+        })
+        asyncio.create_task(run_canvas_video_task(task_id, resume=True))
     return task
 
 # --- Canvas LLM ---

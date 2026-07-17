@@ -2,6 +2,8 @@ import os
 import unittest
 from unittest.mock import AsyncMock, patch
 
+import httpx
+
 os.environ.setdefault("INFINITE_CANVAS_SKIP_STATIC_SYNC", "1")
 
 import main
@@ -41,6 +43,19 @@ class _RecordingClient:
     async def get(self, url, **kwargs):
         self.gets.append(url)
         return _Response()
+
+
+class _SequenceClient:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.gets = []
+
+    async def get(self, url, **kwargs):
+        self.gets.append(url)
+        item = self.responses.pop(0)
+        if isinstance(item, BaseException):
+            raise item
+        return item
 
 
 class _AsyncClientContext:
@@ -154,6 +169,35 @@ class VideoApiRootTests(unittest.TestCase):
             main.video_task_url_candidates(provider, root, "task/id"),
             ["https://www.aicost.xyz/v1/videos/task%2Fid"],
         )
+
+
+    def test_legacy_megabyai_query_failure_is_resumable_without_business_failure(self):
+        task = {
+            "status": "failed",
+            "provider_id": "megabyai-test",
+            "upstream_task_id": "videos-mini_task-id",
+            "error": "MegabyAI 视频任务查询失败：temporary gateway error",
+            "raw_last": {"status": "in_progress", "progress": 30, "error": None},
+        }
+        provider = {
+            "id": "megabyai-test",
+            "base_url": "https://cn.megabyai.cc",
+            "video_request_mode": main.MEGABYAI_VIDEO_REQUEST_MODE,
+        }
+        with patch.object(main, "get_api_provider_exact", return_value=provider):
+            self.assertTrue(main.canvas_video_failed_task_resumable(task))
+
+        task["status_code"] = 401
+        with patch.object(main, "get_api_provider_exact", return_value=provider):
+            self.assertFalse(main.canvas_video_failed_task_resumable(task))
+
+        task["status_code"] = 502
+        task["raw_last"] = {
+            "status": "failed",
+            "error": {"code": "generation_failed", "message": "generation failed"},
+        }
+        with patch.object(main, "get_api_provider_exact", return_value=provider):
+            self.assertFalse(main.canvas_video_failed_task_resumable(task))
 
 
 class VideoDownloadUrlTests(unittest.IsolatedAsyncioTestCase):
@@ -408,6 +452,79 @@ class VideoDownloadUrlTests(unittest.IsolatedAsyncioTestCase):
                 "referenceAudios": ["https://media.example.com/voice.mp3"],
             },
         )
+
+
+    async def test_megabyai_retries_transport_error_until_completed(self):
+        request = httpx.Request("GET", "https://api.example.com/v1/videos/task-id")
+        client = _SequenceClient([
+            httpx.ConnectError("temporary disconnect", request=request),
+            httpx.Response(200, json={"status": "in_progress", "progress": 30}),
+            httpx.Response(200, json={
+                "status": "completed",
+                "video_url": "https://api.example.com/v1/videos/task-id/content",
+            }),
+        ])
+        patches = []
+
+        result = await megabyai.resume_megabyai_video(
+            client,
+            "task-id",
+            base_url="https://api.example.com",
+            headers={},
+            progress=patches.append,
+            save_video=self._save_video,
+            poll_timeout=1,
+            poll_interval=0,
+        )
+
+        self.assertEqual(result["videos"], ["/output/video.mp4"])
+        self.assertEqual(len(client.gets), 3)
+        self.assertTrue(any("自动重试" in item.get("message", "") for item in patches))
+        self.assertFalse(any(item.get("status") == "failed" for item in patches))
+
+    async def test_megabyai_retries_503_without_retry_after(self):
+        client = _SequenceClient([
+            httpx.Response(503, json={"error": "gateway unavailable"}),
+            httpx.Response(200, json={
+                "status": "completed",
+                "metadata": {"content_url": "https://api.example.com/v1/videos/task-id/content"},
+            }),
+        ])
+
+        result = await megabyai.resume_megabyai_video(
+            client,
+            "task-id",
+            base_url="https://api.example.com",
+            headers={},
+            progress=None,
+            save_video=self._save_video,
+            poll_timeout=1,
+            poll_interval=0,
+        )
+
+        self.assertEqual(result["videos"], ["/output/video.mp4"])
+        self.assertEqual(len(client.gets), 2)
+
+    async def test_megabyai_does_not_retry_unauthorized_query(self):
+        client = _SequenceClient([
+            httpx.Response(401, json={"error": "invalid token"}),
+            httpx.Response(200, json={"status": "completed"}),
+        ])
+
+        with self.assertRaises(megabyai.MegabyAIProtocolError) as captured:
+            await megabyai.resume_megabyai_video(
+                client,
+                "task-id",
+                base_url="https://api.example.com",
+                headers={},
+                progress=None,
+                save_video=self._save_video,
+                poll_timeout=1,
+                poll_interval=0,
+            )
+
+        self.assertEqual(captured.exception.status_code, 401)
+        self.assertEqual(len(client.gets), 1)
 
 
 class PublicReferenceSafetyTests(unittest.IsolatedAsyncioTestCase):

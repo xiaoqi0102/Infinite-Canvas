@@ -178,13 +178,13 @@ const RECOMMENDED_APIS = [
         category:'value',
         base_url:'https://www.fhl.mom',
         protocol:'openai',
-        // FHL 生图当前走 OpenAI Images 协议：文生图 /v1/images/generations，图生图 /v1/images/edits
-        image_request_mode:'openai',
+        // FHL 生图走 OpenAI Responses / image_generation，避免 edits 长任务返回半截 keepalive。
+        image_request_mode:'openai-responses',
         register_url:'https://www.fhl.mom/register?aff=86L574B4T2N9',
         tagKeys:['Codex','Claude','api.tagGptImage2'],
         icons:['CODEX','GPT','IMG'],
         summaryKey:'api.recommendFhlSummary',
-        advantages:['稳定便宜接入 codex/Claude/GPT Image 2出图', 'OpenAI Images 生图直连', '预填 gpt-image-2 全系模型'],
+        advantages:['稳定便宜接入 codex/Claude/GPT Image 2出图', 'OpenAI RS 生图直连', '预填 gpt-image-2 全系模型'],
         image_models:['gpt-image-2', 'gpt-image-2-2k', 'gpt-image-2-4k', 'nano-banana'],
         chat_models:['gpt-5.5'],
         video_models:[]

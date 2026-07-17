@@ -2060,6 +2060,13 @@ function screenToWorld(event){
         y:(event.clientY - rect.top - viewport.y) / viewport.scale
     };
 }
+function canvasWheelZoomFactor(event, pageSize){
+    const unit = event.deltaMode === 1 ? 40 : event.deltaMode === 2 ? pageSize : 1;
+    const isMac = /^Mac/.test(navigator.platform || '');
+    const sensitivity = 0.0008;
+    const macMultiplier = isMac ? 1.15 : 1;
+    return Math.exp(-event.deltaY * unit * sensitivity * macMultiplier);
+}
 function viewportCenter(){
     return {
         x:(shell.clientWidth / 2 - viewport.x) / viewport.scale,
@@ -16116,7 +16123,7 @@ shell.addEventListener('wheel', e => {
     const sx = e.clientX - rect.left;
     const sy = e.clientY - rect.top;
     const before = {x:(sx - viewport.x) / viewport.scale, y:(sy - viewport.y) / viewport.scale};
-    const factor = Math.exp(-e.deltaY * 0.001);
+    const factor = canvasWheelZoomFactor(e, shell.clientHeight || window.innerHeight || 800);
     viewport.scale = safeScale(viewport.scale * factor);
     viewport.x = sx - before.x * viewport.scale;
     viewport.y = sy - before.y * viewport.scale;

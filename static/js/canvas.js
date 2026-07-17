@@ -1141,6 +1141,13 @@ function screenToWorld(clientX, clientY){
     const rect = board.getBoundingClientRect();
     return { x:(clientX - rect.left - viewport.x) / viewport.scale, y:(clientY - rect.top - viewport.y) / viewport.scale };
 }
+function canvasWheelZoomFactor(event, pageSize){
+    const unit = event.deltaMode === 1 ? 40 : event.deltaMode === 2 ? pageSize : 1;
+    const isMac = /^Mac/.test(navigator.platform || '');
+    const sensitivity = 0.0008;
+    const macMultiplier = isMac ? 1.15 : 1;
+    return Math.exp(-event.deltaY * unit * sensitivity * macMultiplier);
+}
 function applyViewport(){
     world.style.transform = `translate(${viewport.x}px, ${viewport.y}px) scale(${viewport.scale})`;
     scheduleMinimapRender();
@@ -14584,7 +14591,7 @@ board.onwheel = e => {
     if(!canvas) return;
     e.preventDefault();
     const before = screenToWorld(e.clientX, e.clientY);
-    viewport.scale = viewport.scale * (e.deltaY > 0 ? .92 : 1.08);
+    viewport.scale = safeViewportScale(viewport.scale * canvasWheelZoomFactor(e, board.clientHeight || window.innerHeight || 800));
     const rect = board.getBoundingClientRect();
     viewport.x = e.clientX - rect.left - before.x * viewport.scale;
     viewport.y = e.clientY - rect.top - before.y * viewport.scale;

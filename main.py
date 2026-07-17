@@ -1189,7 +1189,7 @@ LOCKED_RECOMMENDED_PROVIDER_RULES = {
         "names": {"fhl"},
         "base_urls": {"https://www.fhl.mom"},
         "protocol": "openai",
-        "image_request_mode": "openai",
+        "image_request_mode": "openai-responses",
         "video_models": [],
     },
 }
@@ -4329,6 +4329,15 @@ def effective_protocol(provider, model=""):
 def is_apimart_provider(provider):
     base_url = str((provider or {}).get("base_url") or "").lower()
     return provider_protocol(provider) == "apimart" or "apimart.ai" in base_url
+
+def is_fhl_provider(provider):
+    base_url = str((provider or {}).get("base_url") or "").strip().lower()
+    name = str((provider or {}).get("name") or "").strip().lower()
+    try:
+        host = urllib.parse.urlsplit(base_url).netloc.lower()
+    except Exception:
+        host = ""
+    return host in {"www.fhl.mom", "fhl.mom"} or name in {"fhl", "fhl-image"}
 
 def detect_image_request_mode(base_url="", models=None):
     base = str(base_url or "").strip().lower()
@@ -10527,31 +10536,31 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
             local_image_paths = [openai_video_proxy_local_image_path(ref) for ref in refs_for_proxy]
             has_local_images = any(local_image_paths)
             if has_local_images:
-                form_data = [(key, value) for key, value in body.items()]
+                form_data = {key: value for key, value in body.items()}
                 for ref, local_path in zip(refs_for_proxy, local_image_paths):
                     if local_path:
                         continue
                     url = await openai_video_proxy_public_reference_url(ref)
                     if url:
-                        form_data.append(("images", url))
+                        existing_images = form_data.get("images")
+                        if isinstance(existing_images, list):
+                            existing_images.append(url)
+                        elif existing_images:
+                            form_data["images"] = [existing_images, url]
+                        else:
+                            form_data["images"] = url
                 files = []
-                opened = []
-                try:
-                    for local_path in local_image_paths:
-                        if not local_path:
-                            continue
-                        fh = open(local_path, "rb")
-                        opened.append(fh)
-                        files.append(("images", (os.path.basename(local_path), fh, content_type_for_path(local_path))))
-                    response = await client.post(
-                        video_url,
-                        headers=api_headers(json_body=False, provider=provider, model=model),
-                        data=form_data,
-                        files=files,
-                    )
-                finally:
-                    for fh in opened:
-                        fh.close()
+                for local_path in local_image_paths:
+                    if not local_path:
+                        continue
+                    with open(local_path, "rb") as fh:
+                        content = fh.read()
+                    files.append(("images", (os.path.basename(local_path), content, content_type_for_path(local_path))))
+                headers = api_headers(json_body=False, provider=provider, model=model)
+                def post_video_proxy_multipart():
+                    with httpx.Client(timeout=request_timeout) as sync_client:
+                        return sync_client.post(video_url, headers=headers, data=form_data, files=files)
+                response = await asyncio.to_thread(post_video_proxy_multipart)
             else:
                 if refs_for_proxy:
                     body["images"] = [await openai_video_proxy_public_reference_url(ref) for ref in refs_for_proxy]
@@ -10684,8 +10693,29 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
             )
             if response.status_code >= 400 and images_api_unsupported(response):
                 response = await post_openai_edits()
-        response.raise_for_status()
-        raw = response.json()
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            resp_text = (exc.response.text or "")[:800]
+            provider_name = provider.get("name") or provider["id"]
+            raise HTTPException(
+                status_code=exc.response.status_code,
+                detail=f"{provider_name} 图片接口错误（HTTP {exc.response.status_code}）：{resp_text or exc.response.reason_phrase}"
+            ) from exc
+        try:
+            raw = response.json()
+        except Exception as exc:
+            resp_text = (response.text or "")[:800]
+            provider_name = provider.get("name") or provider["id"]
+            if is_fhl_provider(provider) and "_worker_keepalive" in resp_text:
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"{provider_name} 图片接口返回了未完成的 keepalive 响应，未返回图片数据。请重试或降低尺寸；响应片段：{resp_text[:200]}"
+                ) from exc
+            raise HTTPException(
+                status_code=502,
+                detail=f"{provider_name} 图片接口返回非 JSON 响应（状态 {response.status_code}）：{resp_text}"
+            ) from exc
         try:
             return extract_image(raw), raw
         except HTTPException as exc:

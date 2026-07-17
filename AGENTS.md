@@ -190,6 +190,7 @@ git diff --name-only --diff-filter=U
 
 - 提交前还必须运行与变更范围匹配的项目验证。必要检查失败时停止，不得提交或推送；提交后使用 `git show --stat --oneline HEAD` 复核范围。
 - 当用户明确要求“推送”但没有指定目标分支时，默认将已完成并通过验证的任务分支合并回本地 `main`，再推送到 Fork 的 `origin/main`。默认保留任务分支中的原子提交，不 squash、不 rebase；是否产生额外 merge commit 由分支拓扑决定。
+- 任务分支成功合并回本地 `main` 后，必须先完成合并后验证；验证通过后使用 `git branch -d <task-branch>` 删除该本地任务分支。合并失败、验证失败或分支未完全合并时不得删除，不得使用 `-D` 强制删除；删除远程分支仍须用户另行明确授权。
 - 默认推送流程：
 
 ```powershell

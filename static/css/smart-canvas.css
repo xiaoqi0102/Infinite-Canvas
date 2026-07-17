@@ -571,6 +571,14 @@ video.node-img { object-fit:cover; background:#0f172a; }
 .input-thumb-list.empty { flex:1 1 auto; min-height:42px; padding-top:0; }
 .input-thumb-actions { flex:0 0 auto; margin-left:auto; display:flex; align-items:center; gap:6px; }
 .input-thumb-actions .smart-pill { height:28px; white-space:nowrap; }
+.input-thumb-actions .manual-video-url-pill,
+.input-thumb-actions .cloud-upload-pill { max-width:none; padding:0 10px; border:1px solid var(--line); border-radius:8px; background:var(--card); color:var(--muted); }
+.input-thumb-actions .manual-video-url-pill:hover,
+.input-thumb-actions .cloud-upload-pill:hover { border-color:var(--text); color:var(--text); }
+.input-thumb-actions .manual-video-url-pill:focus-visible,
+.input-thumb-actions .cloud-upload-pill:focus-visible { outline:none; border-color:var(--strong); box-shadow:0 0 0 2px var(--soft); color:var(--text); }
+.input-thumb-actions .manual-video-url-pill:disabled,
+.input-thumb-actions .cloud-upload-pill:disabled { opacity:.55; cursor:wait; }
 .input-thumb-add { width:34px; height:34px; border-radius:10px; border:1px solid var(--line); background:var(--soft); color:var(--muted); display:inline-flex; align-items:center; justify-content:center; transition:background .14s ease, color .14s ease, border-color .14s ease, transform .14s ease; }
 .input-thumb-add:hover,.input-thumb-add:focus-visible { background:var(--card); color:var(--text); border-color:var(--text); transform:translateY(-1px); }
 .input-thumb-add.active { background:var(--strong); border-color:var(--strong); color:var(--strong-text); box-shadow:0 8px 18px rgba(15,23,42,.14); }

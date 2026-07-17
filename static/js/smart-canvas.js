@@ -12875,7 +12875,9 @@ function uniqueReferenceImages(images){
 }
 function visibleReferenceImagesFor(node){
     const base = defaultReferenceImagesFor(node);
-    return uniqueReferenceImages([...base, ...collectMentionedImagesFromPrompt()]);
+    // flow 跟随节点在生成完成前没有自身图片，使用本次运行快照展示实际输入图。
+    const runInputs = base.length || !Array.isArray(node?.runInputRefs) ? [] : node.runInputRefs;
+    return uniqueReferenceImages([...base, ...runInputs, ...collectMentionedImagesFromPrompt()]);
 }
 function inputMentionCandidateImages(node){
     const current = node ? [...lineImagesFor(node), ...manualReferenceImagesFor(node)] : [];

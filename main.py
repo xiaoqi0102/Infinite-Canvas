@@ -29,6 +29,12 @@ import html
 import xml.etree.ElementTree as ET
 from typing import List, Dict, Any, Optional, Tuple
 from threading import Lock, Thread
+
+# Embedded Python's ._pth isolation omits the script directory from sys.path.
+APP_IMPORT_ROOT = os.path.dirname(os.path.abspath(__file__))
+if APP_IMPORT_ROOT not in sys.path:
+    sys.path.insert(0, APP_IMPORT_ROOT)
+
 import httpx
 from PIL import Image, ImageOps
 from io import BytesIO

@@ -213,7 +213,7 @@ flowchart LR
 
 ### 2026-07-16 - 新增 MegabyAI `/v1/videos` 独立视频协议
 
-**变更内容**：新增 `megabyai-v1-videos` provider 模式，复用本地画布视频任务、持久化和恢复能力，独立适配 `/v1/videos` 创建/查询资源、参考素材公网化、参数边界、结果解析和鉴权下载；官方线路 `newapi.megabyai.cc` 与国内优化线路 `cn.megabyai.cc` 均通过精确 hostname 白名单自动识别。
+**变更内容**：新增 `megabyai-v1-videos` provider 模式，复用本地画布视频任务、持久化和恢复能力；协议实现拆分到 `plugins/video_plugins/megabyai.py`，独立适配 `/v1/videos` 创建/查询资源、参考素材公网化、参数边界、结果解析和鉴权下载；官方线路 `newapi.megabyai.cc` 与国内优化线路 `cn.megabyai.cc` 均通过精确 hostname 白名单自动识别。
 
 **变更理由**：MegabyAI 的路径及 `referenceImages/referenceVideos/referenceAudios` 请求体与现有两个 OpenAI generations 模式均不兼容，独立模式可以避免修改旧协议造成回归。
 
@@ -225,7 +225,7 @@ flowchart LR
 
 ### 2026-07-16 - 新增 Sudashui 独立视频协议
 
-**变更内容**：在现有视频任务化链路中新增 `sudashui-video-generations`，复用 provider 鉴权、任务持久化、轮询、恢复和结果保存；单独适配字符串化 `metadata.payload`、Sudashui 文件上传和官方真人素材索引。普通画布与智能画布共用协议工具，分辨率根据模型名称只读显示，但不发送给上游。
+**变更内容**：在现有视频任务化链路中新增 `sudashui-video-generations`，复用 provider 鉴权、任务持久化和结果保存；协议实现拆分到 `plugins/video_plugins/sudashui.py`，独立处理字符串化 `metadata.payload`、Sudashui 文件上传、官方真人素材索引、特殊轮询和恢复。普通画布与智能画布共用协议工具，分辨率根据模型名称只读显示，但不发送给上游。
 
 **变更理由**：Sudashui 与现有单数 OpenAI 视频接口路径相同，但请求体、素材上传和官方素材规则不同。独立模式可避免修改旧协议导致其它平台回归，同时集中共享前端规则，避免两套画布重复实现。
 

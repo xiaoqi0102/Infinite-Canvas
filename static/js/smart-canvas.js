@@ -2517,7 +2517,18 @@ function syncSudashuiOfficialAssetForRefs(node=activeComposerNode() || selectedN
 function smartVideoProtocolProfile(runSettings=settings){
     const provider = videoProviderById(runSettings?.videoProvider || '');
     if(window.StudioVideoApi?.videoProtocolProfile){
-        return window.StudioVideoApi.videoProtocolProfile(provider, runSettings?.videoModel || '', runSettings?.videoResolution || '');
+        const profile = window.StudioVideoApi.videoProtocolProfile(provider, runSettings?.videoModel || '', runSettings?.videoResolution || '');
+        if(runSettings && window.StudioVideoApi.normalizeVideoProtocolValues){
+            const normalized = window.StudioVideoApi.normalizeVideoProtocolValues(profile, {
+                duration:runSettings.videoDuration,
+                aspectRatio:runSettings.videoAspect,
+                resolution:runSettings.videoResolution,
+            });
+            runSettings.videoDuration = normalized.duration;
+            runSettings.videoAspect = normalized.aspectRatio || runSettings.videoAspect;
+            runSettings.videoResolution = normalized.resolution ?? runSettings.videoResolution;
+        }
+        return profile;
     }
     return {isSudashui:false, resolutionReadOnly:false, resolution:runSettings?.videoResolution || '', resolutionLabel:'', officialAssetsEnabled:false};
 }
@@ -2614,10 +2625,12 @@ function renderVideoModelControl(models){
 }
 function renderVideoDurationControl(profile=smartVideoProtocolProfile()){
     const isMegaby = isMegabyVideoProvider(settings.videoProvider);
-    const min = profile.isSudashui ? 4 : (isMegaby ? MEGABY_VIDEO_DURATION_MIN : 1);
-    const max = profile.isSudashui ? 15 : (isMegaby ? MEGABY_VIDEO_DURATION_MAX : 60);
+    const min = profile.minDuration != null && Number.isFinite(Number(profile.minDuration)) ? Number(profile.minDuration) : (profile.isSudashui ? 4 : (isMegaby ? MEGABY_VIDEO_DURATION_MIN : 1));
+    const max = profile.maxDuration != null && Number.isFinite(Number(profile.maxDuration)) ? Number(profile.maxDuration) : (profile.isSudashui ? 15 : (isMegaby ? MEGABY_VIDEO_DURATION_MAX : 60));
     const v = Math.max(min, Math.min(max, Math.round(Number(settings.videoDuration) || 5)));
-    const quick = (profile.isSudashui || isMegaby) ? [4, 5, 6, 8, 10, 12, 15] : [3, 4, 5, 6, 8, 10, 12, 15];
+    const quick = Array.isArray(profile.durations) && profile.durations.length
+        ? profile.durations
+        : (profile.isSudashui || isMegaby) ? [4, 5, 6, 8, 10, 12, 15] : [3, 4, 5, 6, 8, 10, 12, 15];
     return `<div class="smart-control duration-control" title="${escapeHtml(tr('smart.videoDurationTip'))}">
         <button class="smart-pill" type="button"><i data-lucide="timer"></i><span>${v}s</span></button>
         <div class="smart-popover compact-popover">
@@ -2633,12 +2646,14 @@ function renderVideoDurationControl(profile=smartVideoProtocolProfile()){
     </div>`;
 }
 function renderVideoAspectControl(profile=smartVideoProtocolProfile()){
-    const options = profile.isSudashui
+    const options = Array.isArray(profile.aspectRatios) && profile.aspectRatios.length
+        ? profile.aspectRatios.map(value => [value, value === 'adaptive' ? tr('smart.videoAspectAdaptive') : value])
+        : profile.isSudashui
         ? (window.StudioVideoApi?.SUDASHUI_ASPECT_RATIOS || ['16:9','9:16','1:1','4:3','3:4','21:9','adaptive']).map(value => [value, value === 'adaptive' ? tr('smart.videoAspectAdaptive') : value])
         : isMegabyVideoProvider(settings.videoProvider)
         ? [['16:9','16:9'], ['9:16','9:16'], ['1:1','1:1']]
         : [
-            ['16:9','16:9'], ['9:16','9:16'], ['1:1','1:1'], ['4:3','4:3'], ['3:4','3:4'],
+            ['16:9','16:9'], ['9:16','9:16'], ['1:1','1:1'], ['4:3','4:3'], ['3:4','3:4'], ['3:2','3:2'], ['2:3','2:3'],
             ['21:9','21:9'], ['9:21','9:21'], ['keep_ratio', tr('smart.videoAspectKeep')], ['adaptive', tr('smart.videoAspectAdaptive')]
         ];
     const value = settings.videoAspect || '16:9';
@@ -2660,7 +2675,9 @@ function renderVideoResolutionControl(profile=smartVideoProtocolProfile()){
             <button class="smart-pill" type="button" disabled aria-disabled="true"><i data-lucide="monitor"></i><span>${escapeHtml(label)}</span></button>
         </div>`;
     }
-    const options = isMegabyVideoProvider(settings.videoProvider)
+    const options = Array.isArray(profile.resolutions) && profile.resolutions.length
+        ? profile.resolutions.map(value => [value, value ? String(value).toUpperCase() : tr('smart.videoResAuto')])
+        : isMegabyVideoProvider(settings.videoProvider)
         ? [['', tr('smart.videoResAuto')], ['480p','480P'], ['720p','720P']]
         : [['', tr('smart.videoResAuto')], ['480p','480P'], ['720p','720P'], ['1080p','1080P']];
     const value = settings.videoResolution || '';
@@ -14922,7 +14939,7 @@ async function runApiVideoGeneration(prompt, refs, runSettings=settings){
         normalizeMegabyVideoSettings(runSettings, {resetInvalidGroup:true});
         const uploadedRefs = applyUploadedUrlsToSmartRefs(refs, runSettings);
         const profile = smartVideoProtocolProfile(runSettings);
-        const trustedMode = !profile.isSudashui && Boolean(runSettings.videoTrustedAsset);
+        const trustedMode = profile.supportsTrustedAssets !== false && !profile.isSudashui && Boolean(runSettings.videoTrustedAsset);
         const trustedSource = trustedMode ? (['library','cloud','manual'].includes(runSettings.videoTrustedSource) ? runSettings.videoTrustedSource : 'library') : 'none';
         // 仅「素材库链接」来源才走 asset:// 认证地址 + 后端可信素材路由；上传云端/手动网址走普通直链。
         const useAssetUris = trustedSource === 'library';
@@ -14939,7 +14956,9 @@ async function runApiVideoGeneration(prompt, refs, runSettings=settings){
         };
         const refImages = imageRefsOnly(uploadedRefs).map((ref, i) => {
             const item = {url:effUrl(ref), name:ref.name || `图${i + 1}`};
-            if(runSettings.videoUseFrameRoles){
+            const originalLocalUrl = ref.originalLocalUrl || ref.sourceUrl || '';
+            if(originalLocalUrl && originalLocalUrl !== item.url) item.originalLocalUrl = originalLocalUrl;
+            if(runSettings.videoUseFrameRoles && profile.supportsFrameRoles !== false){
                 if(i === 0) item.role = 'first_frame';
                 else if(i === 1) item.role = 'last_frame';
             }
@@ -14950,6 +14969,10 @@ async function runApiVideoGeneration(prompt, refs, runSettings=settings){
         const allRefAudios = audioRefsOnly(uploadedRefs).map(ref => effUrl(ref)).filter(Boolean);
         const refAudios = profile.isSudashui ? allRefAudios : allRefAudios.slice(0, 3);
         if(mismatchedAsset) toast('部分认证素材属于其它平台，已回退为普通素材。切换到对应平台的视频接口才能用 asset:// 认证地址。');
+        const issue = window.StudioVideoApi?.videoProtocolReferenceIssue?.(profile, {image:refImages.length, video:refVideos.length, audio:refAudios.length});
+        if(issue?.code === 'image_required') throw new Error(trf('smart.videoImageRequired', {count:issue.count}));
+        if(issue?.code === 'unsupported') throw new Error(trf('smart.videoReferenceUnsupported', {kind:tr(`canvas.mentionKind.${issue.kind}`)}));
+        if(issue?.code === 'limit') throw new Error(trf('smart.videoReferenceLimit', {kind:tr(`canvas.mentionKind.${issue.kind}`), count:issue.count}));
         const sudashui = validateSmartSudashuiVideoRequest(runSettings, profile, refImages, refVideos, refAudios);
         const payload = {
             prompt,

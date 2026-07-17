@@ -2535,7 +2535,10 @@ function renderEditor(){
     baseInput.value = item.base_url || '';
     const lockedApi = lockedRecommendedApi(item);
     if(lockedApi) applyLockedRecommendedProtocol(item);
-    else if(isMegabyAiBaseUrl(item.base_url)) item.video_request_mode = 'megabyai-v1-videos';
+    else {
+        const officialMode = officialVideoRequestMode(item.base_url);
+        if(officialMode) item.video_request_mode = officialMode;
+    }
     if(protocolInput){
         protocolInput.value = item.id === 'runninghub' ? 'runninghub' : item.id === 'volcengine' ? 'volcengine' : (item.protocol || 'openai');
         protocolInput.disabled = FIXED_PROTOCOL_PROVIDER_IDS.has(item.id) || Boolean(lockedApi);
@@ -2929,13 +2932,16 @@ function normalizeImageRequestMode(value){
     return ['openai', 'openai-json', 'openai-video-proxy', 'openai-responses'].includes(mode) ? mode : 'openai';
 }
 function normalizeVideoRequestMode(value){
-    if(window.StudioVideoApi) return window.StudioVideoApi.normalizeVideoRequestMode(value);
+    if(window.StudioVideoApi?.MODES?.TUDOU) return window.StudioVideoApi.normalizeVideoRequestMode(value);
     const mode = String(value || '').trim().toLowerCase();
     if(['openai-video', 'single-video', 'video-generations'].includes(mode)) return 'openai-video-generations';
     if(['openai-videos', 'videos-generations'].includes(mode)) return 'openai-videos-generations';
     if(['sudashui', 'sudashui-video'].includes(mode)) return 'sudashui-video-generations';
     if(['megabyai', 'megabyai-videos'].includes(mode)) return 'megabyai-v1-videos';
-    return ['openai-videos-generations', 'openai-video-generations', 'sudashui-video-generations', 'megabyai-v1-videos'].includes(mode) ? mode : 'openai-videos-generations';
+    if(['geeknow', 'geeknow-video', 'geeknow-videos'].includes(mode)) return 'geeknow-v1-videos';
+    if(['tudou', 'tudou-video', 'tudou-videos'].includes(mode)) return 'tudou-video';
+    if(['aicost', 'aicost-video', 'aicost-videos'].includes(mode)) return 'aicost-video';
+    return ['openai-videos-generations', 'openai-video-generations', 'sudashui-video-generations', 'megabyai-v1-videos', 'geeknow-v1-videos', 'tudou-video', 'aicost-video'].includes(mode) ? mode : 'openai-videos-generations';
 }
 function isMegabyAiBaseUrl(value){
     if(window.StudioVideoApi) return window.StudioVideoApi.isMegabyAiBaseUrl(value);
@@ -2949,14 +2955,49 @@ function isMegabyAiBaseUrl(value){
     try { return officialHostnames.has(new URL(`https://${text.replace(/^\/+/, '')}`).hostname.toLowerCase()); }
     catch (_) { return false; }
 }
+function isTudouBaseUrl(value){
+    if(typeof window.StudioVideoApi?.isTudouBaseUrl === 'function') return window.StudioVideoApi.isTudouBaseUrl(value);
+    const text = String(value || '').trim();
+    try { return new URL(text).hostname.toLowerCase() === 'api.ai-tudou.net'; }
+    catch (_) {}
+    try { return new URL(`https://${text.replace(/^\/+/, '')}`).hostname.toLowerCase() === 'api.ai-tudou.net'; }
+    catch (_) { return false; }
+}
+function isGeekNowBaseUrl(value){
+    if(typeof window.StudioVideoApi?.isGeekNowBaseUrl === 'function') return window.StudioVideoApi.isGeekNowBaseUrl(value);
+    const officialHostnames = new Set(['geeknow.ai', 'api.geeknow.ai']);
+    const text = String(value || '').trim();
+    try { return officialHostnames.has(new URL(text).hostname.toLowerCase()); }
+    catch (_) {}
+    try { return officialHostnames.has(new URL(`https://${text.replace(/^\/+/, '')}`).hostname.toLowerCase()); }
+    catch (_) { return false; }
+}
+function officialVideoRequestMode(baseUrl){
+    if(isAICostBaseUrl(baseUrl)) return 'aicost-video';
+    if(isMegabyAiBaseUrl(baseUrl)) return 'megabyai-v1-videos';
+    if(isGeekNowBaseUrl(baseUrl)) return 'geeknow-v1-videos';
+    if(isTudouBaseUrl(baseUrl)) return 'tudou-video';
+    return '';
+}
+function isAICostBaseUrl(value){
+    if(window.StudioVideoApi) return window.StudioVideoApi.isAICostBaseUrl(value);
+    const officialHostnames = new Set(['aicost.xyz', 'www.aicost.xyz']);
+    const text = String(value || '').trim();
+    try { return officialHostnames.has(new URL(text).hostname.toLowerCase()); }
+    catch (_) {}
+    try { return officialHostnames.has(new URL(`https://${text.replace(/^\/+/, '')}`).hostname.toLowerCase()); }
+    catch (_) { return false; }
+}
 function effectiveVideoRequestModeForProvider(item, requestedMode){
-    if(isMegabyAiBaseUrl(item?.base_url || baseInput?.value || '')) return 'megabyai-v1-videos';
+    const officialMode = officialVideoRequestMode(item?.base_url || baseInput?.value || '');
+    if(officialMode) return officialMode;
     return normalizeVideoRequestMode(requestedMode);
 }
-function applyMegabyAiVideoMode(baseUrl){
+function applyOfficialVideoMode(baseUrl){
     const item = provider();
-    if(!item || !isMegabyAiBaseUrl(baseUrl) || lockedRecommendedApi(item)) return false;
-    item.video_request_mode = 'megabyai-v1-videos';
+    const officialMode = officialVideoRequestMode(baseUrl);
+    if(!item || !officialMode || lockedRecommendedApi(item)) return false;
+    item.video_request_mode = officialMode;
     if(videoRequestModeInput) videoRequestModeInput.value = item.video_request_mode;
     return true;
 }
@@ -2975,6 +3016,9 @@ function videoRequestModeLabel(mode){
     const normalized = normalizeVideoRequestMode(mode);
     if(normalized === 'sudashui-video-generations') return tr('api.videoRequestModeSudashuiLabel') || 'Sudashui /v1/video/generations';
     if(normalized === 'megabyai-v1-videos') return tr('api.videoRequestModeMegabyAiLabel') || 'MegabyAI /v1/videos';
+    if(normalized === 'geeknow-v1-videos') return tr('api.videoRequestModeGeekNowLabel') || 'GeekNow Kling / Grok';
+    if(normalized === 'tudou-video') return tr('api.videoRequestModeTudouLabel') || 'Tudou Grok / Sora2';
+    if(normalized === 'aicost-video') return tr('api.videoRequestModeAICostLabel') || 'aicost Seedance / Grok / 通用兜底';
     return normalized === 'openai-video-generations' ? '/v1/video/generations' : '/v1/videos/generations';
 }
 function isRunningHubContext(item, baseUrl=''){
@@ -3058,7 +3102,7 @@ async function probeAsync(){
     if(!item) return;
     const btn = document.getElementById('probeAsyncBtn');
     const baseUrl = baseInput.value.trim();
-    applyMegabyAiVideoMode(baseUrl);
+    applyOfficialVideoMode(baseUrl);
     const isCliProtocol = CLI_PROTOCOLS.has(String(protocolInput?.value || item.protocol || '').toLowerCase());
     if(!baseUrl && !isCliProtocol){ alert('请先填写请求地址'); return; }
     if(btn){ btn.disabled = true; btn.querySelector('span').textContent = '检测中...'; }
@@ -3146,7 +3190,7 @@ async function testConnection(){
     if(!item) return;
     const btn = document.getElementById('testUrlBtn');
     const baseUrl = baseInput.value.trim();
-    applyMegabyAiVideoMode(baseUrl);
+    applyOfficialVideoMode(baseUrl);
     const isJimeng = (protocolInput?.value || '') === 'jimeng';
     const currentProtocol = String(protocolInput?.value || item.protocol || '').toLowerCase();
     const isCliProtocol = CLI_PROTOCOLS.has(currentProtocol);
@@ -3988,7 +4032,7 @@ window.onload = () => {
     if(protocolInput) protocolInput.addEventListener('change', updateProtocolFromInput);
     if(baseInput) baseInput.addEventListener('input', () => {
         updateApimartDomesticHint();
-        applyMegabyAiVideoMode(baseInput.value);
+        applyOfficialVideoMode(baseInput.value);
     });
     if(imageRequestModeInput) imageRequestModeInput.addEventListener('change', () => {
         const item = provider();

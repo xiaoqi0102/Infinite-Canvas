@@ -3717,6 +3717,14 @@ function cloudUploadLinkForCanvasRef(node, ref){
 function applyUploadedUrlToRefs(refs, node){
     return (refs || []).map(ref => {
         if(!ref?.url) return ref;
+        const link = cloudUploadLinkForCanvasRef(node, ref);
+        if(link?.url){
+            return {
+                ...ref,
+                url:link.url,
+                originalLocalUrl:ref.originalLocalUrl || link.source || ref.url,
+            };
+        }
         const url = tempShUploadedUrlForNode(node, ref.url);
         return url && url !== ref.url ? {...ref, url, originalLocalUrl:ref.originalLocalUrl || ref.url} : ref;
     });
@@ -6582,18 +6590,18 @@ function renderLoopPrompt(node, ctx=loopContext){
 }
 function imageRefsFromNode(node){
     if(!node) return [];
-    if(node.type === 'image' && node.url && mediaKindForNode(node) === 'image') return [{url:node.url, name:node.name || 'image', role:node.role || '', kind:'image'}];
+    if(node.type === 'image' && node.url && mediaKindForNode(node) === 'image') return [{url:node.url, name:node.name || 'image', role:node.role || '', kind:'image', originalLocalUrl:node.originalLocalUrl || ''}];
     if(node.type === 'group'){
         return (node.items || [])
             .map(id => nodes.find(x => x.id === id))
             .filter(x => x?.type === 'image' && x?.url && mediaKindForNode(x) === 'image')
-            .map(img => ({url:img.url, name:img.name || 'image', role:img.role || '', kind:'image'}));
+            .map(img => ({url:img.url, name:img.name || 'image', role:img.role || '', kind:'image', originalLocalUrl:img.originalLocalUrl || ''}));
     }
     if(node.type === 'output'){
         return (node.images || [])
-            .map(outputUrlValue)
-            .filter(url => url && !isVideoUrl(url) && !isAudioUrl(url))
-            .map((url, i) => ({url, name:outputImageName(url) || `output-${i + 1}.png`, kind:'image'}));
+            .map((item, i) => ({url:outputUrlValue(item), originalLocalUrl:item?.originalLocalUrl || '', index:i}))
+            .filter(item => item.url && !isVideoUrl(item.url) && !isAudioUrl(item.url))
+            .map(item => ({url:item.url, name:outputImageName(item.url) || `output-${item.index + 1}.png`, kind:'image', originalLocalUrl:item.originalLocalUrl}));
     }
     if(CANVAS_IMAGE_OUTPUT_TYPES.includes(node.type)) return generatedImageRefs(node).filter(ref => ref.kind === 'image');
     return [];
@@ -9152,6 +9160,16 @@ function renderVideoBody(node){
     normalizeMegabyVideoNodeSettings(node, {resetInvalidGroup:true});
     node.model = node.model || 'veo3-fast';
     const profile = canvasVideoProtocolProfile(node);
+    if(window.StudioVideoApi?.normalizeVideoProtocolValues){
+        const normalized = window.StudioVideoApi.normalizeVideoProtocolValues(profile, {
+            duration:node.duration,
+            aspectRatio:node.aspectRatio,
+            resolution:node.resolution,
+        });
+        node.duration = normalized.duration;
+        node.aspectRatio = normalized.aspectRatio || node.aspectRatio;
+        node.resolution = normalized.resolution ?? node.resolution;
+    }
     const isMegaby = isMegabyVideoProvider(node.apiProvider);
     const currentImageRefs = resolveGeneratorRequestInputs(node).imageRefs;
     syncCanvasOfficialAssetState(node, currentImageRefs, profile, true);
@@ -9161,10 +9179,19 @@ function renderVideoBody(node){
         if(!normalizedRatio) node.aspectRatio = '16:9';
         else if(node.aspectRatio === 'keep_ratio') node.aspectRatio = 'adaptive';
     }
-    const aspectOptions = (isMegaby
+    const aspectOptions = (profile.aspectRatios || (isMegaby
         ? ['16:9','9:16','1:1']
-        : (profile.isSudashui ? window.StudioVideoApi?.SUDASHUI_ASPECT_RATIOS : ['16:9','9:16','1:1','4:3','3:4','21:9','9:21','keep_ratio','adaptive'])) || ['16:9','9:16','1:1'];
+        : (profile.isSudashui ? window.StudioVideoApi?.SUDASHUI_ASPECT_RATIOS : ['16:9','9:16','1:1','4:3','3:4','3:2','2:3','21:9','9:21','keep_ratio','adaptive']))) || ['16:9','9:16','1:1'];
     const aspectLabels = {keep_ratio:'keep', adaptive:'adapt'};
+    const durationMin = profile.minDuration != null && Number.isFinite(Number(profile.minDuration)) ? Number(profile.minDuration) : (isMegaby || profile.isSudashui ? 4 : 1);
+    const durationMax = profile.maxDuration != null && Number.isFinite(Number(profile.maxDuration)) ? Number(profile.maxDuration) : (isMegaby || profile.isSudashui ? 15 : 60);
+    const durationStep = Array.isArray(profile.durations) && profile.durations.length > 1 ? Math.max(1, Number(profile.durations[1]) - Number(profile.durations[0])) : 1;
+    const durationOptions = Array.isArray(profile.durations) ? profile.durations.map(Number).filter(Number.isFinite) : [];
+    const durationControlHtml = durationOptions.length
+        ? `<select class="select-lite video-duration compact-select">${durationOptions.map(value => `<option value="${value}">${value}s</option>`).join('')}</select>`
+        : `<input class="setting-input video-duration" type="number" min="${durationMin}" max="${durationMax}" step="${durationStep}" value="${Number(node.duration || 5)}">`;
+    const resolutionOptions = profile.resolutions || (isMegaby ? ['', '480p', '720p'] : ['', '480p', '720p', '1080p', '780P']);
+    const resolutionOptionsHtml = resolutionOptions.map(value => `<option value="${escapeAttr(value)}">${escapeHtml(value ? String(value).toUpperCase() : 'Auto')}</option>`).join('');
     const resolutionLabel = profile.resolutionLabel ? trf('canvas.videoResolutionModelValue', {resolution:profile.resolutionLabel}) : tr('canvas.videoResolutionModelAuto');
     const officialImages = currentImageRefs.map((ref, index) => `${index + 1}. ${ref.name || `图${index + 1}`}`).join(' · ');
     wrap.innerHTML = `
@@ -9186,7 +9213,7 @@ function renderVideoBody(node){
             <div class="gen-settings-row">
                 <label class="field" style="flex:1">
                     <div class="setting-title">${tr('canvas.videoDuration')}</div>
-                    <input class="setting-input video-duration" type="number" min="${isMegaby || profile.isSudashui ? 4 : 1}" max="${isMegaby || profile.isSudashui ? 15 : 60}" step="1" value="${Number(node.duration || 5)}">
+                    ${durationControlHtml}
                 </label>
                 <label class="field" style="flex:1">
                     <div class="setting-title">${tr('canvas.videoAspect')}</div>
@@ -9199,9 +9226,7 @@ function renderVideoBody(node){
                     <select class="select-lite video-resolution compact-select" ${profile.resolutionReadOnly ? 'disabled aria-disabled="true"' : ''} title="${profile.resolutionReadOnly ? escapeAttr(tr('canvas.videoResolutionModelTip')) : ''}">
                         ${profile.resolutionReadOnly
                             ? `<option value="${escapeAttr(profile.resolution || '')}">${escapeHtml(resolutionLabel)}</option>`
-                            : isMegaby
-                                ? '<option value="">Auto</option><option value="480p">480p</option><option value="720p">720p</option>'
-                                : '<option value="">Auto</option><option value="480p">480p</option><option value="720p">720p</option><option value="1080p">1080p</option><option value="780P">780P</option>'}
+                            : resolutionOptionsHtml}
                     </select>
                 </label>
             </div>
@@ -9252,8 +9277,25 @@ function renderVideoBody(node){
         if(paramsReset) setTimeout(() => showErrorModal(tr('canvas.megabyParamsReset'), 'MegabyAI'), 0);
     };
     modelSelect.onchange = e => { e.stopPropagation(); node.model = e.target.value; syncCanvasOfficialAssetState(node, currentImageRefs, canvasVideoProtocolProfile(node), true); render(); scheduleSave(); };
-    durationSelect.oninput = e => { e.stopPropagation(); const min = isMegaby || profile.isSudashui ? 4 : 1; const max = isMegaby || profile.isSudashui ? 15 : 60; node.duration = Math.max(min, Math.min(max, Math.round(Number(e.target.value || 5)))); scheduleSave(); };
-    durationSelect.onblur = e => { const min = isMegaby || profile.isSudashui ? 4 : 1; const max = isMegaby || profile.isSudashui ? 15 : 60; e.target.value = String(Math.max(min, Math.min(max, Math.round(Number(node.duration || 5))))); };
+    if(durationOptions.length){
+        durationSelect.value = String(node.duration || profile.defaultDuration || durationOptions[0]);
+        durationSelect.onchange = e => {
+            e.stopPropagation();
+            node.duration = Number(e.target.value);
+            scheduleSave();
+        };
+    } else {
+        durationSelect.oninput = e => {
+            e.stopPropagation();
+            const normalized = window.StudioVideoApi?.normalizeVideoProtocolValues
+                ? window.StudioVideoApi.normalizeVideoProtocolValues(profile, {duration:Number(e.target.value || 5), aspectRatio:node.aspectRatio, resolution:node.resolution})
+                : {duration:Math.max(durationMin, Math.min(durationMax, Math.round(Number(e.target.value || 5))))};
+            node.duration = normalized.duration;
+            e.target.value = String(node.duration);
+            scheduleSave();
+        };
+        durationSelect.onblur = e => { e.target.value = String(node.duration || profile.defaultDuration || 5); };
+    }
     aspectSelect.onchange = e => { e.stopPropagation(); node.aspectRatio = e.target.value; scheduleSave(); };
     resolutionSelect.onchange = e => { e.stopPropagation(); node.resolution = e.target.value; scheduleSave(); };
     const officialInput = wrap.querySelector('.video-official-assets');
@@ -11003,7 +11045,7 @@ function generatedImageRefs(node){
             const url = outputUrlValue(item);
             if(!url) return null;
             const kind = mediaKindForOutputItem(item);
-            return {url, name:outputImageName(url) || `${node.type || 'generated'}-${i + 1}`, kind, index:i};
+            return {url, name:outputImageName(url) || `${node.type || 'generated'}-${i + 1}`, kind, index:i, originalLocalUrl:item?.originalLocalUrl || ''};
         })
         .filter(Boolean)
         .filter(ref => keepGeneratedMedia || ref.kind === 'image')
@@ -11510,8 +11552,6 @@ async function runVideoNode(nodeId, opts={}){
     const refs = imageRefsOnly(mediaRefs);
     const videoRefs = videoRefsOnly(mediaRefs);
     const audioRefs = audioRefsOnly(mediaRefs);
-    if(node.useFrameRoles && refs[0]) refs[0] = {...refs[0], role:'first_frame'};
-    if(node.useFrameRoles && refs[1]) refs[1] = {...refs[1], role:'last_frame'};
     if(!prompt){ alert(tr('canvas.videoNeedsPrompt')); return; }
     let out = outputForNode(node, 460);
     const pendingId = uid('p');
@@ -11522,11 +11562,27 @@ async function runVideoNode(nodeId, opts={}){
     const profile = window.StudioVideoApi?.videoProtocolProfile
         ? window.StudioVideoApi.videoProtocolProfile(provider, node.model || '', node.resolution || '')
         : {isSudashui:false, resolution:node.resolution || '', officialAssetsEnabled:false};
+    if(node.useFrameRoles && profile.supportsFrameRoles !== false && refs[0]) refs[0] = {...refs[0], role:'first_frame'};
+    if(node.useFrameRoles && profile.supportsFrameRoles !== false && refs[1]) refs[1] = {...refs[1], role:'last_frame'};
+    if(window.StudioVideoApi?.normalizeVideoProtocolValues){
+        const normalized = window.StudioVideoApi.normalizeVideoProtocolValues(profile, {
+            duration:node.duration,
+            aspectRatio:node.aspectRatio,
+            resolution:node.resolution,
+        });
+        node.duration = normalized.duration;
+        node.aspectRatio = normalized.aspectRatio || node.aspectRatio;
+        node.resolution = normalized.resolution ?? node.resolution;
+    }
     const videoUrls = videoRefs.map(ref => tempShUploadedUrlForNode(node, ref.url)).filter(Boolean);
     if(manualVideoUrl && !videoUrls.includes(manualVideoUrl)) videoUrls.push(manualVideoUrl);
     const audioUrls = audioRefs.map(ref => ref.url).filter(Boolean);
     let sudashui;
     try {
+        const issue = window.StudioVideoApi?.videoProtocolReferenceIssue?.(profile, {image:refs.length, video:videoUrls.length, audio:audioUrls.length});
+        if(issue?.code === 'image_required') throw new Error(trf('canvas.videoImageRequired', {count:issue.count}));
+        if(issue?.code === 'unsupported') throw new Error(trf('canvas.videoReferenceUnsupported', {kind:tr(`canvas.mentionKind.${issue.kind}`)}));
+        if(issue?.code === 'limit') throw new Error(trf('canvas.videoReferenceLimit', {kind:tr(`canvas.mentionKind.${issue.kind}`), count:issue.count}));
         sudashui = validateCanvasSudashuiVideoRequest(node, profile, refs, videoUrls, audioUrls);
     } catch(error) {
         if(opts.cascade) throw error;

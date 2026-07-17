@@ -38,6 +38,35 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, Response, StreamingResponse, JSONResponse
 from pydantic import BaseModel, Field, StrictInt
 from fastapi.middleware.cors import CORSMiddleware
+from plugins.video_plugins import (
+    AICOST_VIDEO_REQUEST_MODE,
+    AICostProtocolError,
+    GEEKNOW_VIDEO_REQUEST_MODE,
+    GeekNowProtocolError,
+    MEGABYAI_VIDEO_REQUEST_MODE,
+    MegabyAIProtocolError,
+    SUDASHUI_VIDEO_REQUEST_MODE,
+    SudashuiProtocolError,
+    TUDOU_VIDEO_REQUEST_MODE,
+    TudouProtocolError,
+    canonical_video_api_root,
+    generate_aicost_video,
+    generate_geeknow_video,
+    generate_megabyai_video,
+    generate_sudashui_video,
+    generate_tudou_video,
+    humanize_video_task_failure,
+    is_aicost_official_provider,
+    is_geeknow_official_provider,
+    is_megabyai_official_provider,
+    is_tudou_official_provider,
+    resume_aicost_video,
+    resume_geeknow_video,
+    resume_megabyai_video,
+    resume_sudashui_video,
+    resume_tudou_video,
+    sudashui_video_task_pending,
+)
 
 QUIET_ACCESS_PATHS = {
     "/api/queue_status",
@@ -441,10 +470,12 @@ SUPPORTED_IMAGE_REQUEST_MODES = {"openai", "openai-json", "openai-video-proxy", 
 SUPPORTED_VIDEO_REQUEST_MODES = {
     "openai-videos-generations",
     "openai-video-generations",
-    "sudashui-video-generations",
-    "megabyai-v1-videos",
+    SUDASHUI_VIDEO_REQUEST_MODE,
+    MEGABYAI_VIDEO_REQUEST_MODE,
+    GEEKNOW_VIDEO_REQUEST_MODE,
+    TUDOU_VIDEO_REQUEST_MODE,
+    AICOST_VIDEO_REQUEST_MODE,
 }
-MEGABYAI_OFFICIAL_HOSTNAMES = {"newapi.megabyai.cc", "cn.megabyai.cc"}
 RUNNINGHUB_DEFAULT_BASE_URL = "https://www.runninghub.cn"
 RUNNINGHUB_OPENAPI_BASE_URL = "https://www.runninghub.cn/openapi/v2"
 RUNNINGHUB_MODEL_REGISTRY_URL = "https://raw.githubusercontent.com/HM-RunningHub/ComfyUI_RH_OpenAPI/main/models_registry.json"
@@ -1318,7 +1349,13 @@ def normalize_video_request_mode(value):
     if mode in {"openai-videos", "videos-generations"}:
         return "openai-videos-generations"
     if mode in {"sudashui", "sudashui-video"}:
-        return "sudashui-video-generations"
+        return SUDASHUI_VIDEO_REQUEST_MODE
+    if mode in {"geeknow", "geeknow-videos", "geeknow-video"}:
+        return GEEKNOW_VIDEO_REQUEST_MODE
+    if mode in {"tudou", "tudou-videos", "tudou-video"}:
+        return TUDOU_VIDEO_REQUEST_MODE
+    if mode in {"aicost", "aicost-videos", "aicost-video"}:
+        return AICOST_VIDEO_REQUEST_MODE
     return mode if mode in SUPPORTED_VIDEO_REQUEST_MODES else "openai-videos-generations"
 
 LOCKED_RECOMMENDED_PROVIDER_RULES = {
@@ -1407,7 +1444,17 @@ def normalize_provider(item):
     if protocol not in SUPPORTED_PROVIDER_PROTOCOLS:
         protocol = "openai"
     image_request_mode = detect_image_request_mode(base_url, item.get("image_models") or []) or normalize_image_request_mode(item.get("image_request_mode"))
-    video_request_mode = normalize_video_request_mode(item.get("video_request_mode"))
+    provider_base_url = {"base_url": base_url}
+    if is_aicost_official_provider(provider_base_url):
+        video_request_mode = AICOST_VIDEO_REQUEST_MODE
+    elif is_megabyai_official_provider(provider_base_url):
+        video_request_mode = MEGABYAI_VIDEO_REQUEST_MODE
+    elif is_geeknow_official_provider(provider_base_url):
+        video_request_mode = GEEKNOW_VIDEO_REQUEST_MODE
+    elif is_tudou_official_provider(provider_base_url):
+        video_request_mode = TUDOU_VIDEO_REQUEST_MODE
+    else:
+        video_request_mode = normalize_video_request_mode(item.get("video_request_mode"))
     image_generation_endpoint = normalize_endpoint_override(item.get("image_generation_endpoint"), "文生图端口")
     image_edit_endpoint = normalize_endpoint_override(item.get("image_edit_endpoint"), "图生图/编辑端口")
     volc_project = re.sub(r"\s+", " ", str(item.get("volcengine_project_name") or "").strip())[:80]
@@ -2892,6 +2939,8 @@ class AIReference(BaseModel):
     role: str = ""
     kind: str = ""
     mime: str = ""
+    originalLocalUrl: str = ""
+    sourceUrl: str = ""
 
 class OnlineImageRequest(BaseModel):
     prompt: str = Field(min_length=1, max_length=ONLINE_IMAGE_PROMPT_MAX_LENGTH)
@@ -2992,6 +3041,9 @@ def video_task_request_meta(payload: "CanvasVideoRequest"):
         "duration": payload.duration,
         "aspect_ratio": payload.aspect_ratio,
         "resolution": payload.resolution,
+        "size": payload.size,
+        "preset": payload.preset,
+        "negative_prompt": str(payload.negative_prompt or "")[:500],
         "generate_audio": bool(payload.generate_audio),
         "multimodal": bool(payload.multimodal),
         "official_asset_indexes": list(payload.official_asset_indexes or []),
@@ -3064,6 +3116,77 @@ async def resume_canvas_video_task_result(task_id: str):
                 raise HTTPException(status_code=502, detail=f"RunningHub 视频生成成功但没有返回视频：{result}")
             local_urls = [await save_remote_video_to_output(url, prefix="rh_video_") for url in urls]
             return {"videos": local_urls, "task_id": upstream_task_id, "raw": result}
+        if is_sudashui_video_generations_mode(provider):
+            try:
+                return await resume_sudashui_video(
+                    client,
+                    upstream_task_id,
+                    base_url=video_api_root(provider),
+                    headers=api_headers(json_body=False, provider=provider),
+                    progress=progress,
+                    save_video=lambda url: save_remote_video_to_output(url, provider=provider),
+                    poll_timeout=VIDEO_POLL_TIMEOUT,
+                    poll_interval=video_poll_interval(provider),
+                )
+            except SudashuiProtocolError as exc:
+                raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+        if is_megabyai_video_mode(provider):
+            try:
+                return await resume_megabyai_video(
+                    client,
+                    upstream_task_id,
+                    base_url=video_api_root(provider),
+                    headers=api_headers(json_body=False, provider=provider),
+                    progress=progress,
+                    save_video=lambda url: save_remote_video_to_output(url, provider=provider),
+                    poll_timeout=VIDEO_POLL_TIMEOUT,
+                    poll_interval=video_poll_interval(provider),
+                )
+            except MegabyAIProtocolError as exc:
+                raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+        if is_geeknow_video_mode(provider):
+            try:
+                return await resume_geeknow_video(
+                    client,
+                    upstream_task_id,
+                    base_url=video_api_root(provider),
+                    headers=api_headers(json_body=False, provider=provider),
+                    progress=progress,
+                    save_video=lambda url: save_remote_video_to_output(url, provider=provider),
+                    poll_timeout=VIDEO_POLL_TIMEOUT,
+                    poll_interval=video_poll_interval(provider),
+                )
+            except GeekNowProtocolError as exc:
+                raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+        if is_tudou_video_mode(provider):
+            try:
+                return await resume_tudou_video(
+                    client,
+                    upstream_task_id,
+                    model,
+                    base_url=video_api_root(provider),
+                    headers=api_headers(json_body=False, provider=provider),
+                    progress=progress,
+                    save_video=lambda url: save_remote_video_to_output(url, provider=provider),
+                    poll_timeout=VIDEO_POLL_TIMEOUT,
+                )
+            except TudouProtocolError as exc:
+                raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+        if is_aicost_video_mode(provider):
+            try:
+                return await resume_aicost_video(
+                    client,
+                    upstream_task_id,
+                    model,
+                    base_url=video_api_root(provider),
+                    headers=api_headers(json_body=False, provider=provider),
+                    progress=progress,
+                    save_video=lambda url: save_remote_video_to_output(url, provider=provider),
+                    poll_timeout=VIDEO_POLL_TIMEOUT,
+                    poll_interval=video_poll_interval(provider),
+                )
+            except AICostProtocolError as exc:
+                raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
         if is_agnes_provider(provider, model):
             result = await wait_for_agnes_video_task(client, provider, upstream_task_id, model or "agnes-video-v2.0", progress)
         else:
@@ -3186,6 +3309,8 @@ class CanvasVideoRequest(BaseModel):
     aspect_ratio: str = "16:9"
     resolution: str = ""
     size: str = ""
+    preset: str = ""
+    negative_prompt: str = ""
     images: List[AIReference] = []
     videos: List[str] = []
     audios: List[str] = []
@@ -5969,11 +6094,7 @@ def is_lingjing_provider(provider):
     return provider_id == "lingjing" or "apistudio.vip" in base_url
 
 def is_megabyai_provider(provider):
-    base_url = str((provider or {}).get("base_url") or "").strip()
-    try:
-        return (urllib.parse.urlsplit(base_url).hostname or "").lower() in MEGABYAI_OFFICIAL_HOSTNAMES
-    except Exception:
-        return False
+    return is_megabyai_official_provider(provider)
 
 def is_agnes_provider(provider, model=""):
     base_url = str((provider or {}).get("base_url") or "").lower()
@@ -9565,7 +9686,16 @@ async def save_remote_video_to_output(url, prefix="video_", category="output", p
             "Accept": "video/*,application/octet-stream,*/*;q=0.8",
         }
         provider_base_url = str((provider or {}).get("base_url") or "").strip()
-        if provider and is_megabyai_video_mode(provider) and same_http_origin(url, provider_base_url):
+        if (
+            provider
+            and (
+                is_megabyai_video_mode(provider)
+                or is_geeknow_video_mode(provider)
+                or is_tudou_video_mode(provider)
+                or is_aicost_video_mode(provider)
+            )
+            and same_http_origin(url, provider_base_url)
+        ):
             auth_headers = api_headers(json_body=False, provider=provider)
             if auth_headers.get("Authorization"):
                 headers["Authorization"] = auth_headers["Authorization"]
@@ -14439,14 +14569,11 @@ def video_output_urls(raw):
     return deduped
 
 def video_api_root(provider):
-    base_url = (provider.get("base_url") or AI_BASE_URL).rstrip("/")
+    base_url = canonical_video_api_root(provider.get("base_url") or AI_BASE_URL)
     if is_volcengine_provider(provider):
         if base_url.endswith("/api/v3"):
             base_url = base_url[: -len("/api/v3")]
-        return base_url
-    if base_url.endswith("/v1") or base_url.endswith("/v2"):
-        base_url = base_url.rsplit("/", 1)[0]
-    return base_url
+    return base_url.rstrip("/")
 
 def looks_like_html_response(text: str) -> bool:
     sample = str(text or "").lstrip()[:200].lower()
@@ -14458,9 +14585,15 @@ def video_submit_url_candidates(provider, base_url):
     if is_lingjing_provider(provider):
         return [f"{base_url}/v1/videos"]
     video_request_mode = effective_video_request_mode(provider)
-    if video_request_mode == "megabyai-v1-videos":
+    if video_request_mode == TUDOU_VIDEO_REQUEST_MODE:
+        return [f"{base_url}/v1/videos", f"{base_url}/v1/videos/generations"]
+    if video_request_mode == AICOST_VIDEO_REQUEST_MODE:
         return [f"{base_url}/v1/videos"]
-    if video_request_mode == "sudashui-video-generations":
+    if video_request_mode == GEEKNOW_VIDEO_REQUEST_MODE:
+        return [f"{base_url}/v1/videos"]
+    if video_request_mode == MEGABYAI_VIDEO_REQUEST_MODE:
+        return [f"{base_url}/v1/videos"]
+    if video_request_mode == SUDASHUI_VIDEO_REQUEST_MODE:
         return [f"{base_url}/v1/video/generations"]
     if video_request_mode == "openai-video-generations":
         return [f"{base_url}/v1/video/generations"]
@@ -14488,9 +14621,15 @@ def video_task_url_candidates(provider, base_url, task_id, submit_url=""):
             f"{base_url}/v1/video/query?{urllib.parse.urlencode({'id': task_id})}",
         ]
     video_request_mode = effective_video_request_mode(provider)
-    if video_request_mode == "megabyai-v1-videos":
+    if video_request_mode == TUDOU_VIDEO_REQUEST_MODE:
+        return [f"{base_url}/v1/videos/{quoted_id}", f"{base_url}/v1/tasks/{quoted_id}"]
+    if video_request_mode == AICOST_VIDEO_REQUEST_MODE:
         return [f"{base_url}/v1/videos/{quoted_id}"]
-    if video_request_mode == "sudashui-video-generations":
+    if video_request_mode == GEEKNOW_VIDEO_REQUEST_MODE:
+        return [f"{base_url}/v1/videos/{quoted_id}"]
+    if video_request_mode == MEGABYAI_VIDEO_REQUEST_MODE:
+        return [f"{base_url}/v1/videos/{quoted_id}"]
+    if video_request_mode == SUDASHUI_VIDEO_REQUEST_MODE:
         return [f"{base_url}/v1/video/generations/{quoted_id}"]
     if video_request_mode == "openai-video-generations":
         return [f"{base_url}/v1/video/generations/{quoted_id}"]
@@ -14514,8 +14653,14 @@ def video_task_url_candidates(provider, base_url, task_id, submit_url=""):
     return [v1_task, v1_generic_task, v2_task]
 
 def effective_video_request_mode(provider) -> str:
+    if is_aicost_official_provider(provider):
+        return AICOST_VIDEO_REQUEST_MODE
     if is_megabyai_provider(provider):
-        return "megabyai-v1-videos"
+        return MEGABYAI_VIDEO_REQUEST_MODE
+    if is_geeknow_official_provider(provider):
+        return GEEKNOW_VIDEO_REQUEST_MODE
+    if is_tudou_official_provider(provider):
+        return TUDOU_VIDEO_REQUEST_MODE
     if (
         is_agnes_provider(provider)
         or is_volcengine_provider(provider)
@@ -14530,12 +14675,23 @@ def is_openai_video_generations_mode(provider) -> bool:
     return effective_video_request_mode(provider) == "openai-video-generations"
 
 def is_sudashui_video_generations_mode(provider) -> bool:
-    return effective_video_request_mode(provider) == "sudashui-video-generations"
+    return effective_video_request_mode(provider) == SUDASHUI_VIDEO_REQUEST_MODE
 
 def is_megabyai_video_mode(provider) -> bool:
-    return effective_video_request_mode(provider) == "megabyai-v1-videos"
+    return effective_video_request_mode(provider) == MEGABYAI_VIDEO_REQUEST_MODE
+
+def is_geeknow_video_mode(provider) -> bool:
+    return effective_video_request_mode(provider) == GEEKNOW_VIDEO_REQUEST_MODE
+
+def is_tudou_video_mode(provider) -> bool:
+    return effective_video_request_mode(provider) == TUDOU_VIDEO_REQUEST_MODE
+
+def is_aicost_video_mode(provider) -> bool:
+    return effective_video_request_mode(provider) == AICOST_VIDEO_REQUEST_MODE
 
 def video_poll_interval(provider) -> float:
+    if is_geeknow_video_mode(provider) or is_aicost_video_mode(provider):
+        return 10.0
     return 8.0 if is_megabyai_video_mode(provider) else VIDEO_POLL_INTERVAL
 
 def openai_video_generations_duration(duration) -> str:
@@ -14588,376 +14744,6 @@ async def openai_video_generations_reference_urls(values, label: str, limit: int
             urls.append(url)
     return urls
 
-MEGABYAI_ASPECT_RATIOS = {"16:9", "9:16", "1:1"}
-MEGABYAI_RESOLUTIONS = {"480p", "720p"}
-
-def megabyai_video_duration(duration) -> int:
-    try:
-        value = int(duration)
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail="MegabyAI 视频时长必须是 4 到 15 秒的整数") from exc
-    if value < 4 or value > 15:
-        raise HTTPException(status_code=400, detail="MegabyAI 视频时长仅支持 4 到 15 秒")
-    return value
-
-def megabyai_video_ratio(aspect_ratio: str) -> str:
-    value = str(aspect_ratio or "16:9").strip()
-    if value not in MEGABYAI_ASPECT_RATIOS:
-        raise HTTPException(status_code=400, detail=f"MegabyAI 视频比例不支持：{value or '(empty)'}；仅支持 16:9、9:16、1:1")
-    return value
-
-def megabyai_video_resolution(resolution: str) -> str:
-    value = str(resolution or "720p").strip().lower()
-    if value not in MEGABYAI_RESOLUTIONS:
-        raise HTTPException(status_code=400, detail=f"MegabyAI 视频分辨率不支持：{value or '(empty)'}；仅支持 480p、720p")
-    return value
-
-async def megabyai_public_reference_url(value, label: str) -> str:
-    text = str(value or "").strip()
-    if not text:
-        return ""
-    if text.startswith("asset://"):
-        raise HTTPException(status_code=400, detail=f"MegabyAI {label}只支持公网 HTTP/HTTPS URL，不支持 asset:// 认证素材")
-    try:
-        url = await openai_video_proxy_public_reference_url(text)
-    except HTTPException as exc:
-        raise HTTPException(status_code=400, detail=f"MegabyAI {label}无法转换为公网 URL：{exc.detail}") from exc
-    parsed = urllib.parse.urlsplit(str(url or "").strip())
-    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-        raise HTTPException(status_code=400, detail=f"MegabyAI {label}不是有效的公网 HTTP/HTTPS URL")
-    host = parsed.hostname.lower()
-    if host in {"localhost", "::1", "0.0.0.0"} or re.match(
-        r"^(127\.|10\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.)", host
-    ):
-        raise HTTPException(status_code=400, detail=f"MegabyAI {label}不能使用本机或内网地址")
-    return url
-
-async def megabyai_reference_urls(values, label: str, limit: int) -> List[str]:
-    cleaned = [value for value in (values or []) if str(value or "").strip()]
-    if len(cleaned) > limit:
-        raise HTTPException(status_code=400, detail=f"MegabyAI {label}最多支持 {limit} 个，当前为 {len(cleaned)} 个")
-    urls = []
-    for value in cleaned:
-        urls.append(await megabyai_public_reference_url(value, label))
-    return urls
-
-async def generate_megabyai_video(client, payload, provider, submit_url, model, progress=None):
-    image_values = [getattr(ref, "url", "") for ref in (payload.images or [])]
-    image_urls = await megabyai_reference_urls(image_values, "参考图片", 9)
-    video_urls = await megabyai_reference_urls(payload.videos, "参考视频", 3)
-    audio_urls = await megabyai_reference_urls(payload.audios, "参考音频", 3)
-    body = {
-        "model": selected_model(model, "videos-mini"),
-        "prompt": str(payload.prompt or ""),
-        "duration": megabyai_video_duration(payload.duration),
-        "ratio": megabyai_video_ratio(payload.aspect_ratio),
-        "resolution": megabyai_video_resolution(payload.resolution),
-    }
-    if image_urls:
-        body["referenceImages"] = image_urls
-    if video_urls:
-        body["referenceVideos"] = video_urls
-    if audio_urls:
-        body["referenceAudios"] = audio_urls
-    response = await client.post(submit_url, headers=api_headers(provider=provider), json=body)
-    response.raise_for_status()
-    try:
-        raw = response.json()
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"MegabyAI 视频接口返回非 JSON 响应：{response.text[:500]}") from exc
-    if not isinstance(raw, dict):
-        raise HTTPException(status_code=502, detail=f"MegabyAI 视频接口返回非 JSON 对象：{raw}")
-    status = str(raw.get("status") or "").strip().upper()
-    if status in VIDEO_TASK_FAILURE_STATUSES:
-        raise HTTPException(status_code=502, detail=humanize_video_task_failure(video_task_failure_reason(raw)))
-    task_id = str(raw.get("task_id") or raw.get("id") or extract_task_id(raw, allow_plain_id=True) or "").strip()
-    if not task_id:
-        raise HTTPException(status_code=502, detail=f"MegabyAI 视频接口未返回任务 ID，已停止处理以避免重复扣费：{raw}")
-    report_canvas_video_progress(progress, {
-        "status": "polling",
-        "upstream_task_id": task_id,
-        "task_id": task_id,
-        "submit_url": submit_url,
-        "raw_submit": raw,
-    })
-    result = raw
-    if not video_output_urls(raw):
-        result = await wait_for_video_task(client, provider, task_id, submit_url, progress)
-    urls = video_output_urls(result)
-    if not urls:
-        raise HTTPException(status_code=502, detail=f"MegabyAI 视频生成成功但没有返回视频：{result}")
-    local_urls = [await save_remote_video_to_output(url, provider=provider) for url in urls]
-    return {"videos": local_urls, "task_id": task_id, "raw": result}
-
-SUDASHUI_FILES_BASE_URL = "https://files.sudashuiapi.com"
-SUDASHUI_ASPECT_RATIOS = {"16:9", "9:16", "1:1", "4:3", "3:4", "21:9", "adaptive"}
-SUDASHUI_UPLOAD_RULES = {
-    "图片": ({"image/jpeg", "image/png", "image/webp"}, 30 * 1024 * 1024),
-    "视频": ({"video/mp4", "video/quicktime"}, 50 * 1024 * 1024),
-    "音频": ({"audio/mpeg", "audio/wav"}, 15 * 1024 * 1024),
-}
-
-def sudashui_video_duration(duration) -> int:
-    try:
-        numeric = float(duration)
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail="Sudashui 视频时长必须是 4 到 15 秒的整数") from exc
-    if isinstance(duration, bool) or not numeric.is_integer():
-        raise HTTPException(status_code=400, detail="Sudashui 视频时长必须是 4 到 15 秒的整数")
-    value = int(numeric)
-    if value < 4 or value > 15:
-        raise HTTPException(status_code=400, detail="Sudashui 视频时长仅支持 4 到 15 秒")
-    return value
-
-def sudashui_video_aspect_ratio(aspect_ratio: str) -> str:
-    value = str(aspect_ratio or "").strip()
-    if value == "keep_ratio":
-        value = "adaptive"
-    if value not in SUDASHUI_ASPECT_RATIOS:
-        allowed = "、".join(("16:9", "9:16", "1:1", "4:3", "3:4", "21:9", "adaptive"))
-        raise HTTPException(status_code=400, detail=f"Sudashui 视频比例不支持：{value or '(empty)'}；仅支持 {allowed}")
-    return value
-
-def sudashui_frame_role(role: str) -> str:
-    value = str(role or "").strip().lower()
-    if value in {"first_frame", "first"}:
-        return "first_frame"
-    if value in {"last_frame", "last"}:
-        return "last_frame"
-    return value
-
-def sudashui_source_is_files_url(value: str) -> bool:
-    try:
-        parsed = urllib.parse.urlsplit(str(value or "").strip())
-    except Exception:
-        return False
-    return parsed.scheme.lower() == "https" and (parsed.hostname or "").lower() == "files.sudashuiapi.com"
-
-def sudashui_source_is_public_url(value: str) -> bool:
-    try:
-        parsed = urllib.parse.urlsplit(str(value or "").strip())
-    except Exception:
-        return False
-    if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
-        return False
-    host = parsed.hostname.lower()
-    return not (
-        host in {"127.0.0.1", "localhost", "::1"}
-        or re.match(r"^(192\.168\.|10\.|172\.(1[6-9]|2\d|3[01])\.)", host)
-    )
-
-def sudashui_local_source_value(value: str) -> str:
-    text = str(value or "").strip()
-    if not text:
-        return ""
-    try:
-        parsed = urllib.parse.urlsplit(text)
-    except Exception:
-        return text
-    if parsed.scheme.lower() in {"http", "https"} and not sudashui_source_is_public_url(text):
-        return urllib.parse.unquote(parsed.path or "")
-    return text
-
-def sudashui_validate_upload_payload(kind: str, mime: str, size: int):
-    allowed_types, max_bytes = SUDASHUI_UPLOAD_RULES[kind]
-    normalized_mime = str(mime or "").split(";", 1)[0].strip().lower()
-    if normalized_mime not in allowed_types:
-        allowed = "、".join(sorted(allowed_types))
-        detail = f"Sudashui 参考{kind}不支持 MIME 类型 {normalized_mime or '(empty)'}；仅支持 {allowed}"
-        raise HTTPException(status_code=400, detail=detail)
-    if size >= max_bytes:
-        raise HTTPException(status_code=400, detail=f"Sudashui 参考{kind}文件过大：必须小于 {max_bytes // (1024 * 1024)} MB")
-
-def sudashui_data_url_payload(value: str, kind: str):
-    match = re.match(r"^data:([^;,]+);base64,(.+)$", str(value or ""), re.IGNORECASE | re.DOTALL)
-    if not match:
-        raise HTTPException(status_code=400, detail=f"Sudashui 参考{kind}的 data URL 不合法，仅支持 base64 data URL")
-    mime = match.group(1).strip().lower()
-    try:
-        encoded = re.sub(r"\s+", "", match.group(2))
-        content = base64.b64decode(encoded, validate=True)
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Sudashui 参考{kind}的 data URL 解码失败") from exc
-    if not content:
-        raise HTTPException(status_code=400, detail=f"Sudashui 参考{kind}的 data URL 内容为空")
-    sudashui_validate_upload_payload(kind, mime, len(content))
-    ext = mimetypes.guess_extension(mime) or {"图片": ".png", "视频": ".mp4", "音频": ".mp3"}[kind]
-    name = {"图片": "canvas_image", "视频": "canvas_video", "音频": "canvas_audio"}[kind]
-    return f"{name}{ext}", content, mime
-
-def sudashui_local_file_payload(value: str, kind: str):
-    source = sudashui_local_source_value(value)
-    path = output_file_from_url(source)
-    if not path:
-        raise HTTPException(status_code=400, detail=f"Sudashui 参考{kind}只支持公网 URL、合法 data URL 或画布内受控本地文件")
-    mime = content_type_for_path(path)
-    sudashui_validate_upload_payload(kind, mime, os.path.getsize(path))
-    with open(path, "rb") as fh:
-        return os.path.basename(path), fh.read(), mime
-
-async def sudashui_upload_media(client, provider, value: str, kind: str, cache) -> str:
-    source = str(value or "").strip()
-    if not source:
-        raise HTTPException(status_code=400, detail=f"Sudashui 参考{kind}地址不能为空")
-    if source in cache:
-        cached_kind, cached_url = cache[source]
-        if cached_kind != kind:
-            raise HTTPException(status_code=400, detail=f"同一个 Sudashui 素材不能同时作为参考{cached_kind}和参考{kind}")
-        return cached_url
-    if sudashui_source_is_public_url(source):
-        cache[source] = (kind, source)
-        return source
-    if source.startswith("data:"):
-        file_tuple = sudashui_data_url_payload(source, kind)
-    else:
-        file_tuple = sudashui_local_file_payload(source, kind)
-    response = await client.post(
-        SUDASHUI_FILES_BASE_URL,
-        headers=api_headers(json_body=False, provider=provider),
-        files={"file": file_tuple},
-        timeout=180,
-    )
-    response.raise_for_status()
-    try:
-        raw = response.json()
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Sudashui 文件上传返回非 JSON 响应：{response.text[:300]}") from exc
-    uploaded_url = str(raw.get("url") or "").strip() if isinstance(raw, dict) else ""
-    if not sudashui_source_is_files_url(uploaded_url):
-        raise HTTPException(status_code=502, detail=f"Sudashui 文件上传成功但未返回合法文件 URL：{raw}")
-    cache[source] = (kind, uploaded_url)
-    return uploaded_url
-
-def sudashui_official_asset_indexes(payload, model: str, image_count: int) -> List[int]:
-    indexes = list(payload.official_asset_indexes or [])
-    if not indexes:
-        return []
-    if not str(model or "").strip().lower().startswith("sdas-gf-"):
-        raise HTTPException(status_code=400, detail="official_asset_indexes 仅可用于 sdas-gf- 开头的 Sudashui 官方模型")
-    if len(set(indexes)) != len(indexes):
-        raise HTTPException(status_code=400, detail="official_asset_indexes 不能包含重复编号")
-    for index in indexes:
-        if index < 0 or index >= image_count:
-            raise HTTPException(status_code=400, detail=f"official_asset_indexes 图片编号越界：{index}；当前共有 {image_count} 张图片")
-    return indexes
-
-def sudashui_validate_official_sources(image_sources: List[str], official_indexes: List[int]):
-    for index in official_indexes:
-        source = image_sources[index]
-        if sudashui_source_is_public_url(source) and not sudashui_source_is_files_url(source):
-            raise HTTPException(
-                status_code=400,
-                detail=f"真人素材图片 {index + 1} 必须先导入画布并上传到 Sudashui 文件域，不能直接使用外部公网图片",
-            )
-
-def sudashui_nonempty_string_values(values) -> List[str]:
-    result = []
-    for value in values or []:
-        text = str(value or "").strip()
-        if text:
-            result.append(text)
-    return result
-
-def sudashui_nonempty_video_sources(payload):
-    image_refs = [ref for ref in (payload.images or []) if str(ref.url or "").strip()]
-    return (
-        image_refs,
-        sudashui_nonempty_string_values(payload.videos),
-        sudashui_nonempty_string_values(payload.audios),
-    )
-
-def sudashui_validate_video_sources(model: str, image_refs, video_sources, audio_sources):
-    if len(image_refs) > 9:
-        raise HTTPException(status_code=400, detail="Sudashui references 模式最多支持 9 张图片")
-    if len(video_sources) > 3:
-        raise HTTPException(status_code=400, detail="Sudashui references 模式最多支持 3 个视频")
-    if len(audio_sources) > 3:
-        raise HTTPException(status_code=400, detail="Sudashui references 模式最多支持 3 个音频")
-    if len(image_refs) + len(video_sources) + len(audio_sources) > 12:
-        raise HTTPException(status_code=400, detail="Sudashui references 模式的图片、视频和音频总数不能超过 12 个")
-    official_model = str(model or "").strip().lower().startswith("sdas-gf-")
-    if official_model and video_sources:
-        raise HTTPException(status_code=400, detail="Sudashui 官方模型不支持参考视频，请移除视频素材")
-
-async def sudashui_frames_inner_payload(client, provider, payload, model: str, sources):
-    image_refs = sources["image_refs"]
-    roles = sources["roles"]
-    if sources["video_sources"] or sources["audio_sources"]:
-        raise HTTPException(status_code=400, detail="Sudashui frames 模式不能同时使用参考视频或参考音频")
-    if len(image_refs) != 2 or roles.count("first_frame") != 1 or roles.count("last_frame") != 1:
-        raise HTTPException(status_code=400, detail="Sudashui frames 模式必须恰好提供一张首帧和一张尾帧图片")
-    first_index = roles.index("first_frame")
-    last_index = roles.index("last_frame")
-    ordered_refs = [image_refs[first_index], image_refs[last_index]]
-    original_indexes = sudashui_official_asset_indexes(payload, model, len(image_refs))
-    index_mapping = {first_index: 0, last_index: 1}
-    official_indexes = [index_mapping[index] for index in original_indexes]
-    image_sources = [str(ref.url or "").strip() for ref in ordered_refs]
-    sudashui_validate_official_sources(image_sources, official_indexes)
-    upload_cache = {}
-    first_url = await sudashui_upload_media(client, provider, image_sources[0], "图片", upload_cache)
-    last_url = await sudashui_upload_media(client, provider, image_sources[1], "图片", upload_cache)
-    inner = {
-        "aspectRatio": sources["aspect_ratio"],
-        "mode": "frames",
-        "firstFrameUrl": first_url,
-        "lastFrameUrl": last_url,
-    }
-    if official_indexes:
-        inner["officialAssetIndexes"] = official_indexes
-    return inner
-
-async def sudashui_references_inner_payload(client, provider, payload, model: str, sources):
-    image_sources = [str(ref.url or "").strip() for ref in sources["image_refs"]]
-    official_indexes = sudashui_official_asset_indexes(payload, model, len(image_sources))
-    sudashui_validate_official_sources(image_sources, official_indexes)
-    upload_cache = {}
-    image_urls = [
-        await sudashui_upload_media(client, provider, source, "图片", upload_cache)
-        for source in image_sources
-    ]
-    video_urls = [
-        await sudashui_upload_media(client, provider, source, "视频", upload_cache)
-        for source in sources["video_sources"]
-    ]
-    audio_urls = [
-        await sudashui_upload_media(client, provider, source, "音频", upload_cache)
-        for source in sources["audio_sources"]
-    ]
-    inner = {"aspectRatio": sources["aspect_ratio"], "mode": "references"}
-    for key, values in (
-        ("imageUrls", image_urls),
-        ("videoUrls", video_urls),
-        ("audioUrls", audio_urls),
-        ("officialAssetIndexes", official_indexes),
-    ):
-        if values:
-            inner[key] = values
-    return inner
-
-async def sudashui_video_body(client, provider, payload, model: str) -> Dict[str, Any]:
-    duration = sudashui_video_duration(payload.duration)
-    image_refs, video_sources, audio_sources = sudashui_nonempty_video_sources(payload)
-    sudashui_validate_video_sources(model, image_refs, video_sources, audio_sources)
-    roles = [sudashui_frame_role(getattr(ref, "role", "")) for ref in image_refs]
-    sources = {
-        "image_refs": image_refs,
-        "video_sources": video_sources,
-        "audio_sources": audio_sources,
-        "roles": roles,
-        "aspect_ratio": sudashui_video_aspect_ratio(payload.aspect_ratio),
-    }
-    if any(role in {"first_frame", "last_frame"} for role in roles):
-        inner = await sudashui_frames_inner_payload(client, provider, payload, model, sources)
-    else:
-        inner = await sudashui_references_inner_payload(client, provider, payload, model, sources)
-    return {
-        "model": model,
-        "prompt": str(payload.prompt or ""),
-        "duration": duration,
-        "metadata": {"payload": json.dumps(inner, ensure_ascii=False, separators=(",", ":"))},
-    }
-
 VIDEO_TASK_SUCCESS_STATUSES = {
     "SUCCESS", "SUCCEED", "SUCCEEDED", "COMPLETED", "COMPLETE",
     "DONE", "FINISHED", "FINISH", "OK", "READY",
@@ -14966,32 +14752,6 @@ VIDEO_TASK_FAILURE_STATUSES = {
     "FAILURE", "FAILED", "FAIL", "ERROR", "ERRORED",
     "CANCELED", "CANCELLED", "TIMEOUT", "TIMEDOUT", "REJECTED", "EXPIRED",
 }
-
-def humanize_video_task_failure(reason) -> str:
-    """把上游视频任务的失败原因转成对用户友好的中文提示。
-    目前主要处理 veo（Google）的内容安全过滤码。"""
-    text = str(reason or "").strip()
-    upper = text.upper()
-    # veo 知名人物/真人面孔过滤
-    if "PROMINENT_PEOPLE_FILTER" in upper or "PROMINENT_PEOPLE" in upper:
-        return (
-            "视频生成被上游内容安全策略拦截：检测到提示词或参考图里包含知名人物 / 真人面孔"
-            f"（错误码：{text}）。\n\n"
-            "这不是代码错误，而是 veo（Google）的内容审核规则——它会拒绝生成涉及真实/知名人物的视频。\n\n"
-            "建议这样处理：\n"
-            "  1. 去掉提示词里的人名、明星、公众人物等指向具体真人的描述；\n"
-            "  2. 换用非真人参考图，例如插画、AI 头像、卡通形象、商品图、场景图；\n"
-            "  3. 如果用了真人照片做参考图，先做模糊/遮挡/转成明显的二次元插画风，或干脆只用文字提示词测试。"
-        )
-    # veo 其它常见安全过滤
-    if "SAFETY" in upper or "CONTENT_FILTER" in upper or "POLICY" in upper:
-        return (
-            "视频生成被上游内容安全策略拦截"
-            f"（错误码：{text}）。\n\n"
-            "这是 veo 的内容审核规则，提示词或参考图触发了安全过滤。\n"
-            "请调整提示词/参考图后重试，避免涉及真人、暴力、敏感或受限内容。"
-        )
-    return f"视频生成任务失败：{text}"
 
 def video_task_failure_reason(payload):
     fail_reasons = []
@@ -15174,49 +14934,12 @@ def video_retry_after_seconds(source):
         return None
     return min(max(values), max(5.0, VIDEO_POLL_TIMEOUT))
 
-def sudashui_video_task_pending(raw) -> bool:
-    if not isinstance(raw, dict):
-        return False
-    task_data = raw.get("data") if isinstance(raw.get("data"), dict) else raw
-    status = str(task_data.get("status") or task_data.get("task_status") or "").strip().upper()
-    if status in VIDEO_TASK_SUCCESS_STATUSES or status in VIDEO_TASK_FAILURE_STATUSES:
-        return False
-    if video_output_urls(raw):
-        return False
-    inner = task_data.get("data") if isinstance(task_data.get("data"), dict) else {}
-    inner_state = str(inner.get("state") or inner.get("status") or "").strip().upper()
-    return status in {
-        "NOT_START", "NOT_STARTED", "SUBMITTED", "QUEUED", "QUEUEING", "PENDING",
-        "IN_PROGRESS", "PROCESSING", "RUNNING",
-    } or inner_state in {"QUEUEING", "QUEUED", "PENDING", "IN_PROGRESS", "PROCESSING", "RUNNING"}
-
-def sudashui_video_task_started(raw) -> bool:
-    if not isinstance(raw, dict):
-        return False
-    task_data = raw.get("data") if isinstance(raw.get("data"), dict) else raw
-    status = str(task_data.get("status") or task_data.get("task_status") or "").strip().upper()
-    if status in {"NOT_START", "NOT_STARTED", "SUBMITTED", "QUEUED", "QUEUEING", "PENDING"}:
-        return False
-    try:
-        if float(task_data.get("start_time") or 0) > 0:
-            return True
-    except Exception:
-        pass
-    progress_text = str(task_data.get("progress") or "").strip()
-    progress_match = re.search(r"\d+(?:\.\d+)?", progress_text)
-    if progress_match and float(progress_match.group(0)) > 0:
-        return True
-    inner = task_data.get("data") if isinstance(task_data.get("data"), dict) else {}
-    inner_state = str(inner.get("state") or inner.get("status") or "").strip().upper()
-    return status in {"IN_PROGRESS", "PROCESSING", "RUNNING"} or inner_state in {"IN_PROGRESS", "PROCESSING", "RUNNING"}
-
 async def wait_for_video_task(client, provider, task_id, submit_url="", on_progress=None):
     base_url = video_api_root(provider)
     if not base_url:
         raise HTTPException(status_code=400, detail=f"{provider.get('name') or provider['id']} 未配置 Base URL")
     task_urls = video_task_url_candidates(provider, base_url, task_id, submit_url)
-    wait_for_sudashui_start = is_sudashui_video_generations_mode(provider)
-    deadline = None if wait_for_sudashui_start else time.monotonic() + VIDEO_POLL_TIMEOUT
+    deadline = time.monotonic() + VIDEO_POLL_TIMEOUT
     poll_interval = video_poll_interval(provider)
     delay = poll_interval
     last_payload = {}
@@ -15267,15 +14990,6 @@ async def wait_for_video_task(client, provider, task_id, submit_url="", on_progr
                 })
                 continue
             if last_error:
-                if wait_for_sudashui_start and isinstance(last_error, (httpx.TransportError, TimeoutError)):
-                    delay = poll_interval
-                    transient_message = str(last_error).strip() or type(last_error).__name__
-                    report_canvas_video_progress(on_progress, {
-                        "status": "polling",
-                        "message": f"Sudashui 视频任务查询暂时失败，将自动重试：{transient_message}",
-                        "next_poll_at": time.time() + delay,
-                    })
-                    continue
                 raise last_error
             raise HTTPException(status_code=502, detail=f"视频任务查询失败：{task_id}")
         last_payload = raw
@@ -15287,13 +15001,9 @@ async def wait_for_video_task(client, provider, task_id, submit_url="", on_progr
             else raw.get("detail") if isinstance(raw.get("detail"), dict)
             else raw
         )
-        if wait_for_sudashui_start and sudashui_business_failure(raw):
-            raise HTTPException(status_code=502, detail=humanize_video_task_failure(video_task_failure_reason(raw)))
         if is_video_terminal_error(raw):
             raise HTTPException(status_code=502, detail=humanize_video_task_failure(video_task_failure_reason(raw)))
         status = str(task_data.get("status") or task_data.get("task_status") or raw.get("status") or raw.get("task_status") or "").upper()
-        if wait_for_sudashui_start and deadline is None and sudashui_video_task_started(raw):
-            deadline = time.monotonic() + VIDEO_POLL_TIMEOUT
         if status in VIDEO_TASK_SUCCESS_STATUSES:
             return raw
         # 部分上游（如玉玉API）status 字段非标准或为空，但已经返回了视频 URL ——
@@ -15319,79 +15029,6 @@ async def wait_for_video_task(client, provider, task_id, submit_url="", on_progr
             raise HTTPException(status_code=502, detail=humanize_video_task_failure(reason))
         delay = poll_interval
     raise HTTPException(status_code=504, detail=f"视频生成任务超时：{last_payload or task_id}")
-
-def sudashui_business_failure(payload) -> bool:
-    def walk(value, depth=0):
-        if value is None or depth > 8:
-            return False
-        if isinstance(value, str):
-            text = value.strip()
-            if text[:1] in {"{", "["}:
-                try:
-                    return walk(json.loads(text), depth + 1)
-                except Exception:
-                    return False
-            return False
-        if isinstance(value, (list, tuple)):
-            return any(walk(item, depth + 1) for item in value)
-        if not isinstance(value, dict):
-            return False
-        status = str(value.get("status") or value.get("task_status") or value.get("state") or "").strip().upper()
-        if status in VIDEO_TASK_FAILURE_STATUSES:
-            return True
-        if value.get("success") is False:
-            return True
-        code = str(value.get("code") or "").strip().lower()
-        if code and code not in {"0", "200", "ok", "success"}:
-            return True
-        if str(value.get("fail_reason") or value.get("failReason") or "").strip():
-            return True
-        err_code = str(value.get("err_code") or value.get("errCode") or "").strip()
-        if err_code and err_code.lower() not in {"0", "none", "null"}:
-            return True
-        error_value = value.get("error")
-        if isinstance(error_value, str) and error_value.strip():
-            return True
-        if isinstance(error_value, dict) and error_value:
-            return True
-        nested_keys = ("error", "data", "detail", "result", "response")
-        return any(walk(value.get(key), depth + 1) for key in nested_keys if key in value)
-
-    return walk(payload)
-
-async def generate_sudashui_video(client, payload, provider, progress=None):
-    base_url = video_api_root(provider)
-    submit_url = video_submit_url_candidates(provider, base_url)[0]
-    model = selected_model(payload.model, "veo3-fast")
-    body = await sudashui_video_body(client, provider, payload, model)
-    response = await client.post(submit_url, headers=api_headers(provider=provider), json=body)
-    response.raise_for_status()
-    try:
-        raw = response.json()
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Sudashui 视频接口返回非 JSON 响应：{response.text[:500]}") from exc
-    if not isinstance(raw, dict):
-        raise HTTPException(status_code=502, detail=f"Sudashui 视频接口返回非 JSON 对象：{raw}")
-    if sudashui_business_failure(raw):
-        raise HTTPException(status_code=502, detail=humanize_video_task_failure(video_task_failure_reason(raw)))
-    task_id = extract_task_id(raw, allow_plain_id=True)
-    if not task_id:
-        raise HTTPException(status_code=502, detail=f"Sudashui 视频接口未返回任务 ID，已停止处理以避免重复扣费：{raw}")
-    report_canvas_video_progress(progress, {
-        "status": "polling",
-        "upstream_task_id": task_id,
-        "task_id": task_id,
-        "submit_url": submit_url,
-        "raw_submit": raw,
-    })
-    result = raw
-    if not video_output_urls(raw):
-        result = await wait_for_video_task(client, provider, task_id, submit_url, progress)
-    urls = video_output_urls(result)
-    if not urls:
-        raise HTTPException(status_code=502, detail=f"Sudashui 视频生成成功但没有返回视频：{result}")
-    local_urls = [await save_remote_video_to_output(url, provider=provider) for url in urls]
-    return {"videos": local_urls, "task_id": task_id, "raw": result}
 
 def apimart_video_size(size):
     value = str(size or "16:9").strip()
@@ -15765,7 +15402,17 @@ async def build_canvas_video_result(payload: CanvasVideoRequest, progress=None):
     is_single_video_generations = is_openai_video_generations_mode(provider)
     is_sudashui_video_generations = is_sudashui_video_generations_mode(provider)
     is_megabyai = is_megabyai_video_mode(provider)
-    is_apimart = is_apimart_provider(provider) and not (is_single_video_generations or is_sudashui_video_generations or is_megabyai)
+    is_geeknow = is_geeknow_video_mode(provider)
+    is_tudou = is_tudou_video_mode(provider)
+    is_aicost = is_aicost_video_mode(provider)
+    is_apimart = is_apimart_provider(provider) and not (
+        is_single_video_generations
+        or is_sudashui_video_generations
+        or is_megabyai
+        or is_geeknow
+        or is_tudou
+        or is_aicost
+    )
     is_volcengine = is_volcengine_provider(provider)
     is_yuli = is_yuli_provider(provider)
     is_lingjing = is_lingjing_provider(provider)
@@ -15774,6 +15421,7 @@ async def build_canvas_video_result(payload: CanvasVideoRequest, progress=None):
     submit_urls = video_submit_url_candidates(provider, base_url)
     submit_url = submit_urls[0]
     requested_model = selected_model(payload.model, "agnes-video-v2.0" if is_agnes else "videos-mini" if is_megabyai else "veo3-fast")
+    report_canvas_video_progress(progress, {"model": requested_model})
     is_veo31 = is_apimart and is_apimart_veo31_model(requested_model)
     if is_agnes:
         try:
@@ -15809,10 +15457,97 @@ async def build_canvas_video_result(payload: CanvasVideoRequest, progress=None):
             raise HTTPException(status_code=502, detail=f"请求上游视频接口失败：{exc}") from exc
     try:
         async with httpx.AsyncClient(timeout=VIDEO_POLL_TIMEOUT) as client:
+            if is_aicost:
+                request_data = payload.model_dump() if hasattr(payload, "model_dump") else payload.dict()
+                request_data["model"] = requested_model
+                try:
+                    return await generate_aicost_video(
+                        client,
+                        request_data,
+                        base_url=base_url,
+                        headers=api_headers(json_body=False, provider=provider),
+                        progress=progress,
+                        resolve_local_path=output_file_from_url,
+                        content_type_for_path=content_type_for_path,
+                        public_reference_url=lambda value: openai_video_proxy_public_reference_url(value),
+                        save_video=lambda url: save_remote_video_to_output(url, provider=provider),
+                        poll_timeout=VIDEO_POLL_TIMEOUT,
+                        poll_interval=video_poll_interval(provider),
+                    )
+                except AICostProtocolError as exc:
+                    raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+            if is_tudou:
+                request_data = payload.model_dump() if hasattr(payload, "model_dump") else payload.dict()
+                request_data["model"] = requested_model
+                try:
+                    return await generate_tudou_video(
+                        client,
+                        request_data,
+                        base_url=base_url,
+                        headers=api_headers(json_body=False, provider=provider),
+                        progress=progress,
+                        resolve_local_path=output_file_from_url,
+                        content_type_for_path=content_type_for_path,
+                        public_reference_url=lambda value: openai_video_proxy_public_reference_url(value),
+                        save_video=lambda url: save_remote_video_to_output(url, provider=provider),
+                        poll_timeout=VIDEO_POLL_TIMEOUT,
+                    )
+                except TudouProtocolError as exc:
+                    raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+            if is_geeknow:
+                request_data = payload.model_dump() if hasattr(payload, "model_dump") else payload.dict()
+                request_data["model"] = requested_model
+                try:
+                    return await generate_geeknow_video(
+                        client,
+                        request_data,
+                        base_url=base_url,
+                        headers=api_headers(json_body=False, provider=provider),
+                        progress=progress,
+                        resolve_local_path=output_file_from_url,
+                        content_type_for_path=content_type_for_path,
+                        public_reference_url=lambda value: openai_video_proxy_public_reference_url(value),
+                        save_video=lambda url: save_remote_video_to_output(url, provider=provider),
+                        poll_timeout=VIDEO_POLL_TIMEOUT,
+                        poll_interval=video_poll_interval(provider),
+                    )
+                except GeekNowProtocolError as exc:
+                    raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
             if is_megabyai:
-                return await generate_megabyai_video(client, payload, provider, submit_url, requested_model, progress)
+                request_data = payload.model_dump() if hasattr(payload, "model_dump") else payload.dict()
+                request_data["model"] = requested_model
+                try:
+                    return await generate_megabyai_video(
+                        client,
+                        request_data,
+                        base_url=base_url,
+                        headers=api_headers(json_body=False, provider=provider),
+                        progress=progress,
+                        public_reference_url=lambda value: openai_video_proxy_public_reference_url(value),
+                        save_video=lambda url: save_remote_video_to_output(url, provider=provider),
+                        poll_timeout=VIDEO_POLL_TIMEOUT,
+                        poll_interval=video_poll_interval(provider),
+                    )
+                except MegabyAIProtocolError as exc:
+                    raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
             if is_sudashui_video_generations:
-                return await generate_sudashui_video(client, payload, provider, progress)
+                request_data = payload.model_dump() if hasattr(payload, "model_dump") else payload.dict()
+                request_data["model"] = requested_model
+                try:
+                    return await generate_sudashui_video(
+                        client,
+                        request_data,
+                        base_url=base_url,
+                        headers=api_headers(json_body=False, provider=provider),
+                        progress=progress,
+                        resolve_local_path=output_file_from_url,
+                        content_type_for_path=content_type_for_path,
+                        save_video=lambda url: save_remote_video_to_output(url, provider=provider),
+                        poll_timeout=VIDEO_POLL_TIMEOUT,
+                        poll_interval=video_poll_interval(provider),
+                    )
+                except SudashuiProtocolError as exc:
+                    raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
             # --- 构造图片载荷 ---
             if is_apimart:
                 # APIMart 只接受 http/https 或 asset:// URL，先上传本地图片取回网络 URL

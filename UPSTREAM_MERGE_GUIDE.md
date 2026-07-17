@@ -61,12 +61,20 @@ git status
 
 必须保留的后端能力：
 
-- `video_request_mode` 支持 `openai-videos-generations`、`openai-video-generations`、`sudashui-video-generations` 和 `megabyai-v1-videos`。
+- `video_request_mode` 支持 `openai-videos-generations`、`openai-video-generations`、`sudashui-video-generations`、`megabyai-v1-videos`、`geeknow-v1-videos`、`tudou-video` 和 `aicost-video`。
 - `/v1/videos/generations` 与 `/v1/video/generations` 都可按配置选择。
 - Sudashui 虽然也使用 `/v1/video/generations`，但必须保留独立的字符串化 `metadata.payload` 请求体，不能退回 OpenAI 单数视频格式。
 - Sudashui 分辨率只从模型名展示并记录在本地任务中，不能把 `resolution` 发送给上游。
 - Sudashui 本地素材上传必须使用 `files.sudashuiapi.com`，不能静默回退 Litterbox/temp.sh；创建请求不能自动重发。
 - MegabyAI 必须保留 `POST /v1/videos`、`GET /v1/videos/{task_id}`、camelCase 参考素材字段、8 秒轮询及同源 Bearer 下载，不能退回任一 `generations` 路径。
+- Sudashui 与 MegabyAI 的 Base URL 必须兼容根域名、末尾 `/` 和末尾 `/v1`，插件内部统一保证请求路径只包含一份 `/v1`；MegabyAI 官方域名还必须在后端配置归一化时锁定独立模式。
+- GeekNow 与 Tudou 的协议实现位于 `plugins/video_plugins/`，`main.py` 只保留注册、回调桥接和 FastAPI 错误转换；合并时不得把协议细节重新内联到主文件。
+- GeekNow 的 `geeknow.ai` 与 `api.geeknow.ai` 必须在前端保存和后端调用两侧按完整 hostname 自动识别为 `geeknow-v1-videos`，避免旧配置退回通用 `videos` 路径。
+- Tudou Grok 必须保留 multipart `POST /v1/videos`、`input_reference[]`、`GET /v1/videos/{task_id}` 和同源鉴权 `/content` 下载。
+- Tudou `grok-imagine-video-1.5` 是纯图生视频模型，必须保留单图前置校验和实际模型名，不能回退成 `grok-imagine-video`。
+- Tudou Sora2 必须保留 JSON `POST /v1/videos/generations`、`GET /v1/tasks/{task_id}`、单图公网 URL、显式 `generate_audio` 和结果 URL 解析；不能套用通用复数视频模式的 data URL 图片载荷。
+- Tudou 官方 hostname `api.ai-tudou.net` 必须在前端保存和后端调用两侧自动识别为 `tudou-video`，并保持完整 hostname 精确匹配，避免配置被降级成通用 `videos` 后请求到网站 HTML fallback。
+- 所有独立视频插件必须复用 `plugins/video_plugins/common.py` 的 Base URL 规则：只折叠 URL 路径中的重复斜杠，循环移除末尾重复的 `/v1`、`/v2` 后再补协议路径。根地址、尾斜杠、`//v1`、`/v1/v1` 和带子路径前缀的配置都只能生成一份版本路径；上游相对下载地址必须通过同一 provider 根地址补全，不能直接交给本地保存函数。
 - 本地任务 ID 使用 `canvas_video_xxx`，不要和上游任务 ID 混用。
 - 后端任务需要持久化，重启后能恢复已经拿到上游任务 ID 的任务。
 - 没有上游任务 ID 的任务不要自动重提，避免重复扣费。

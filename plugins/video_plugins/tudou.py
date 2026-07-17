@@ -23,6 +23,7 @@ from .common import (
     canonical_video_api_root,
     public_http_get,
     resolve_video_download_url,
+    submit_video_http_request,
 )
 
 
@@ -638,11 +639,19 @@ async def generate_tudou_video(
     submit_url = _api_url(root, submission.submit_path)
     try:
         if submission.request_format == "json":
-            response = await client.post(submit_url, headers=dict(headers), json=submission.body)
+            response = await submit_video_http_request(
+                client, progress=progress, url=submit_url, headers=dict(headers),
+                json_body=submission.body,
+                context={"protocol": "tudou", "model": request.get("model")},
+            )
         else:
             multipart = [(key, (None, str(value))) for key, value in submission.body.items()]
             multipart.extend(submission.files)
-            response = await client.post(submit_url, headers=dict(headers), files=multipart)
+            response = await submit_video_http_request(
+                client, progress=progress, url=submit_url, headers=dict(headers),
+                files=multipart,
+                context={"protocol": "tudou", "model": request.get("model")},
+            )
     except httpx.TransportError as exc:
         raise TudouProtocolError(
             502,

@@ -68,6 +68,7 @@ from plugins.video_plugins import (
     resume_megabyai_video,
     resume_sudashui_video,
     resume_tudou_video,
+    submit_video_http_request,
     sudashui_video_task_pending,
 )
 
@@ -11429,7 +11430,15 @@ async def generate_runninghub_video(payload, provider, progress=None):
         if image_to_video and not body.get("firstFrameUrl") and not image_urls:
             raise HTTPException(status_code=400, detail="当前 RunningHub 模型是图生视频，需要连接一张首帧图片后再生成。")
         runninghub_apply_schema_defaults(body, params)
-        response = await client.post(endpoint, headers=runninghub_json_headers(provider), json=body)
+        headers = runninghub_json_headers(provider)
+        response = await submit_video_http_request(
+            client,
+            progress=progress,
+            url=endpoint,
+            headers=headers,
+            json_body=body,
+            context={"provider_id": provider.get("id"), "model": model, "protocol": "runninghub"},
+        )
         response.raise_for_status()
         raw = response.json()
         task_id = runninghub_extract_task_id(raw)
@@ -15299,7 +15308,15 @@ async def generate_agnes_video(client, payload, provider, base_url, requested_mo
     if payload.seed is not None:
         body["seed"] = payload.seed
     submit_url = f"{base_url}/v1/videos"
-    response = await client.post(submit_url, headers=api_headers(provider=provider, model=model), json=body)
+    headers = api_headers(provider=provider, model=model)
+    response = await submit_video_http_request(
+        client,
+        progress=progress,
+        url=submit_url,
+        headers=headers,
+        json_body=body,
+        context={"provider_id": provider.get("id"), "model": model, "protocol": "agnes"},
+    )
     response.raise_for_status()
     raw = response.json()
     video_id = str(raw.get("video_id") or "").strip()
@@ -15413,10 +15430,18 @@ async def generate_lingjing_openai_video(client, payload, provider, base_url, re
             files.append(("input_reference", ref_file))
     headers = api_headers(json_body=False, provider=provider)
     if files:
-        response = await client.post(submit_url, headers=headers, data=data, files=files)
+        response = await submit_video_http_request(
+            client, progress=progress, url=submit_url, headers=headers,
+            form=data, files=files,
+            context={"provider_id": provider.get("id"), "model": data["model"], "protocol": "lingjing"},
+        )
     else:
         multipart_fields = [(key, (None, value)) for key, value in data.items()]
-        response = await client.post(submit_url, headers=headers, files=multipart_fields)
+        response = await submit_video_http_request(
+            client, progress=progress, url=submit_url, headers=headers,
+            files=multipart_fields,
+            context={"provider_id": provider.get("id"), "model": data["model"], "protocol": "lingjing"},
+        )
     response.raise_for_status()
     try:
         raw = response.json()
@@ -15459,12 +15484,20 @@ async def generate_yuli_openai_video(client, payload, provider, base_url, reques
             break
     headers = api_headers(json_body=False, provider=provider)
     if files:
-        response = await client.post(submit_url, headers=headers, data=data, files=files)
+        response = await submit_video_http_request(
+            client, progress=progress, url=submit_url, headers=headers,
+            form=data, files=files,
+            context={"provider_id": provider.get("id"), "model": data["model"], "protocol": "yuli"},
+        )
     else:
         # 文生视频无垫图时，仍以 multipart/form-data 提交（把文本字段作为表单分块），
         # 避免 httpx 在只有 data 时退化成 application/x-www-form-urlencoded。
         multipart_fields = {key: (None, value) for key, value in data.items()}
-        response = await client.post(submit_url, headers=headers, files=multipart_fields)
+        response = await submit_video_http_request(
+            client, progress=progress, url=submit_url, headers=headers,
+            files=multipart_fields,
+            context={"provider_id": provider.get("id"), "model": data["model"], "protocol": "yuli"},
+        )
     response.raise_for_status()
     try:
         raw = response.json()
@@ -15983,10 +16016,25 @@ async def build_canvas_video_result(payload: CanvasVideoRequest, progress=None):
             last_response = None
             last_json_error = None
             total_candidates = len(submit_urls)
+            submit_attempts = []
+            submit_headers = api_headers(provider=provider)
             for idx, candidate_url in enumerate(submit_urls):
                 submit_url = candidate_url
                 is_last = idx == total_candidates - 1
-                response = await client.post(submit_url, headers=api_headers(provider=provider), json=body)
+                response = await submit_video_http_request(
+                    client,
+                    progress=progress,
+                    url=submit_url,
+                    headers=submit_headers,
+                    json_body=body,
+                    attempts=submit_attempts,
+                    context={
+                        "provider_id": provider.get("id"),
+                        "provider_name": provider.get("name"),
+                        "model": requested_model,
+                        "video_request_mode": effective_video_request_mode(provider),
+                    },
+                )
                 last_response = response
                 if response.status_code >= 400:
                     # 404/405（或直接返回网页 HTML）通常表示该平台不支持这个端点路径——

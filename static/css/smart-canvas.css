@@ -1106,12 +1106,15 @@ input[type=range].smart-range::-webkit-slider-thumb { -webkit-appearance:none; w
 .log-empty { padding:28px; text-align:center; color:var(--muted); font-size:12px; font-weight:700; }
 .log-item { border:1px solid var(--line); border-radius:14px; background:var(--soft); padding:9px; display:grid; grid-template-columns:minmax(0, 1fr) auto; gap:10px; }
 .log-item.failed { border-color:#fecaca; background:#fff7f7; }
+.log-item.pending { border-color:rgba(245,158,11,.42); background:rgba(245,158,11,.06); }
 .theme-dark .log-item.failed { background:rgba(127,29,29,.18); border-color:rgba(239,68,68,.42); }
+.theme-dark .log-item.pending { background:rgba(120,53,15,.16); border-color:rgba(245,158,11,.38); }
 .log-main { min-width:0; }
 .log-meta { display:flex; flex-wrap:wrap; gap:6px; align-items:center; margin-bottom:5px; }
 .log-chip { height:22px; border-radius:999px; padding:0 8px; display:flex; align-items:center; background:var(--card); border:1px solid var(--line); color:var(--muted); font-size:10px; font-weight:900; }
 .log-chip.status-ok { background:rgba(16,185,129,.14); border-color:rgba(16,185,129,.28); color:#047857; }
 .log-chip.status-failed { background:rgba(239,68,68,.14); border-color:rgba(239,68,68,.28); color:#dc2626; }
+.log-chip.status-pending { background:rgba(245,158,11,.14); border-color:rgba(245,158,11,.34); color:#b45309; }
 .log-subline { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-bottom:5px; color:var(--faint); font-size:10.5px; font-weight:800; }
 .log-subline span { max-width:180px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .log-error { margin:0 0 7px; padding:7px 8px; border-radius:10px; background:rgba(239,68,68,.1); border:1px solid rgba(239,68,68,.22); color:#dc2626; font-size:11px; line-height:1.35; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; cursor:copy; }

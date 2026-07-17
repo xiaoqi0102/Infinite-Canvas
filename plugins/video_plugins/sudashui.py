@@ -18,7 +18,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Sequ
 
 import httpx
 
-from .common import canonical_video_api_root, humanize_video_task_failure, resolve_video_download_url
+from .common import canonical_video_api_root, humanize_video_task_failure, resolve_video_download_url, submit_video_http_request
 
 
 SUDASHUI_VIDEO_REQUEST_MODE = "sudashui-video-generations"
@@ -822,7 +822,11 @@ async def generate_sudashui_video(
     )
     submit_url = f"{root}/v1/video/generations"
     try:
-        response = await client.post(submit_url, headers=dict(headers), json=body)
+        response = await submit_video_http_request(
+            client, progress=progress, url=submit_url, headers=dict(headers),
+            json_body=body,
+            context={"protocol": "sudashui", "model": model},
+        )
     except httpx.TransportError as exc:
         raise SudashuiProtocolError(
             502,

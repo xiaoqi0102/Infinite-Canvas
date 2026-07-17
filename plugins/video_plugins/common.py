@@ -5,15 +5,23 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import ipaddress
+import os
 import re
 import socket
 import urllib.parse
-from typing import Any, List, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import httpx
 
 
 _VIDEO_API_VERSION_RE = re.compile(r"/v[12]$", re.IGNORECASE)
+_SENSITIVE_FIELD_RE = re.compile(
+    r"authorization|proxy-authorization|api[-_]?key|(?:^|[-_])token(?:$|[-_])|access[-_]?token|refresh[-_]?token|password|passwd|secret|cookie|credential",
+    re.IGNORECASE,
+)
+_BASE64_FIELD_RE = re.compile(r"base64|b64|file[_-]?data|binary", re.IGNORECASE)
+_HTTP_PREVIEW_MAX_TEXT = 12000
+_HTTP_PREVIEW_MAX_ITEMS = 60
 _FAKE_IP_PROXY_NETWORK = ipaddress.ip_network("198.18.0.0/15")
 _DNS_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
     max_workers=4,
@@ -23,6 +31,210 @@ _DNS_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
 
 class UnsafePublicUrlError(ValueError):
     """远程素材 URL 不是可安全直连的公网 HTTP(S) 地址。"""
+
+
+def video_http_preview_url(value: Any) -> str:
+    text = str(value or "").strip()
+    try:
+        parsed = urllib.parse.urlsplit(text)
+    except ValueError:
+        return text[:_HTTP_PREVIEW_MAX_TEXT]
+    if parsed.scheme.lower() in {"http", "https"} and parsed.netloc:
+        netloc = parsed.netloc.rsplit("@", 1)[-1]
+        return urllib.parse.urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
+    if text.startswith("data:"):
+        media_type = text[5:].split(";", 1)[0] or "application/octet-stream"
+        return f"[data:{media_type} 内嵌数据已省略，原长度 {len(text)} 字符]"
+    if text.startswith("blob:"):
+        return "[blob 本地对象地址已省略]"
+    return text[:_HTTP_PREVIEW_MAX_TEXT]
+
+
+def video_http_preview_value(
+    value: Any,
+    key: str = "",
+    *,
+    depth: int = 0,
+    secret_values: Sequence[str] = (),
+):
+    if _SENSITIVE_FIELD_RE.search(str(key or "")):
+        if str(key or "").lower() == "authorization":
+            return "Bearer YOUR_API_KEY"
+        return "[敏感信息已隐藏]"
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, bytes):
+        return f"[二进制内容已省略，共 {len(value)} 字节]"
+    if isinstance(value, str):
+        text = value
+        for secret in secret_values:
+            if secret:
+                text = text.replace(secret, "[敏感信息已隐藏]")
+        if _BASE64_FIELD_RE.search(str(key or "")):
+            return f"[内嵌数据已省略，原长度 {len(text)} 字符]"
+        if text.startswith(("http://", "https://", "data:", "blob:")):
+            return video_http_preview_url(text)
+        return text[:_HTTP_PREVIEW_MAX_TEXT] + ("..." if len(text) > _HTTP_PREVIEW_MAX_TEXT else "")
+    if depth >= 8:
+        return "[过深内容已省略]"
+    if isinstance(value, Mapping):
+        return {
+            str(child_key): video_http_preview_value(
+                child_value,
+                str(child_key),
+                depth=depth + 1,
+                secret_values=secret_values,
+            )
+            for child_key, child_value in list(value.items())[:_HTTP_PREVIEW_MAX_ITEMS]
+        }
+    if isinstance(value, (list, tuple)):
+        return [
+            video_http_preview_value(item, key, depth=depth + 1, secret_values=secret_values)
+            for item in list(value)[:_HTTP_PREVIEW_MAX_ITEMS]
+        ]
+    return str(value)[:_HTTP_PREVIEW_MAX_TEXT]
+
+
+def video_http_preview_headers(headers: Mapping[str, Any]) -> Tuple[Dict[str, str], List[str]]:
+    preview: Dict[str, str] = {}
+    secrets: List[str] = []
+    for key, raw_value in (headers or {}).items():
+        name = str(key)
+        value = str(raw_value or "")
+        if _SENSITIVE_FIELD_RE.search(name):
+            if value:
+                secrets.append(value)
+                if value.lower().startswith("bearer "):
+                    secrets.append(value[7:])
+            preview[name] = "Bearer YOUR_API_KEY" if name.lower() == "authorization" else "[敏感信息已隐藏]"
+        else:
+            preview[name] = value[:1000]
+    return preview, secrets
+
+
+def video_http_preview_files(files: Any) -> List[Dict[str, Any]]:
+    if isinstance(files, Mapping):
+        entries = list(files.items())
+    else:
+        entries = list(files or [])
+    result = []
+    for field, raw in entries[:_HTTP_PREVIEW_MAX_ITEMS]:
+        item: Dict[str, Any] = {"field": str(field)}
+        if not isinstance(raw, (list, tuple)):
+            item["value"] = video_http_preview_value(raw, str(field))
+            result.append(item)
+            continue
+        filename = raw[0] if len(raw) > 0 else None
+        content = raw[1] if len(raw) > 1 else None
+        content_type = raw[2] if len(raw) > 2 else ""
+        if filename is None:
+            item["value"] = video_http_preview_value(content, str(field))
+        else:
+            item.update({
+                "filename": os.path.basename(str(filename).replace("\\", "/")),
+                "content_type": str(content_type or "application/octet-stream"),
+            })
+            if isinstance(content, bytes):
+                item["size"] = len(content)
+            elif hasattr(content, "getbuffer"):
+                try:
+                    item["size"] = int(content.getbuffer().nbytes)
+                except Exception:
+                    item["size"] = None
+            elif hasattr(content, "fileno"):
+                try:
+                    item["size"] = int(os.fstat(content.fileno()).st_size)
+                except Exception:
+                    item["size"] = None
+            else:
+                item["size"] = None
+        result.append(item)
+    return result
+
+
+def _video_http_response_preview(response: Any, secret_values: Sequence[str]) -> Dict[str, Any]:
+    headers = getattr(response, "headers", {}) or {}
+    selected_headers = {
+        str(key): str(value)[:1000]
+        for key, value in headers.items()
+        if str(key).lower() in {"content-type", "retry-after", "x-request-id", "request-id", "trace-id"}
+    }
+    try:
+        body = response.json()
+    except Exception:
+        body = getattr(response, "text", "") or ""
+    return {
+        "received": True,
+        "status_code": int(getattr(response, "status_code", 0) or 0),
+        "headers": selected_headers,
+        "body": video_http_preview_value(body, secret_values=secret_values),
+    }
+
+
+async def submit_video_http_request(
+    client: Any,
+    *,
+    progress,
+    url: str,
+    headers: Mapping[str, Any],
+    json_body: Any = None,
+    form: Any = None,
+    files: Any = None,
+    attempts: Optional[List[Dict[str, Any]]] = None,
+    context: Optional[Mapping[str, Any]] = None,
+    **kwargs,
+):
+    """提交视频创建请求，并持久化不含密钥和二进制内容的真实 HTTP 交换。"""
+    request_headers, secret_values = video_http_preview_headers(headers)
+    request: Dict[str, Any] = {
+        "method": "POST",
+        "url": video_http_preview_url(url),
+        "headers": request_headers,
+        "format": "multipart" if files is not None else "form" if form is not None else "json",
+    }
+    if json_body is not None:
+        request["body"] = video_http_preview_value(json_body, secret_values=secret_values)
+    if form is not None:
+        request["form"] = video_http_preview_value(dict(form) if not isinstance(form, Mapping) else form, secret_values=secret_values)
+    if files is not None:
+        request["files"] = video_http_preview_files(files)
+    exchange = {"request": request, "response": {"received": False}}
+    exchange_list = attempts if attempts is not None else []
+    exchange_list.append(exchange)
+
+    def report():
+        if not callable(progress):
+            return
+        payload = {
+            "transport": "backend_http",
+            "context": video_http_preview_value(dict(context or {})),
+            "attempts": exchange_list[-8:],
+        }
+        if exchange_list:
+            payload.update(exchange_list[-1]["request"])
+        progress({"request_details": payload})
+
+    report()
+    try:
+        call_kwargs = dict(kwargs)
+        if json_body is not None:
+            call_kwargs["json"] = json_body
+        if form is not None:
+            call_kwargs["data"] = form
+        if files is not None:
+            call_kwargs["files"] = files
+        response = await client.post(url, headers=dict(headers), **call_kwargs)
+    except Exception as exc:
+        exchange["response"] = {
+            "received": False,
+            "error_type": type(exc).__name__,
+            "error": video_http_preview_value(str(exc), secret_values=secret_values),
+        }
+        report()
+        raise
+    exchange["response"] = _video_http_response_preview(response, secret_values)
+    report()
+    return response
 
 
 def _is_global_ip_address(value: Any, *, allow_https_fake_ip: bool = False) -> bool:

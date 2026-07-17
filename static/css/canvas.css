@@ -949,11 +949,13 @@ body.theme-dark .minimap-arrange-btn:hover { background:rgba(30,41,59,.96); colo
 .log-empty { padding:28px; text-align:center; color:var(--muted); font-size:12px; font-weight:700; }
 .log-item { border:1px solid var(--line); border-radius:14px; background:var(--soft); padding:9px; display:grid; grid-template-columns:minmax(0,1fr) auto; gap:10px; }
 .log-item.failed { border-color:#fecaca; background:#fff7f7; }
+.log-item.pending { border-color:rgba(245,158,11,.42); background:rgba(245,158,11,.06); }
 .log-main { min-width:0; }
 .log-meta { display:flex; flex-wrap:wrap; gap:6px; align-items:center; margin-bottom:5px; }
 .log-chip { height:22px; border-radius:999px; padding:0 8px; display:flex; align-items:center; background:var(--card-solid); border:1px solid var(--line); color:var(--muted); font-size:10px; font-weight:900; }
 .log-chip.status-ok { background:rgba(16,185,129,.14); border-color:rgba(16,185,129,.28); color:#047857; }
 .log-chip.status-failed { background:rgba(239,68,68,.14); border-color:rgba(239,68,68,.28); color:#dc2626; }
+.log-chip.status-pending { background:rgba(245,158,11,.14); border-color:rgba(245,158,11,.34); color:#b45309; }
 .log-diagnostics { display:none; }
 .log-field { min-width:0; border:1px solid var(--line); background:var(--card-solid); border-radius:10px; padding:6px 8px; }
 .log-field-label { color:var(--faint); font-size:9px; font-weight:900; letter-spacing:.08em; text-transform:uppercase; }
@@ -1177,6 +1179,7 @@ body.theme-dark .output-img-wrap.loading-wrap { background:#0f172a; border-color
 .theme-dark .llm-output-copy { background:rgba(15,23,42,.86); border-color:var(--line); }
 .theme-dark .output-spinner { border-color:#334155; border-top-color:#cbd5e1; }
 .theme-dark .log-item.failed { background:rgba(127,29,29,.18); border-color:rgba(239,68,68,.42); }
+.theme-dark .log-item.pending { background:rgba(120,53,15,.16); border-color:rgba(245,158,11,.38); }
 .theme-dark .log-error { color:#fca5a5; }
 .theme-dark .image-edit-panel { background:var(--card-solid); border-color:var(--line); }
 .theme-dark .image-edit-title { color:var(--text); }

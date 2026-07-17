@@ -15,7 +15,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Sequ
 
 import httpx
 
-from .common import canonical_video_api_root, humanize_video_task_failure, resolve_video_download_url
+from .common import canonical_video_api_root, humanize_video_task_failure, resolve_video_download_url, submit_video_http_request
 
 
 MEGABYAI_VIDEO_REQUEST_MODE = "megabyai-v1-videos"
@@ -75,31 +75,6 @@ SaveVideo = Callable[[str], Awaitable[str]]
 
 def _provider_root(base_url: Any) -> str:
     return canonical_video_api_root(base_url)
-
-
-def _request_preview_url(value: Any) -> str:
-    text = str(value or "").strip()
-    parsed = urllib.parse.urlsplit(text)
-    if parsed.scheme in {"http", "https"} and parsed.netloc:
-        netloc = parsed.netloc.rsplit("@", 1)[-1]
-        return urllib.parse.urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
-    if text.startswith("data:"):
-        return "[已省略内嵌数据]"
-    return text
-
-
-def _request_preview_body(body: Mapping[str, Any]) -> Dict[str, Any]:
-    """生成可持久化的请求预览，保留字段但移除素材 URL 的查询凭据。"""
-    preview = dict(body)
-    for key in ("referenceImages", "referenceVideos", "referenceAudios"):
-        values = preview.get(key)
-        if not isinstance(values, list):
-            continue
-        redacted = []
-        for value in values:
-            redacted.append(_request_preview_url(value))
-        preview[key] = redacted
-    return preview
 
 
 def is_megabyai_official_provider(provider: Optional[Mapping[str, Any]]) -> bool:
@@ -539,20 +514,12 @@ async def generate_megabyai_video(
     if audio_urls:
         body["referenceAudios"] = audio_urls
     submit_url = f"{root}/v1/videos"
-    _report(progress, {
-        "request_details": {
-            "method": "POST",
-            "url": _request_preview_url(submit_url),
-            "headers": {
-                "Accept": "application/json",
-                "Authorization": "Bearer YOUR_API_KEY",
-                "Content-Type": "application/json",
-            },
-            "body": _request_preview_body(body),
-        },
-    })
     try:
-        response = await client.post(submit_url, headers=dict(headers), json=body)
+        response = await submit_video_http_request(
+            client, progress=progress, url=submit_url, headers=dict(headers),
+            json_body=body,
+            context={"protocol": "megabyai", "model": body.get("model")},
+        )
     except httpx.TransportError as exc:
         raise MegabyAIProtocolError(
             502,

@@ -1,5 +1,6 @@
 (function(){
-    const SENSITIVE_KEY_RE = /(?:authorization|api[-_]?key|access[-_]?token|refresh[-_]?token|password|passwd|secret|cookie|credential)/i;
+    const SENSITIVE_KEY_RE = /(?:authorization|api[-_]?key|(?:^|[-_])token(?:$|[-_])|access[-_]?token|refresh[-_]?token|password|passwd|secret|cookie|credential)/i;
+    const BASE64_KEY_RE = /(?:base64|b64|file[_-]?data|binary)/i;
     const DATA_URL_RE = /^data:/i;
     const MAX_STRING_LENGTH = 2400;
     const MAX_REQUEST_STRING_LENGTH = 12000;
@@ -29,6 +30,7 @@
         }
         if(value == null || typeof value === 'number' || typeof value === 'boolean') return value;
         if(typeof value === 'string'){
+            if(BASE64_KEY_RE.test(String(key || ''))) return t('canvas.logEmbeddedDataOmitted', '[embedded data omitted]');
             const resourceLike = /(?:url|uri|src|path|image|video|audio|reference|output)/i.test(String(key || ''));
             const clean = resourceLike ? safeResourceUrl(value) : value;
             return clean.length > maxStringLength ? `${clean.slice(0, maxStringLength)}...` : clean;
@@ -79,28 +81,63 @@
         const seconds = total % 60;
         return minutes ? `${minutes}m ${String(seconds).padStart(2, '0')}s` : `${seconds}s`;
     }
-    function detailData(log){
-        const references = (log?.refs || []).map(mediaSummary);
-        const outputs = (log?.outputs || []).map(mediaSummary);
-        const storedRequest = log?.requestDetails && Object.keys(log.requestDetails).length ? sanitizeRequestDetails(log.requestDetails) : null;
-        const upstreamRequest = storedRequest?.url && storedRequest?.body ? compactObject({
-            method:storedRequest.method || 'POST',
-            url:storedRequest.url,
-            headers:storedRequest.headers || {},
-            body:storedRequest.body
-        }) : null;
-        const request = upstreamRequest || (storedRequest ? compactObject({
-            method:storedRequest.method || 'POST',
-            endpoint:storedRequest.endpoint || '',
+    function attemptStatusText(attempt){
+        const response = attempt?.response || {};
+        const statusCode = Number(response.status_code || 0);
+        if(statusCode) return `HTTP ${statusCode}`;
+        if(response.received === false){
+            const details = [
+                t('canvas.logNoResponse', 'No response'),
+                response.error_type || '',
+                response.error || ''
+            ].filter(Boolean);
+            return details.join(' / ');
+        }
+        if(response.received === true) return t('canvas.logResponseReceived', 'Response received');
+        return t('canvas.logWaitingResponse', 'Waiting for response');
+    }
+    function localRequestSnapshot(log, storedRequest, references){
+        const localDetails = log?.localRequestDetails && Object.keys(log.localRequestDetails).length
+            ? sanitizeRequestDetails(log.localRequestDetails)
+            : (storedRequest?.endpoint ? storedRequest : null);
+        if(!localDetails) return null;
+        return compactObject({
+            method:localDetails.method || 'POST',
+            endpoint:localDetails.endpoint || '',
             body:compactObject({
                 prompt:log?.prompt || '',
                 model_prompt:log?.modelPrompt && log.modelPrompt !== log.prompt ? log.modelPrompt : '',
                 reference_count:references.length,
                 references,
-                ...(storedRequest.parameters || {})
+                ...(localDetails.parameters || {})
             })
-        }) : sanitize(log?.request || {}));
-        const response = responseSummary({status:log?.status, identifiers:log?.request || {}, outputs:log?.outputs || [], error:log?.error || ''});
+        });
+    }
+    function detailData(log){
+        const references = (log?.refs || []).map(mediaSummary);
+        const outputs = (log?.outputs || []).map(mediaSummary);
+        const storedRequest = log?.requestDetails && Object.keys(log.requestDetails).length ? sanitizeRequestDetails(log.requestDetails) : null;
+        const requestAttempts = storedRequest?.transport === 'backend_http' && Array.isArray(storedRequest.attempts)
+            ? storedRequest.attempts.map(attempt => {
+                const request = sanitizeRequestDetails(attempt?.request || {});
+                const response = sanitizeRequestDetails(attempt?.response || {});
+                return {request, response, curl_request:buildBashCurl(request)};
+            })
+            : [];
+        const latestAttempt = requestAttempts[requestAttempts.length - 1] || null;
+        const upstreamRequest = storedRequest?.url && (storedRequest?.body || storedRequest?.form || storedRequest?.files) ? compactObject({
+            method:storedRequest.method || 'POST',
+            url:storedRequest.url,
+            headers:storedRequest.headers || {},
+            format:storedRequest.format || 'json',
+            body:storedRequest.body,
+            form:storedRequest.form,
+            files:storedRequest.files
+        }) : null;
+        const localRequest = localRequestSnapshot(log, storedRequest, references);
+        const request = latestAttempt?.request || upstreamRequest || localRequest || sanitize(log?.request || {});
+        const resultSummary = responseSummary({status:log?.status, identifiers:log?.request || {}, outputs:log?.outputs || [], error:log?.error || ''});
+        const response = latestAttempt?.response || resultSummary;
         return {
             id:log?.id || '',
             status:log?.status || '',
@@ -109,13 +146,16 @@
             node_type:log?.nodeType || '',
             model:log?.model || '',
             duration_ms:Number(log?.runMs || 0),
+            local_request:localRequest,
+            request_attempts:requestAttempts,
             request,
-            curl_request:upstreamRequest ? buildBashCurl(upstreamRequest) : '',
+            curl_request:latestAttempt?.curl_request || (upstreamRequest ? buildBashCurl(upstreamRequest) : ''),
             prompt:log?.prompt || '',
             model_prompt:log?.modelPrompt || '',
             references,
             outputs,
             response,
+            result_summary:resultSummary,
             error:log?.error || ''
         };
     }
@@ -133,13 +173,40 @@
     function bashSingleQuote(value){
         return `'${String(value ?? '').replace(/'/g, `'"'"'`)}'`;
     }
+    function curlFieldValue(value){
+        if(value == null) return '';
+        return typeof value === 'string' ? value : JSON.stringify(value);
+    }
     function buildBashCurl(request){
-        if(!request?.url || !request?.body) return '';
+        if(!request?.url) return '';
         const parts = [`curl ${bashSingleQuote(request.url)}`];
+        const method = String(request.method || 'POST').toUpperCase();
+        if(method !== 'GET') parts.push(`-X ${bashSingleQuote(method)}`);
         Object.entries(request.headers || {}).forEach(([key, value]) => {
             parts.push(`-H ${bashSingleQuote(`${key}: ${value}`)}`);
         });
-        parts.push(`--data-raw ${bashSingleQuote(JSON.stringify(request.body, null, 2))}`);
+        const format = String(request.format || (request.files ? 'multipart' : request.form ? 'form' : 'json')).toLowerCase();
+        if(format === 'multipart'){
+            Object.entries(request.form || {}).forEach(([key, value]) => {
+                parts.push(`-F ${bashSingleQuote(`${key}=${curlFieldValue(value)}`)}`);
+            });
+            (request.files || []).forEach(file => {
+                const field = String(file?.field || 'file');
+                if(Object.prototype.hasOwnProperty.call(file || {}, 'value')){
+                    parts.push(`-F ${bashSingleQuote(`${field}=${curlFieldValue(file.value)}`)}`);
+                    return;
+                }
+                const filename = String(file?.filename || 'attachment.bin');
+                const contentType = file?.content_type ? `;type=${file.content_type}` : '';
+                parts.push(`-F ${bashSingleQuote(`${field}=@${filename}${contentType}`)}`);
+            });
+        } else if(format === 'form'){
+            Object.entries(request.form || request.body || {}).forEach(([key, value]) => {
+                parts.push(`--data-urlencode ${bashSingleQuote(`${key}=${curlFieldValue(value)}`)}`);
+            });
+        } else if(Object.prototype.hasOwnProperty.call(request, 'body')){
+            parts.push(`--data-raw ${bashSingleQuote(JSON.stringify(request.body, null, 2))}`);
+        }
         return parts.join(' \\\n  ');
     }
     function mediaRows(items){
@@ -152,6 +219,20 @@
     }
     function section(title, content, wide=false, action=''){
         return `<section class="generation-log-detail-section${wide ? ' wide' : ''}"><div class="generation-log-detail-section-head"><h3>${escapeHtml(title)}</h3>${action}</div>${content}</section>`;
+    }
+    function logStatusText(status){
+        const normalized = String(status || '').toLowerCase();
+        const key = {
+            queued:'canvas.logStatusQueued',
+            submitting:'canvas.logStatusSubmitting',
+            polling:'canvas.logStatusPolling',
+            running:'canvas.logStatusRunning',
+            success:'canvas.logStatusSucceeded',
+            succeeded:'canvas.logStatusSucceeded',
+            failed:'canvas.logStatusFailed',
+        }[normalized];
+        if(key) return t(key, normalized || '-');
+        return status || '-';
     }
     function ensureModal(){
         let modal = document.getElementById('generationLogDetailModal');
@@ -221,7 +302,29 @@
         const request = data.request;
         const curlRequest = data.curl_request;
         const modelPrompt = data.model_prompt && data.model_prompt !== data.prompt ? data.model_prompt : '';
-        const statusText = data.status === 'failed' ? t('canvas.failed', 'Failed') : t('canvas.success', 'Success');
+        const statusText = logStatusText(data.status);
+        const attemptSections = data.request_attempts.map((attempt, index) => {
+            const number = index + 1;
+            const label = `${t('canvas.logUpstreamAttempt', 'Upstream attempt')} ${number}`;
+            const status = attemptStatusText(attempt);
+            const requestSection = section(
+                `${label} / ${status} / ${t('canvas.logHttpRequest', 'HTTP request')}`,
+                jsonBlock(attempt.request),
+                true
+            );
+            const curlSection = attempt.curl_request ? section(
+                `${label} / ${t('canvas.logCurlRequest', 'Redacted input request (cURL / Bash)')}`,
+                textBlock(attempt.curl_request),
+                true,
+                `<button type="button" class="generation-log-detail-section-copy" data-log-detail-copy-attempt-curl="${index}" title="${escapeHtml(t('canvas.logCopyAttemptCurl', 'Copy this cURL'))}" aria-label="${escapeHtml(t('canvas.logCopyAttemptCurl', 'Copy this cURL'))}"><i data-lucide="copy"></i></button>`
+            ) : '';
+            const responseSection = section(
+                `${label} / ${t('canvas.logHttpResponse', 'HTTP response')}`,
+                jsonBlock(attempt.response),
+                true
+            );
+            return `${requestSection}${curlSection}${responseSection}`;
+        }).join('');
         const summary = [
             [t('canvas.logStatus', 'Status'), statusText],
             [t('canvas.logCreatedAt', 'Created at'), formatDate(data.created_at)],
@@ -241,14 +344,15 @@
         modal.querySelector('.generation-log-detail-body').innerHTML = `
             <section class="generation-log-detail-summary">${summary.map(([label, value]) => `<div><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join('')}</section>
             <div class="generation-log-detail-grid">
-                ${curlRequest ? section(
+                ${data.local_request ? section(t('canvas.logLocalRequest', 'Local task request'), jsonBlock(data.local_request), true) : ''}
+                ${data.request_attempts.length ? attemptSections : (curlRequest ? section(
                     t('canvas.logCurlRequest', 'Redacted input request (cURL / Bash)'),
                     textBlock(curlRequest),
                     true,
                     `<button type="button" class="generation-log-detail-section-copy" data-log-detail-copy-curl title="${escapeHtml(t('canvas.logCopyCurl', 'Copy cURL'))}" aria-label="${escapeHtml(t('canvas.logCopyCurl', 'Copy cURL'))}"><i data-lucide="copy"></i></button>`
-                ) : ''}
-                ${section(t('canvas.logRequest', 'Request snapshot'), jsonBlock(request), true)}
-                ${section(t('canvas.logResponse', 'Response summary'), jsonBlock(data.response), true)}
+                ) : '')}
+                ${!data.request_attempts.length && !data.local_request ? section(t('canvas.logRequest', 'Request snapshot'), jsonBlock(request), true) : ''}
+                ${section(t('canvas.logResultSummary', 'Log result summary'), jsonBlock(data.result_summary), true)}
                 ${section(t('canvas.logPrompt', 'Prompt'), textBlock(data.prompt), true)}
                 ${modelPrompt ? section(t('canvas.logModelPrompt', 'Model prompt'), textBlock(modelPrompt), true) : ''}
                 ${section(t('canvas.logReferences', 'References'), mediaRows(data.references))}
@@ -258,6 +362,10 @@
         copyButton.onclick = () => copyDetail(copyButton, data);
         const curlCopyButton = modal.querySelector('[data-log-detail-copy-curl]');
         if(curlCopyButton) curlCopyButton.onclick = () => copyText(curlCopyButton, curlRequest);
+        modal.querySelectorAll('[data-log-detail-copy-attempt-curl]').forEach(button => {
+            const attempt = data.request_attempts[Number(button.dataset.logDetailCopyAttemptCurl || 0)];
+            button.onclick = () => copyText(button, attempt?.curl_request || '');
+        });
         restoreFocus = document.activeElement;
         activeModal = modal;
         modal.classList.add('open');
@@ -279,6 +387,7 @@
         safeResourceUrl,
         mediaSummary,
         responseSummary,
+        attemptStatusText,
         buildBashCurl,
         detailData
     };

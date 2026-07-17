@@ -6949,6 +6949,7 @@ function smartGenerationLogRequestDetails(run){
 function smartRunSnapshot(node, prompt, refs=[], kind='image'){
     const settingsSnapshot = cloneSmartSettings(settings);
     return {
+        logId:uid('log'),
         nodeId:node?.id || '',
         nodeType:node?.type || 'smart-image',
         kind,
@@ -6958,7 +6959,22 @@ function smartRunSnapshot(node, prompt, refs=[], kind='image'){
         size: kind === 'image' && isApiLikeEngine(settingsSnapshot.engine) ? sizeForRun(settingsSnapshot) : ''
     };
 }
-function addSmartGenerationLog({run, outputs=[], runMs=0, error=''}) {
+function smartGenerationLogStatusText(status){
+    const value = String(status || '').toLowerCase();
+    if(value === 'failed') return tr('canvas.failed');
+    if(value === 'queued') return tr('canvas.queued');
+    if(value === 'submitting') return tr('canvas.submitting');
+    if(value === 'polling') return tr('canvas.polling');
+    if(value === 'running') return tr('canvas.running');
+    return tr('canvas.success');
+}
+function smartGenerationLogStatusClass(status){
+    const value = String(status || '').toLowerCase();
+    if(value === 'failed') return 'status-failed';
+    if(['queued','submitting','polling','running'].includes(value)) return 'status-pending';
+    return 'status-ok';
+}
+function addSmartGenerationLog({run, outputs=[], runMs=0, error='', status=''}) {
     if(!canvas) return;
     canvas.logs = canvas.logs || [];
     const outputItems = resultMediaUrls(outputs).map(item => {
@@ -6972,11 +6988,19 @@ function addSmartGenerationLog({run, outputs=[], runMs=0, error=''}) {
             name:item.name || item.filename || ''
         });
     }).filter(item => item?.url);
-    if(!error && outputItems.length) playGenerationCompleteSound();
+    const normalizedStatus = error ? 'failed' : (status || (outputItems.length ? 'succeeded' : 'success'));
+    if(!error && ['success','succeeded'].includes(normalizedStatus) && outputItems.length) playGenerationCompleteSound();
+    const existingIndex = canvas.logs.findIndex(item =>
+        (run?.logId && item.id === run.logId)
+        || (run?.localTaskId && item.localTaskId === run.localTaskId)
+    );
+    const existing = existingIndex >= 0 ? canvas.logs[existingIndex] : null;
     const entry = {
-        id:uid('log'),
-        createdAt:Date.now(),
-        status:error ? 'failed' : 'success',
+        ...(existing || {}),
+        id:run?.logId || existing?.id || uid('log'),
+        localTaskId:run?.localTaskId || existing?.localTaskId || '',
+        createdAt:existing?.createdAt || Date.now(),
+        status:normalizedStatus,
         platform:smartRunPlatformLabel(run),
         nodeId:run?.nodeId || '',
         nodeType:run?.nodeType || 'smart-image',
@@ -6989,7 +7013,9 @@ function addSmartGenerationLog({run, outputs=[], runMs=0, error=''}) {
         runMs:Number(runMs || 0),
         error:error ? String(error) : ''
     };
+    if(existingIndex >= 0) canvas.logs.splice(existingIndex, 1);
     canvas.logs = [entry, ...canvas.logs].slice(0, 500);
+    if(document.getElementById('smartLogList')) renderSmartCanvasLog();
     if(!error && recoverStuckLoopOutputsFromLogs()) render();
     scheduleSave();
 }
@@ -7095,10 +7121,11 @@ function renderSmartCanvasLog(){
             taskId ? `ID ${taskId}` : '',
             backend
         ].filter(Boolean);
-        return `<div class="log-item ${log.status === 'failed' ? 'failed' : ''}" tabindex="0" title="${escapeAttr(tr('canvas.logOpenDetails'))}">
+        const statusClass = smartGenerationLogStatusClass(log.status);
+        return `<div class="log-item ${log.status === 'failed' ? 'failed' : (statusClass === 'status-pending' ? 'pending' : '')}" tabindex="0" title="${escapeAttr(tr('canvas.logOpenDetails'))}">
             <div class="log-main">
                 <div class="log-meta">
-                    <span class="log-chip ${log.status === 'failed' ? 'status-failed' : 'status-ok'}">${escapeHtml(log.status === 'failed' ? tr('canvas.failed') : tr('canvas.success'))}</span>
+                    <span class="log-chip ${statusClass}">${escapeHtml(smartGenerationLogStatusText(log.status))}</span>
                     <span class="log-chip">${escapeHtml(log.platform || '-')}</span>
                     ${log.model ? `<span class="log-chip">${escapeHtml(log.model)}</span>` : ''}
                     <span class="log-chip">${escapeHtml(formatRunDuration(log.runMs || 0))}</span>
@@ -14058,6 +14085,25 @@ async function createSmartCanvasVideoTask(payload){
     if(!res.ok) throw new Error(await smartResponseErrorMessage(res, tr('smart.errRunFailed')));
     return res.json();
 }
+function updateSmartVideoGenerationLog(logContext, taskId, task={}){
+    const run = logContext?.run;
+    if(!run) return;
+    run.localTaskId = taskId || run.localTaskId || '';
+    run.taskIds = run.localTaskId ? [run.localTaskId] : (run.taskIds || []);
+    run.request = {
+        ...(run.request || {}),
+        task_id:task.upstream_task_id || task.task_id || run.localTaskId,
+        provider_id:task.provider_id || run?.settings?.videoProvider || '',
+    };
+    run.requestDetails = task.request_details || run.requestDetails || null;
+    addSmartGenerationLog({
+        run,
+        outputs:[],
+        runMs:nowMs() - Number(logContext.startedAt || nowMs()),
+        status:task.status || 'queued',
+        error:task.status === 'failed' ? (task.error || tr('smart.errRunFailed')) : '',
+    });
+}
 async function waitSmartComfyTaskResult(taskId){
     if(!taskId) throw new Error(tr('smart.errRunFailed'));
     while(true){
@@ -14104,7 +14150,7 @@ function buildPromptRequestForNode(node, defaultImages, ctx=smartLoopContext){
         promptInput.innerHTML = oldHtml;
     }
 }
-async function generateUrlsForCurrentSettings(node, prompt, refs, runSettings=settings){
+async function generateUrlsForCurrentSettings(node, prompt, refs, runSettings=settings, logContext={}){
     const activeSettings = runSettings || settings;
     if(activeSettings.engine === 'comfy') return generateComfyUrlsWithSettings(activeSettings, prompt, refs);
     if(activeSettings.engine === 'runninghub' && runningHubSelectedModel(activeSettings)){
@@ -14119,10 +14165,13 @@ async function generateUrlsForCurrentSettings(node, prompt, refs, runSettings=se
         return {urls, kind:mediaKindForUrls(urls, 'image')};
     }
     if(isApiLikeEngine(activeSettings.engine) && activeSettings.apiKind === 'video'){
-        const taskResult = await runApiVideoGeneration(prompt, refs, activeSettings);
+        const taskResult = await runApiVideoGeneration(prompt, refs, activeSettings, logContext);
         const taskIds = Array.isArray(taskResult?.taskIds) ? taskResult.taskIds : [];
         if(taskIds.length){
-            const settled = await Promise.all(taskIds.map(taskId => pollSmartCanvasVideoTask(taskId)));
+            const settled = await Promise.all(taskIds.map(taskId => pollSmartCanvasVideoTask(
+                taskId,
+                task => updateSmartVideoGenerationLog(logContext, taskId, task)
+            )));
             const urls = settled.flatMap(result => resultMediaUrls(result?.videos?.length ? result.videos : (result?.result || result))).filter(Boolean);
             return {urls, kind:'video', taskIds, requestDetails:settled.find(result => result?.request_details)?.request_details || null};
         }
@@ -14262,7 +14311,10 @@ async function runCascadeStepIntoNode(sourceNode, targetNode, inputRefs, ctx=sma
     render();
     settings = previousSettings;
     try {
-        const result = await generateUrlsForCurrentSettings(outputNode, prompt, request.refs || [], runSettings);
+        const result = await generateUrlsForCurrentSettings(
+            outputNode, prompt, request.refs || [], runSettings,
+            {run:runLog, startedAt:runLogStart}
+        );
         if(!result.urls?.length) throw new Error(result.kind === 'video' ? tr('smart.errNoOutVideos') : tr('smart.errNoOutImages'));
         if(outpaintSize) delete requestNode.outpaintSize;
         addSmartGenerationLog({run:{...runLog, kind:result.kind || logKind, taskIds:result.taskIds || [], requestDetails:result.requestDetails || runLog.requestDetails}, outputs:result.urls, runMs:nowMs() - runLogStart});
@@ -14376,7 +14428,10 @@ async function runLoopRoundIntoSlot(loopNode, rootNode, outputSlot, loopIndex, c
             }
             result = {urls:(outputSlot.images || []).map(img => img?.url ? img : null).filter(Boolean), kind:'image'};
         } else {
-            result = await generateUrlsForCurrentSettings(outputSlot, prompt, request.refs || [], runSettings);
+            result = await generateUrlsForCurrentSettings(
+                outputSlot, prompt, request.refs || [], runSettings,
+                {run:runLog, startedAt:runLogStart}
+            );
         }
         if(!result.urls?.length) throw new Error(result.kind === 'video' ? tr('smart.errNoOutVideos') : tr('smart.errNoOutImages'));
         let additions;
@@ -14802,13 +14857,20 @@ async function runGeneration(){
                 ? await runRunningHubGeneration(prompt, refs)
                 : settings.engine === 'modelscope'
                 ? await runModelscopeGeneration(prompt, refs)
-                : await runApiGeneration(prompt, refs);
+                : await runApiGeneration(prompt, refs, settings, {run:runLog, startedAt:runLogStart});
         if(isApiLikeEngine(settings.engine) || rhModelMode){
             const taskIds = Array.isArray(outImages?.taskIds) ? outImages.taskIds : [];
             if(!taskIds.length) throw new Error(tr('smart.errRunFailed'));
             runLog.taskIds = taskIds.slice();
             const taskKind = outImages.kind || 'image';
-            pendingNode.pendingTasks = taskIds.map(taskId => ({taskId, kind:taskKind, providerId:outImages.providerId, model:outImages.model}));
+            pendingNode.pendingTasks = taskIds.map(taskId => ({
+                taskId,
+                kind:taskKind,
+                providerId:outImages.providerId,
+                model:outImages.model,
+                logRun:taskKind === 'video' ? runLog : null,
+                logStartedAt:taskKind === 'video' ? runLogStart : null,
+            }));
             pendingNode.pending = Math.max(taskIds.length, Number(pendingNode.pending || 0) || taskIds.length);
             pendingNode.runStartedAt = nowMs();
             pendingNode.runTimerHidden = false;
@@ -14924,9 +14986,9 @@ function comfyFieldKind(field){
     if(field?.type === 'textarea' || /prompt|text|提示词|正向|负向/.test(key)) return 'prompt';
     return 'setting';
 }
-async function runApiGeneration(prompt, refs, runSettings=settings){
+async function runApiGeneration(prompt, refs, runSettings=settings, logContext={}){
     if(isApiLikeEngine(runSettings.engine) && runSettings.apiKind === 'video'){
-        return runApiVideoGeneration(prompt, refs, runSettings);
+        return runApiVideoGeneration(prompt, refs, runSettings, logContext);
     }
     if(!runSettings.provider_id || !runSettings.model) throw new Error(tr('smart.errNoApiModel'));
     const count = Math.max(1, Math.min(8, Number(runSettings.count || 1)));
@@ -15001,7 +15063,7 @@ function validateSmartSudashuiVideoRequest(runSettings, profile, images, videos,
     }
     return {duration, aspectRatio, officialAssetIndexes};
 }
-async function runApiVideoGeneration(prompt, refs, runSettings=settings){
+async function runApiVideoGeneration(prompt, refs, runSettings=settings, logContext={}){
     if(!runSettings.videoModel) throw new Error(tr('smart.errNoVideoModel'));
     try {
         normalizeMegabyVideoSettings(runSettings, {resetInvalidGroup:true});
@@ -15064,6 +15126,7 @@ async function runApiVideoGeneration(prompt, refs, runSettings=settings){
         const task = await createSmartCanvasVideoTask(payload);
         const taskId = task?.task_id || task?.id || '';
         if(!taskId) throw new Error(tr('smart.errRunFailed'));
+        updateSmartVideoGenerationLog(logContext, taskId, {...task, provider_id:payload.provider_id});
         return {taskIds:[taskId], count:1, providerId:payload.provider_id, model:payload.model, kind:'video'};
     } finally {
         transientSmartCloudLinks = [];
@@ -15510,16 +15573,16 @@ async function pollSmartCanvasTask(taskId){
         activeSmartTaskPolls.delete(taskId);
     }
 }
-async function pollSmartCanvasVideoTask(taskId){
+async function pollSmartCanvasVideoTask(taskId, onProgress=null){
     if(!taskId) throw new Error(tr('smart.errRunFailed'));
     if(activeSmartTaskPolls.has(taskId)) return activeSmartTaskPolls.get(taskId);
     const promise = (async () => {
         for(let i = 0; i < 1440; i++){
-            await sleep(5000);
             const task = await fetch(`/api/canvas-video-tasks/${encodeURIComponent(taskId)}`).then(async r => {
                 if(!r.ok) throw new Error(await smartResponseErrorMessage(r, tr('smart.errRunFailed')));
                 return r.json();
             });
+            if(typeof onProgress === 'function') onProgress(task);
             if(task.status === 'succeeded'){
                 const result = task.result || task;
                 return task.request_details && result && typeof result === 'object'
@@ -15537,6 +15600,7 @@ async function pollSmartCanvasVideoTask(taskId){
                 error.requestDetails = task.request_details || null;
                 throw error;
             }
+            await sleep(5000);
         }
         throw new Error(tr('smart.errRunTimeout'));
     })();
@@ -15584,14 +15648,15 @@ function finalizeSmartPendingTask(node, taskId, images, kind='image'){
 async function resumeSmartPendingNode(node, logContext={}){
     const tasks = smartPendingTasks(node);
     if(!node || !tasks.length) return;
-    const logTaskFailure = (message, task) => {
-        if(!logContext?.run || !message) return;
-        const runMs = Math.max(0, nowMs() - Number(logContext.runLogStart || nowMs()));
+    const logTaskFailure = (message, task, context=logContext) => {
+        if(!context?.run || !message) return;
+        const runMs = Math.max(0, nowMs() - Number(context.startedAt || context.runLogStart || nowMs()));
         addSmartGenerationLog({
-            run:logContext.run,
+            run:context.run,
             outputs:[],
             runMs,
-            error:message
+            error:message,
+            status:'failed'
         });
     };
     node.pending = Math.max(tasks.length, Number(node.pending || 0) || tasks.length);
@@ -15600,13 +15665,19 @@ async function resumeSmartPendingNode(node, logContext={}){
     const failures = [];
     await Promise.all(tasks.map(async task => {
         if(task.failed && task.recoverTaskId) return;
+        const taskLogContext = logContext?.run
+            ? logContext
+            : (task.logRun ? {run:task.logRun, startedAt:task.logStartedAt || node.runStartedAt} : {});
         try {
             const taskKind = task.kind || 'image';
             const result = taskKind === 'video'
-                ? await pollSmartCanvasVideoTask(task.taskId)
+                ? await pollSmartCanvasVideoTask(
+                    task.taskId,
+                    data => updateSmartVideoGenerationLog(taskLogContext, task.taskId, data)
+                )
                 : await pollSmartCanvasTask(task.taskId);
-            if(taskKind === 'video' && result?.request_details && logContext?.run){
-                logContext.run.requestDetails = result.request_details;
+            if(taskKind === 'video' && result?.request_details && taskLogContext?.run){
+                taskLogContext.run.requestDetails = result.request_details;
             }
             const media = taskKind === 'video'
                 ? (result?.videos?.length ? result.videos : (result?.result || result))
@@ -15615,7 +15686,7 @@ async function resumeSmartPendingNode(node, logContext={}){
             render();
             scheduleSave();
         } catch(e) {
-            if(e?.requestDetails && logContext?.run) logContext.run.requestDetails = e.requestDetails;
+            if(e?.requestDetails && taskLogContext?.run) taskLogContext.run.requestDetails = e.requestDetails;
             if(e && e.jimengPending && e.submitId){
                 node.pendingTasks = smartPendingTasks(node).filter(item => item.taskId !== task.taskId);
                 setNodeJimengPending(node, e);
@@ -15649,7 +15720,7 @@ async function resumeSmartPendingNode(node, logContext={}){
                 }
             }
             failures.push(e);
-            logTaskFailure(e.message || tr('smart.errRunFailed'), task);
+            logTaskFailure(e.message || tr('smart.errRunFailed'), task, taskLogContext);
             if(e && typeof e === 'object') e.smartGenerationLogged = true;
             toast((e.message || tr('smart.errRunFailed')).slice(0, 160));
             render();

@@ -25,6 +25,7 @@ from .common import (
     canonical_video_api_root,
     public_http_get,
     resolve_video_download_url,
+    submit_video_http_request,
 )
 
 
@@ -567,7 +568,11 @@ async def generate_aicost_video(
     if submission.request_id:
         request_headers["X-Request-ID"] = submission.request_id
     try:
-        response = await client.post(submit_url, headers=request_headers, json=submission.body)
+        response = await submit_video_http_request(
+            client, progress=progress, url=submit_url, headers=request_headers,
+            json_body=submission.body,
+            context={"protocol": "aicost", "model": model},
+        )
     except httpx.TransportError as exc:
         raise AICostProtocolError(502, f"aicost 创建请求未收到响应，不能自动重试以避免重复扣费：{exc}") from exc
     if response.status_code >= 400:

@@ -13,6 +13,7 @@ from plugins.video_plugins.common import (
     is_public_http_url,
     public_http_get,
     resolve_video_download_url,
+    video_http_preview_url,
 )
 
 
@@ -436,7 +437,7 @@ class VideoDownloadUrlTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(details["headers"]["Authorization"], "Bearer YOUR_API_KEY")
         self.assertNotIn("real-secret", str(details))
         self.assertEqual(
-            megabyai._request_preview_url("https://user:password@media.example.com/person.jpg?token=secret#frame"),
+            video_http_preview_url("https://user:password@media.example.com/person.jpg?token=secret#frame"),
             "https://media.example.com/person.jpg",
         )
         self.assertEqual(

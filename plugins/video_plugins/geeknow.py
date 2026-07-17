@@ -23,6 +23,7 @@ from .common import (
     canonical_video_api_root,
     public_http_get,
     resolve_video_download_url,
+    submit_video_http_request,
 )
 
 
@@ -607,11 +608,19 @@ async def generate_geeknow_video(
     submit_url = f"{root}/v1/videos"
     try:
         if submission.request_format == "json":
-            response = await client.post(submit_url, headers=dict(headers), json=submission.body)
+            response = await submit_video_http_request(
+                client, progress=progress, url=submit_url, headers=dict(headers),
+                json_body=submission.body,
+                context={"protocol": "geeknow", "model": request.get("model")},
+            )
         else:
             multipart = [(key, (None, str(value))) for key, value in submission.body.items()]
             multipart.extend(submission.files)
-            response = await client.post(submit_url, headers=dict(headers), files=multipart)
+            response = await submit_video_http_request(
+                client, progress=progress, url=submit_url, headers=dict(headers),
+                files=multipart,
+                context={"protocol": "geeknow", "model": request.get("model")},
+            )
     except httpx.TransportError as exc:
         raise GeekNowProtocolError(
             502,

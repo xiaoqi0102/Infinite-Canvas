@@ -11617,8 +11617,11 @@ async function runVideoNode(nodeId, opts={}){
     else refreshRunNodes(node, out);
     try {
         taskInfo = await createCanvasVideoTask(payload, {cascadeTargetId});
+        run.localTaskId = taskInfo.task_id;
+        run.request = {...(run.request || {}), task_id:taskInfo.task_id, provider_id:payload.provider_id};
+        addGenerationLog({run, outputs:[], runMs:nowMs() - startedAt, status:taskInfo.status || 'queued'});
         if(!out){
-            const result = await waitCanvasVideoTaskResult(taskInfo.task_id, {cascadeTargetId});
+            const result = await waitCanvasVideoTaskResult(taskInfo.task_id, {cascadeTargetId, run, startedAt});
             const outputUrls = canvasVideoOutputItems(result);
             if(!outputUrls.length) throw new Error(tr('canvas.videoFailed'));
             run.request = requestMetaFromResult(result);
@@ -13089,6 +13092,7 @@ function runSnapshot(node, prompt, refs=[], modelPrompt=prompt, promptParts=null
     delete clone.runError;
     delete clone.inputs;
     const snapshot = {
+        logId:uid('log'),
         nodeType: node?.type || '',
         node: clone,
         prompt: prompt || '',
@@ -13186,14 +13190,37 @@ function logTaskLabel(log){
     }
     return log?.model || '-';
 }
-function addGenerationLog({run, outputs=[], runMs=0, error=''}) {
+function generationLogStatusText(status){
+    const value = String(status || '').toLowerCase();
+    if(value === 'failed') return tr('canvas.failed');
+    if(value === 'queued') return tr('canvas.queued');
+    if(value === 'submitting') return tr('canvas.submitting');
+    if(value === 'polling') return tr('canvas.polling');
+    if(value === 'running') return tr('canvas.running');
+    return tr('canvas.success');
+}
+function generationLogStatusClass(status){
+    const value = String(status || '').toLowerCase();
+    if(value === 'failed') return 'status-failed';
+    if(['queued','submitting','polling','running'].includes(value)) return 'status-pending';
+    return 'status-ok';
+}
+function addGenerationLog({run, outputs=[], runMs=0, error='', status=''}) {
     if(!canvas) return;
     canvas.logs = canvas.logs || [];
-    if(!error && (outputs || []).some(item => outputUrlValue(item))) playGenerationCompleteSound();
+    const normalizedStatus = error ? 'failed' : (status || ((outputs || []).length ? 'succeeded' : 'success'));
+    if(!error && ['success','succeeded'].includes(normalizedStatus) && (outputs || []).some(item => outputUrlValue(item))) playGenerationCompleteSound();
+    const existingIndex = canvas.logs.findIndex(item =>
+        (run?.logId && item.id === run.logId)
+        || (run?.localTaskId && item.localTaskId === run.localTaskId)
+    );
+    const existing = existingIndex >= 0 ? canvas.logs[existingIndex] : null;
     const entry = {
-        id:uid('log'),
-        createdAt:Date.now(),
-        status:error ? 'failed' : 'success',
+        ...(existing || {}),
+        id:run?.logId || existing?.id || uid('log'),
+        localTaskId:run?.localTaskId || existing?.localTaskId || '',
+        createdAt:existing?.createdAt || Date.now(),
+        status:normalizedStatus,
         platform:runPlatformLabel(run),
         nodeType:run?.nodeType || '',
         model:run?.taskLabel || runTaskLabel(run),
@@ -13206,7 +13233,9 @@ function addGenerationLog({run, outputs=[], runMs=0, error=''}) {
         runMs:Number(runMs || 0),
         error:error ? String(error) : '',
     };
+    if(existingIndex >= 0) canvas.logs.splice(existingIndex, 1);
     canvas.logs = [entry, ...canvas.logs].slice(0, 500);
+    if(document.getElementById('logList')) renderCanvasLog();
 }
 function renderCanvasLog(){
     const list = document.getElementById('logList') || (typeof logList !== 'undefined' ? logList : null);
@@ -13236,10 +13265,11 @@ function renderCanvasLog(){
             idText ? `ID ${idText}` : '',
             backendText,
         ].filter(Boolean);
-        return `<div class="log-item ${log.status === 'failed' ? 'failed' : ''}" tabindex="0" title="${escapeAttr(tr('canvas.logOpenDetails'))}">
+        const statusClass = generationLogStatusClass(log.status);
+        return `<div class="log-item ${log.status === 'failed' ? 'failed' : (statusClass === 'status-pending' ? 'pending' : '')}" tabindex="0" title="${escapeAttr(tr('canvas.logOpenDetails'))}">
             <div class="log-main">
                 <div class="log-meta">
-                    <span class="log-chip ${log.status === 'failed' ? 'status-failed' : 'status-ok'}">${escapeHtml(log.status === 'failed' ? tr('canvas.failed') : tr('canvas.success'))}</span>
+                    <span class="log-chip ${statusClass}">${escapeHtml(generationLogStatusText(log.status))}</span>
                     <span class="log-chip">${escapeHtml(log.platform || '-')}</span>
                     ${taskLabel ? `<span class="log-chip">${escapeHtml(taskLabel)}</span>` : ''}
                     <span class="log-chip">${escapeHtml(formatRunDuration(log.runMs || 0))}</span>
@@ -13620,6 +13650,21 @@ async function pollCanvasVideoTask(taskId, options={}){
             found.pending.recoverTaskId = data.upstream_task_id || data.task_id || data.submit_id || found.pending.recoverTaskId || '';
             found.pending.retryAfter = data.retry_after || null;
             found.pending.nextPollAt = data.next_poll_at || null;
+            const pendingRun = found.pending.run || {};
+            pendingRun.localTaskId = taskId;
+            pendingRun.request = {
+                ...(pendingRun.request || {}),
+                task_id:data.upstream_task_id || data.task_id || taskId,
+                provider_id:data.provider_id || found.pending.providerId || '',
+            };
+            pendingRun.requestDetails = data.request_details || pendingRun.requestDetails || null;
+            addGenerationLog({
+                run:pendingRun,
+                outputs:[],
+                runMs:nowMs() - Number(found.pending.startedAt || nowMs()),
+                status:data.status || 'polling',
+                error:data.status === 'failed' ? (data.error || tr('canvas.videoFailed')) : '',
+            });
             if(data.status === 'succeeded'){
                 completeCanvasVideoTask(taskId, data.result || data);
                 return 'succeeded';
@@ -13651,6 +13696,22 @@ async function waitCanvasVideoTaskResult(taskId, options={}){
             throw new Error(await responseErrorMessage(res, tr('canvas.videoFailed')));
         }
         const data = await res.json();
+        if(options?.run){
+            options.run.localTaskId = taskId;
+            options.run.request = {
+                ...(options.run.request || {}),
+                task_id:data.upstream_task_id || data.task_id || taskId,
+                provider_id:data.provider_id || '',
+            };
+            options.run.requestDetails = data.request_details || options.run.requestDetails || null;
+            addGenerationLog({
+                run:options.run,
+                outputs:[],
+                runMs:nowMs() - Number(options.startedAt || nowMs()),
+                status:data.status || 'polling',
+                error:data.status === 'failed' ? (data.error || tr('canvas.videoFailed')) : '',
+            });
+        }
         if(data.status === 'succeeded') return data.result || data;
         if(data.status === 'failed'){
             const error = new Error(data.error || tr('canvas.videoFailed'));
@@ -13685,7 +13746,7 @@ function completeCanvasVideoTask(taskId, result){
         gen.runError = '';
         gen.running = false;
     }
-    addGenerationLog({run:meta.run, outputs:outputUrls, runMs:meta.runMs || 0});
+    addGenerationLog({run:meta.run, outputs:outputUrls, runMs:meta.runMs || 0, status:'succeeded'});
     refreshRunNodes(gen, out);
     scheduleSave();
 }
@@ -13711,7 +13772,7 @@ function failCanvasVideoTask(taskId, message, taskData={}){
             if(pending?.cascadeTargetId) gen._cascadeFailed = true;
             gen.running = false;
         }
-        addGenerationLog({run, outputs:[], runMs, error:pending.error});
+        addGenerationLog({run, outputs:[], runMs, error:pending.error, status:'failed'});
         refreshRunNodes(gen, out);
         scheduleSave();
         return;
@@ -13723,7 +13784,7 @@ function failCanvasVideoTask(taskId, message, taskData={}){
         if(pending?.cascadeTargetId) gen._cascadeFailed = true;
         gen.running = false;
     }
-    addGenerationLog({run, outputs:[], runMs, error:message || tr('canvas.videoFailed')});
+    addGenerationLog({run, outputs:[], runMs, error:message || tr('canvas.videoFailed'), status:'failed'});
     refreshRunNodes(gen, out);
     scheduleSave();
 }

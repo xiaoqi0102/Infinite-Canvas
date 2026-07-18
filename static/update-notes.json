@@ -1,14 +1,22 @@
 {
-  "version": "2026.07.17",
-  "updated_at": "2026-07-17T21:50:36+08:00",
+  "version": "2026.07.18",
+  "updated_at": "2026-07-18T17:40:31+08:00",
   "items": [
     {
       "type": "feature",
-      "text": "修复exellome和FHL的编辑功能报错bug"
+      "text": "修复 Exellome 与 FHL 图片编辑异常，并优化 FHL 长任务响应处理"
     },
     {
       "type": "feature",
-      "text": "修复mac系统缩放bug"
+      "text": "修复 macOS 画布滚轮缩放异常，统一普通画布与智能画布缩放体验"
+    },
+    {
+      "type": "feature",
+      "text": "恢复智能画布素材云端上传入口、操作按钮边框和跟随节点输入图预览"
+    },
+    {
+      "type": "feature",
+      "text": "兼容便携 Python 环境加载本地视频协议插件"
     }
   ]
 }

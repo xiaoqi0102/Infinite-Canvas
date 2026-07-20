@@ -1,4 +1,5 @@
 import os
+import tempfile
 import unittest
 from unittest.mock import AsyncMock, patch
 
@@ -382,6 +383,92 @@ class VideoDownloadUrlTests(unittest.IsolatedAsyncioTestCase):
                 "video_urls": ["https://cdn.example.com/reference.mp4"],
             },
         )
+
+    async def test_aicost_saves_only_first_video_url_alias(self):
+        saved = []
+
+        async def save_video(url):
+            saved.append(url)
+            return f"/assets/output/video-{len(saved)}.mp4"
+
+        result = await aicost._save_result(
+            {
+                "status": "SUCCESS",
+                "data": {
+                    "result_url": "https://www.aicost.xyz/static-custom/generated-videos/result.mp4",
+                    "videoUrl": "https://www.aicost.xyz/static-custom/generated-videos/alias.mp4",
+                },
+            },
+            "task-id",
+            "grok-imagine-video-1.5-preview",
+            "https://www.aicost.xyz",
+            save_video,
+        )
+
+        self.assertEqual(
+            saved,
+            ["https://www.aicost.xyz/static-custom/generated-videos/result.mp4"],
+        )
+        self.assertEqual(result["videos"], ["/assets/output/video-1.mp4"])
+
+    async def test_generated_media_dedupes_same_local_content_across_urls(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            first = os.path.join(temp_dir, "first.mp4")
+            alias = os.path.join(temp_dir, "alias.mp4")
+            different = os.path.join(temp_dir, "different.mp4")
+            with open(first, "wb") as media_file:
+                media_file.write(b"same-video-content")
+            with open(alias, "wb") as media_file:
+                media_file.write(b"same-video-content")
+            with open(different, "wb") as media_file:
+                media_file.write(b"different-content!")
+
+            paths = {
+                "/assets/output/first.mp4": first,
+                "/assets/output/alias.mp4": alias,
+                "/assets/output/different.mp4": different,
+            }
+            items = [
+                {"url": "/assets/output/first.mp4", "kind": "video"},
+                {"url": "/assets/output/alias.mp4", "kind": "video"},
+                {"url": "/assets/output/different.mp4", "kind": "video"},
+                "https://cdn.example.com/result.mp4",
+                "https://cdn.example.com/result.mp4",
+            ]
+
+            def resolve_path(value):
+                return paths.get(main.generated_media_item_url(value))
+
+            with patch.object(main, "output_file_from_url", side_effect=resolve_path):
+                deduped = await main.dedupe_generated_media_items(items)
+
+        self.assertEqual(
+            [main.generated_media_item_url(item) for item in deduped],
+            [
+                "/assets/output/first.mp4",
+                "/assets/output/different.mp4",
+                "https://cdn.example.com/result.mp4",
+            ],
+        )
+
+    async def test_canvas_video_result_preserves_distinct_outputs(self):
+        result = {
+            "videos": [
+                "/assets/output/one.mp4",
+                "/assets/output/two.mp4",
+                "/assets/output/one.mp4",
+            ],
+            "task_id": "task-id",
+        }
+
+        with patch.object(main, "output_file_from_url", return_value=None):
+            deduped = await main.dedupe_canvas_video_result(result)
+
+        self.assertEqual(
+            deduped["videos"],
+            ["/assets/output/one.mp4", "/assets/output/two.mp4"],
+        )
+        self.assertEqual(deduped["task_id"], "task-id")
 
     async def test_public_generate_entries_use_canonical_create_urls(self):
         base_url = "https://api.example.com//v1/v1/"

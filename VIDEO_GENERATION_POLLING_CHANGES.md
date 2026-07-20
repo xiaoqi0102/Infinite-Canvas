@@ -1403,7 +1403,7 @@ Grok 1.5 Preview 创建请求使用单图字段 `input_reference`，并发送字
 
 本地图片和音频在受控路径内读取并转换成 data URL，单个素材设置 30MB 本地防护上限；必须由后端下载的远程素材会校验 DNS、固定通过校验的 IP，并拒绝重定向。除公网结果外，仅兼容由原域名 TLS 证书继续约束的 HTTPS 透明代理 Fake-IP。Seedance/通用兜底的参考视频使用既有安全公网化回调。Grok 不接受参考视频或音频，并按“恰好一张首帧”执行。
 
-JSON 结果兼容 `video_url`、`result_url` 与文本中的视频地址。成功但没有公开结果地址时，插件使用 `GET /v1/videos/{id}/content`。同源下载会携带当前 provider 的 Bearer Token，外部 CDN 地址不会携带凭据。
+JSON 结果兼容 `video_url`、`result_url` 与文本中的视频地址。AICost 单个任务只生成一个视频；如果成功响应同时返回多个指向同一结果的别名地址，插件只下载第一个有效地址，避免输出节点出现重复视频。成功但没有公开结果地址时，插件使用 `GET /v1/videos/{id}/content`。同源下载会携带当前 provider 的 Bearer Token，外部 CDN 地址不会携带凭据。
 
 创建请求遇到传输错误不会自动重发，以避免重复扣费；查询阶段对临时网络错误、429 和 5xx 做有限重试。服务重启恢复只访问 `/v1/videos/{id}`，不会重新创建任务。
 

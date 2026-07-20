@@ -6,6 +6,7 @@ from .common import (
     humanize_video_task_failure,
     public_http_get,
     resolve_video_download_url,
+    submit_http_request_with_logging,
     submit_video_http_request,
 )
 from .aicost import (
@@ -50,6 +51,7 @@ __all__ = [
     "canonical_video_api_root",
     "public_http_get",
     "resolve_video_download_url",
+    "submit_http_request_with_logging",
     "submit_video_http_request",
     "UnsafePublicUrlError",
     "AICOST_VIDEO_REQUEST_MODE",

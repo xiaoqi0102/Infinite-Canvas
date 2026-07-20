@@ -74,6 +74,7 @@ from plugins.video_plugins import (
     resume_megabyai_video,
     resume_sudashui_video,
     resume_tudou_video,
+    submit_http_request_with_logging,
     submit_video_http_request,
     sudashui_video_task_pending,
 )
@@ -4950,7 +4951,7 @@ RESPONSES_REJECT_STATUSES = {400, 404, 405, 415, 422}
 RESPONSES_POLL_INTERVAL = 5.0
 RESPONSES_POLL_MAX_SECONDS = 1500.0
 
-async def post_openai_responses(client, url, headers, body):
+async def post_openai_responses(client, url, headers, body, post_request=None):
     """RS / Responses 请求。图片编辑经常超过 120 秒，非流式请求会被中转前面的
     Cloudflare 读超时掐断（Error 524）。策略按可靠性排序：
     1) background:true 后台任务 + 轮询 GET /v1/responses/{id}（每个请求都秒回，彻底绕开超时）；
@@ -4959,14 +4960,19 @@ async def post_openai_responses(client, url, headers, body):
     5xx/超时一律不自动重试，避免上游已开始生成后重复扣费。"""
     bg_body = dict(body)
     bg_body["background"] = True
+    async def submit(payload):
+        if callable(post_request):
+            return await post_request(url, headers, payload)
+        return await client.post(url, headers=headers, json=payload)
+
     try:
-        resp = await client.post(url, headers=headers, json=bg_body)
+        resp = await submit(bg_body)
     except httpx.HTTPError as e:
         print(f"RS background 请求传输失败，改走流式：{e}")
-        return await post_openai_responses_stream(client, url, headers, body)
+        return await post_openai_responses_stream(client, url, headers, body, post_request)
     if resp.status_code in RESPONSES_REJECT_STATUSES:
         print(f"RS background 模式被拒（{resp.status_code}），改走流式：{resp.text[:200]}")
-        return await post_openai_responses_stream(client, url, headers, body)
+        return await post_openai_responses_stream(client, url, headers, body, post_request)
     if resp.status_code >= 400:
         if resp.status_code == 524:
             return _responses_wrap(url, 502, {"error": {"message": (
@@ -5013,7 +5019,7 @@ async def post_openai_responses(client, url, headers, body):
             return _responses_wrap(url, 502, data)
     return _responses_wrap(url, 502, {"error": {"message": f"RS 后台任务超过 {int(RESPONSES_POLL_MAX_SECONDS)}s 仍未完成（任务 id={rid}）"}})
 
-async def post_openai_responses_stream(client, url, headers, body):
+async def post_openai_responses_stream(client, url, headers, body, post_request=None):
     """RS / Responses 的 SSE 流式请求：流式从一开始就持续有事件字节返回，
     不会触发中转的 Cloudflare 120s 读超时。收到 response.completed 后
     把完整 response 对象包装成普通 httpx.Response，下游解析逻辑不变。"""
@@ -5024,6 +5030,11 @@ async def post_openai_responses_stream(client, url, headers, body):
 
     stream_body = dict(body)
     stream_body["stream"] = True
+    async def submit(payload):
+        if callable(post_request):
+            return await post_request(url, headers, payload)
+        return await client.post(url, headers=headers, json=payload)
+
     try:
         async with client.stream("POST", url, headers=headers, json=stream_body) as resp:
             ctype = (resp.headers.get("content-type") or "").lower()
@@ -5033,7 +5044,7 @@ async def post_openai_responses_stream(client, url, headers, body):
                 # 仅对“请求被拒绝”类状态码回退，5xx/超时不重试，避免上游已开始生成后重复扣费。
                 if resp.status_code in {400, 404, 405, 415, 422}:
                     print(f"RS 流式请求被拒（{resp.status_code}），回退非流式：{content[:200]!r}")
-                    return await client.post(url, headers=headers, json=body)
+                    return await submit(body)
                 return httpx.Response(resp.status_code, headers=resp.headers, content=content, request=request)
             completed = None
             error_payload = None
@@ -5122,7 +5133,7 @@ async def post_openai_responses_stream(client, url, headers, body):
             return wrap(502, error_payload or {"error": {"message": "RS 流式响应结束但没有 response.completed 事件"}})
     except httpx.HTTPError as e:
         print(f"RS 流式请求传输失败，回退非流式：{e}")
-        return await client.post(url, headers=headers, json=body)
+        return await submit(body)
 
 def provider_protocol(provider):
     return str((provider or {}).get("protocol") or "openai").strip().lower()
@@ -10239,7 +10250,15 @@ def friendly_chat_error_detail(text, model="", provider=None):
         return "请求过于频繁，已被上游限流，请稍后再试。"
     return ""
 
-async def generate_modelscope_provider_image(prompt, size, model, reference_images=None, provider=None):
+async def generate_modelscope_provider_image(
+    prompt,
+    size,
+    model,
+    reference_images=None,
+    provider=None,
+    progress=None,
+    request_attempts=None,
+):
     clean_token = modelscope_api_key()
     if not clean_token:
         raise HTTPException(status_code=400, detail="未配置 ModelScope API Key，请在 API 设置中填写。")
@@ -10268,7 +10287,15 @@ async def generate_modelscope_provider_image(prompt, size, model, reference_imag
 
     api_root = modelscope_image_api_root()
     async with httpx.AsyncClient(timeout=AI_REQUEST_TIMEOUT) as client:
-        submit_res = await client.post(f"{api_root}/images/generations", headers=headers, json=payload)
+        submit_res = await submit_http_request_with_logging(
+            client,
+            progress=progress,
+            url=f"{api_root}/images/generations",
+            headers=headers,
+            json_body=payload,
+            attempts=request_attempts,
+            context={"provider_id": "modelscope", "model": payload["model"], "protocol": "modelscope"},
+        )
         submit_res.raise_for_status()
         raw = submit_res.json()
         task_id = raw.get("task_id")
@@ -10332,7 +10359,15 @@ def gemini_reference_part(ref):
         return {"fileData": {"mimeType": "image/png", "fileUri": value}}
     return None
 
-async def generate_gemini_provider_image(prompt, size, model, reference_images=None, provider=None):
+async def generate_gemini_provider_image(
+    prompt,
+    size,
+    model,
+    reference_images=None,
+    provider=None,
+    progress=None,
+    request_attempts=None,
+):
     model_name = gemini_model_name(model)
     endpoint = gemini_endpoint_url(provider, model_name)
     parts = [{"text": prompt.strip()}]
@@ -10348,7 +10383,20 @@ async def generate_gemini_provider_image(prompt, size, model, reference_images=N
         },
     }
     async with httpx.AsyncClient(timeout=httpx.Timeout(connect=20.0, read=1800.0, write=120.0, pool=20.0)) as client:
-        response = await client.post(endpoint, headers=api_headers(provider=provider), json=body)
+        response = await submit_http_request_with_logging(
+            client,
+            progress=progress,
+            url=endpoint,
+            headers=api_headers(provider=provider),
+            json_body=body,
+            attempts=request_attempts,
+            context={
+                "provider_id": (provider or {}).get("id"),
+                "provider_name": (provider or {}).get("name"),
+                "model": model_name,
+                "protocol": "gemini",
+            },
+        )
         response.raise_for_status()
         raw = response.json()
         return extract_image(raw), raw
@@ -10362,7 +10410,15 @@ def volcengine_image_payload(ref):
         return None
     return value
 
-async def generate_volcengine_provider_image(prompt, size, model, reference_images=None, provider=None):
+async def generate_volcengine_provider_image(
+    prompt,
+    size,
+    model,
+    reference_images=None,
+    provider=None,
+    progress=None,
+    request_attempts=None,
+):
     endpoint = volcengine_endpoint_url(provider)
     size = normalize_volcengine_size(size, model)
     body = {
@@ -10376,7 +10432,20 @@ async def generate_volcengine_provider_image(prompt, size, model, reference_imag
     if images:
         body["image"] = images
     async with httpx.AsyncClient(timeout=httpx.Timeout(connect=20.0, read=1800.0, write=120.0, pool=20.0)) as client:
-        response = await client.post(endpoint, headers=api_headers(provider=provider), json=body)
+        response = await submit_http_request_with_logging(
+            client,
+            progress=progress,
+            url=endpoint,
+            headers=api_headers(provider=provider),
+            json_body=body,
+            attempts=request_attempts,
+            context={
+                "provider_id": (provider or {}).get("id"),
+                "provider_name": (provider or {}).get("name"),
+                "model": model,
+                "protocol": "volcengine",
+            },
+        )
         response.raise_for_status()
         raw = response.json()
         return extract_image(raw), raw
@@ -11286,7 +11355,16 @@ async def runninghub_upload_local_to_filename(client, provider, url, use_wallet=
         return raw["data"]["fileName"]
     raise HTTPException(status_code=502, detail=(raw.get("msg") if isinstance(raw, dict) else "") or f"RunningHub 上传素材失败：{raw}")
 
-async def generate_runninghub_entry_image(prompt, size, model, reference_images, provider, entry):
+async def generate_runninghub_entry_image(
+    prompt,
+    size,
+    model,
+    reference_images,
+    provider,
+    entry,
+    progress=None,
+    request_attempts=None,
+):
     """运行 RunningHub 工作流 / AI 应用（与智能画布一致的运行方式），返回首张图片结果。"""
     kind = entry["kind"]
     entry_id = entry["id"]
@@ -11365,7 +11443,20 @@ async def generate_runninghub_entry_image(prompt, size, model, reference_images,
             submit_url = runninghub_endpoint_url(provider, "/task/openapi/ai-app/run")
             body = {"apiKey": api_key, "webappId": entry_id, "nodeInfoList": node_info_list}
 
-        response = await client.post(submit_url, headers=runninghub_app_headers(True, use_wallet), json=body)
+        response = await submit_http_request_with_logging(
+            client,
+            progress=progress,
+            url=submit_url,
+            headers=runninghub_app_headers(True, use_wallet),
+            json_body=body,
+            attempts=request_attempts,
+            context={
+                "provider_id": (provider or {}).get("id"),
+                "provider_name": (provider or {}).get("name"),
+                "model": model,
+                "protocol": f"runninghub-{kind}",
+            },
+        )
         raw = response.json()
         if not (isinstance(raw, dict) and raw.get("code") in (0, "0")):
             raise HTTPException(status_code=502, detail=(raw.get("msg") if isinstance(raw, dict) else "") or f"RunningHub 提交失败：{raw}")
@@ -11393,10 +11484,27 @@ async def generate_runninghub_entry_image(prompt, size, model, reference_images,
             # 804 运行中 / 813 排队中 / 其他状态继续轮询
         raise HTTPException(status_code=504, detail=f"RunningHub 任务超时：{last_payload}")
 
-async def generate_runninghub_provider_image(prompt, size, model, reference_images=None, provider=None):
+async def generate_runninghub_provider_image(
+    prompt,
+    size,
+    model,
+    reference_images=None,
+    provider=None,
+    progress=None,
+    request_attempts=None,
+):
     entry = runninghub_entry_config_from_model(provider, model)
     if entry:
-        return await generate_runninghub_entry_image(prompt, size, model, reference_images, provider, entry)
+        return await generate_runninghub_entry_image(
+            prompt,
+            size,
+            model,
+            reference_images,
+            provider,
+            entry,
+            progress,
+            request_attempts,
+        )
     model_def = await runninghub_model_definition(provider, model)
     endpoint = runninghub_task_endpoint(provider, model_def.get("endpoint") or model)
     params = model_def.get("params") if isinstance(model_def.get("params"), list) else []
@@ -11435,7 +11543,20 @@ async def generate_runninghub_provider_image(prompt, size, model, reference_imag
             else:
                 body[key] = image_urls[0]
         runninghub_apply_schema_defaults(body, params)
-        response = await client.post(endpoint, headers=runninghub_json_headers(provider), json=body)
+        response = await submit_http_request_with_logging(
+            client,
+            progress=progress,
+            url=endpoint,
+            headers=runninghub_json_headers(provider),
+            json_body=body,
+            attempts=request_attempts,
+            context={
+                "provider_id": (provider or {}).get("id"),
+                "provider_name": (provider or {}).get("name"),
+                "model": model,
+                "protocol": "runninghub",
+            },
+        )
         response.raise_for_status()
         raw = response.json()
         try:
@@ -11565,10 +11686,21 @@ async def generate_runninghub_video(payload, provider, progress=None):
         local_urls = [await save_remote_video_to_output(url, prefix="rh_video_") for url in urls]
         return {"videos": local_urls, "task_id": task_id, "raw": result}
 
-async def generate_ai_image(prompt, size, quality, model, reference_images=None, provider_id="comfly"):
+async def generate_ai_image(
+    prompt,
+    size,
+    quality,
+    model,
+    reference_images=None,
+    provider_id="comfly",
+    progress=None,
+    request_attempts=None,
+):
     provider = get_api_provider(provider_id)
     if provider["id"] == "modelscope":
-        return await generate_modelscope_provider_image(prompt, size, model, reference_images, provider)
+        return await generate_modelscope_provider_image(
+            prompt, size, model, reference_images, provider, progress, request_attempts
+        )
     if is_codex_provider(provider):
         return await generate_codex_provider_image(prompt, size, model, reference_images, provider)
     if is_gemini_cli_provider(provider):
@@ -11576,11 +11708,17 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
     if is_jimeng_provider(provider):
         return await generate_jimeng_provider_image(prompt, size, model, reference_images, provider)
     if is_runninghub_provider(provider):
-        return await generate_runninghub_provider_image(prompt, size, model, reference_images, provider)
+        return await generate_runninghub_provider_image(
+            prompt, size, model, reference_images, provider, progress, request_attempts
+        )
     if effective_protocol(provider, model) == "gemini":
-        return await generate_gemini_provider_image(prompt, size, model, reference_images, provider)
+        return await generate_gemini_provider_image(
+            prompt, size, model, reference_images, provider, progress, request_attempts
+        )
     if is_volcengine_provider(provider):
-        return await generate_volcengine_provider_image(prompt, size, model, reference_images, provider)
+        return await generate_volcengine_provider_image(
+            prompt, size, model, reference_images, provider, progress, request_attempts
+        )
     is_gpt2 = is_gpt_image_2_model(model)
     is_apimart = is_apimart_provider(provider)
     # 不对 GPT 尺寸做任何缩小/拦截：用户选什么尺寸就原样发给上游；
@@ -11598,16 +11736,58 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
     image_refs = [ref for ref in refs if ref not in mask_refs]
     image_request_mode = effective_image_request_mode(provider, model)
     request_timeout = httpx.Timeout(connect=20.0, read=1800.0, write=120.0, pool=20.0) if (is_gpt2 or is_apimart or image_request_mode in {"openai-json", "openai-video-proxy", "openai-responses"}) else AI_REQUEST_TIMEOUT
+    attempts = request_attempts if isinstance(request_attempts, list) else []
+    request_context = {
+        "provider_id": provider.get("id"),
+        "provider_name": provider.get("name"),
+        "model": model,
+        "image_request_mode": image_request_mode,
+    }
     async with httpx.AsyncClient(timeout=request_timeout) as client:
         response = None
+        async def logged_post(url, headers, json_body=None, form=None, files=None, **kwargs):
+            return await submit_http_request_with_logging(
+                client,
+                progress=progress,
+                url=url,
+                headers=headers,
+                json_body=json_body,
+                form=form,
+                files=files,
+                attempts=attempts,
+                context=request_context,
+                **kwargs,
+            )
+
+        async def logged_post_with_transient_retries(url, headers, json_body, max_attempts=2):
+            retry_statuses = {502, 503, 504, 520, 522, 524}
+            retry_errors = (
+                httpx.RemoteProtocolError,
+                httpx.ReadError,
+                httpx.ConnectError,
+                httpx.ConnectTimeout,
+                httpx.ReadTimeout,
+                httpx.PoolTimeout,
+            )
+            for attempt_index in range(max(1, int(max_attempts or 1))):
+                try:
+                    result = await logged_post(url, headers=headers, json_body=json_body)
+                    if result.status_code not in retry_statuses or attempt_index + 1 >= max_attempts:
+                        return result
+                except retry_errors:
+                    if attempt_index + 1 >= max_attempts:
+                        raise
+                await asyncio.sleep(1.2 * (attempt_index + 1))
+            raise httpx.HTTPError(f"请求失败：POST {url}")
+
         async def post_openai_edits(edit_files=None):
             data = {"model": model, "prompt": prompt, "size": size}
             if quality:
                 data["quality"] = quality
-            return await client.post(
+            return await logged_post(
                 edit_url,
                 headers=api_headers(json_body=False, provider=provider, model=model),
-                data=data,
+                form=data,
                 files=edit_files if edit_files is not None else {},
             )
 
@@ -11643,20 +11823,15 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
                         content = fh.read()
                     files.append(("images", (os.path.basename(local_path), content, content_type_for_path(local_path))))
                 headers = api_headers(json_body=False, provider=provider, model=model)
-                def post_video_proxy_multipart():
-                    with httpx.Client(timeout=request_timeout) as sync_client:
-                        return sync_client.post(video_url, headers=headers, data=form_data, files=files)
-                response = await asyncio.to_thread(post_video_proxy_multipart)
+                response = await logged_post(video_url, headers=headers, form=form_data, files=files)
             else:
                 if refs_for_proxy:
                     body["images"] = [await openai_video_proxy_public_reference_url(ref) for ref in refs_for_proxy]
-                response = await httpx_request_with_transient_retries(
-                    client,
-                    "POST",
+                response = await logged_post_with_transient_retries(
                     video_url,
-                    attempts=2,
                     headers=api_headers(provider=provider, model=model),
-                    json=body,
+                    json_body=body,
+                    max_attempts=2,
                 )
         elif image_request_mode == "openai-responses":
             tool = {"type": "image_generation"}
@@ -11680,7 +11855,13 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
                 "tool_choice": {"type": "image_generation"},
             }
             responses_url = provider_endpoint_url(provider, "image_generation_endpoint", "/v1/responses")
-            response = await post_openai_responses(client, responses_url, api_headers(provider=provider, model=model), body)
+            response = await post_openai_responses(
+                client,
+                responses_url,
+                api_headers(provider=provider, model=model),
+                body,
+                lambda url, headers, payload: logged_post(url, headers=headers, json_body=payload),
+            )
         elif image_request_mode == "openai-json":
             # Agnes 等“OpenAI JSON 图片接口”统一走 /images/generations：
             # 不使用 /images/edits，不传顶层 response_format/n/quality；
@@ -11689,7 +11870,11 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
             if image_refs:
                 extra_body["image"] = [reference_to_data_url(ref, max_size=1536) for ref in image_refs[:ONLINE_IMAGE_REFERENCE_MAX]]
             body = {"model": model, "prompt": prompt, "size": size, "extra_body": extra_body}
-            response = await client.post(gen_url, headers=api_headers(provider=provider, model=model), json=body)
+            response = await logged_post(
+                gen_url,
+                headers=api_headers(provider=provider, model=model),
+                json_body=body,
+            )
         elif is_apimart:
             apimart_size, resolution = apimart_size_resolution(size)
             # APIMart 的 GPT-Image-2 图生图仍走 /images/generations，
@@ -11704,12 +11889,20 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
             }
             if image_refs:
                 body["image_urls"] = [reference_to_data_url(ref, max_size=1536) for ref in image_refs[:ONLINE_IMAGE_REFERENCE_MAX]]
-            response = await client.post(gen_url, headers=api_headers(provider=provider, model=model), json=body)
+            response = await logged_post(
+                gen_url,
+                headers=api_headers(provider=provider, model=model),
+                json_body=body,
+            )
         elif is_gpt2 and not image_refs and not mask_refs:
             body = {"model": model, "prompt": prompt, "size": size}
             if quality:
                 body["quality"] = quality
-            response = await client.post(gen_url, headers=api_headers(provider=provider, model=model), json=body)
+            response = await logged_post(
+                gen_url,
+                headers=api_headers(provider=provider, model=model),
+                json_body=body,
+            )
             if response.status_code >= 400 and images_api_unsupported(response):
                 response = await post_openai_edits()
         elif image_refs:
@@ -11762,7 +11955,11 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
                 }
                 if quality:
                     body["quality"] = quality
-                response = await client.post(gen_url, headers=api_headers(provider=provider, model=model), json=body)
+                response = await logged_post(
+                    gen_url,
+                    headers=api_headers(provider=provider, model=model),
+                    json_body=body,
+                )
                 if response.status_code >= 400 and images_api_unsupported(response):
                     raise HTTPException(
                         status_code=502,
@@ -11772,10 +11969,10 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
             body = {"model": model, "prompt": prompt, "size": size, "response_format": "url", "n": 1}
             if quality:
                 body["quality"] = quality
-            response = await client.post(
+            response = await logged_post(
                 gen_url,
                 headers=api_headers(provider=provider, model=model),
-                json=body,
+                json_body=body,
             )
             if response.status_code >= 400 and images_api_unsupported(response):
                 response = await post_openai_edits()
@@ -14352,7 +14549,7 @@ async def fetch_upstream_models(provider_id: str):
         raise HTTPException(status_code=400, detail=f"{provider.get('name') or provider_id} 未配置 API Key")
     return await fetch_models_from_upstream(provider.get("base_url") or "", api_key, provider_protocol(provider), provider.get("image_request_mode") or "openai")
 
-async def build_online_image_result(payload: OnlineImageRequest):
+async def build_online_image_result(payload: OnlineImageRequest, progress=None):
     provider = get_api_provider(payload.provider_id)
     default_model = (provider.get("image_models") or [IMAGE_MODEL])[0]
     model = selected_model(payload.model, default_model)
@@ -14360,8 +14557,19 @@ async def build_online_image_result(payload: OnlineImageRequest):
     refs = [ref.dict() for ref in payload.reference_images if ref.url]
     image_refs = image_references(refs)
     count = max(1, min(8, int(payload.n or 1)))
+    request_attempts = []
+
     async def generate_one():
-        image_data, raw_item = await generate_ai_image(payload.prompt, request_size, payload.quality, model, image_refs, provider["id"])
+        image_data, raw_item = await generate_ai_image(
+            payload.prompt,
+            request_size,
+            payload.quality,
+            model,
+            image_refs,
+            provider["id"],
+            progress,
+            request_attempts,
+        )
         try:
             image_items = extract_images(raw_item) if isinstance(raw_item, dict) else [image_data]
         except HTTPException:
@@ -14553,8 +14761,20 @@ async def run_canvas_image_task(task_id: str, payload: OnlineImageRequest):
             CANVAS_TASKS[task_id]["status"] = "running"
             CANVAS_TASKS[task_id]["updated_at"] = time.time()
     try:
-        result = await build_online_image_result(payload)
+        def progress(patch):
+            if not isinstance(patch, dict):
+                return
+            with CANVAS_TASK_LOCK:
+                task = CANVAS_TASKS.get(task_id)
+                if isinstance(task, dict):
+                    task.update(patch)
+                    task["updated_at"] = time.time()
+
+        result = await build_online_image_result(payload, progress)
         with CANVAS_TASK_LOCK:
+            request_details = CANVAS_TASKS.get(task_id, {}).get("request_details")
+            if isinstance(result, dict) and isinstance(request_details, dict) and request_details:
+                result = {**result, "request_details": request_details}
             CANVAS_TASKS[task_id].update({
                 "status": "succeeded",
                 "result": result,

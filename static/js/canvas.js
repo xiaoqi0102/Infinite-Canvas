@@ -10762,7 +10762,7 @@ async function runRhModelNode(node, opts={}){
         if(!out){
             let outputs = [];
             for(const task of taskInfos){
-                const result = await waitCanvasImageTaskResult(task.task_id, {cascadeTargetId});
+                const result = await waitCanvasImageTaskResult(task.task_id, {cascadeTargetId, run, startedAt});
                 outputs.push(...(result.images || []));
                 run.request = requestMetaFromResult(result);
             }
@@ -11411,7 +11411,7 @@ async function runGenerator(genId, opts={}){
         if(!out){
             let outputs = [];
             for(const task of taskInfos){
-                const result = await waitCanvasImageTaskResult(task.task_id, {cascadeTargetId});
+                const result = await waitCanvasImageTaskResult(task.task_id, {cascadeTargetId, run, startedAt});
                 outputs.push(...(result.images || []));
                 run.request = requestMetaFromResult(result);
             }
@@ -13594,6 +13594,7 @@ async function pollCanvasImageTask(taskId, options={}){
     if(!taskId) return 'failed';
     if(activeCanvasTaskPolls.has(taskId)) return 'running';
     activeCanvasTaskPolls.add(taskId);
+    let lastLogSignature = '';
     try {
         while(true){
             const found = findPendingTask(taskId);
@@ -13606,8 +13607,30 @@ async function pollCanvasImageTask(taskId, options={}){
                 throw new Error(await responseErrorMessage(res, tr('canvas.generationFailed')));
             }
             const data = await res.json();
+            found.pending.canvasTaskStatus = data.status || 'running';
+            const pendingRun = found.pending.run || {};
+            pendingRun.localTaskId = taskId;
+            pendingRun.request = {
+                ...(pendingRun.request || {}),
+                task_id:data.upstream_task_id || data.task_id || taskId,
+                provider_id:data.provider_id || found.pending.providerId || '',
+            };
+            pendingRun.requestDetails = data.request_details || pendingRun.requestDetails || null;
+            const attempts = data.request_details?.attempts || [];
+            const latestAttempt = attempts[attempts.length - 1] || {};
+            const logSignature = JSON.stringify([data.status || 'running', attempts.length, latestAttempt.response || null, data.error || '']);
+            if(logSignature !== lastLogSignature){
+                lastLogSignature = logSignature;
+                addGenerationLog({
+                    run:pendingRun,
+                    outputs:[],
+                    runMs:nowMs() - Number(found.pending.startedAt || nowMs()),
+                    status:data.status || 'running',
+                    error:data.status === 'failed' ? (data.error || tr('canvas.generationFailed')) : '',
+                });
+            }
             if(data.status === 'succeeded'){
-                completeCanvasImageTask(taskId, data.result || {});
+                completeCanvasImageTask(taskId, data.result || data);
                 return 'succeeded';
             }
             if(data.status === 'failed'){
@@ -13627,6 +13650,7 @@ async function pollCanvasImageTask(taskId, options={}){
 }
 async function waitCanvasImageTaskResult(taskId, options={}){
     if(!taskId) throw new Error(tr('canvas.generationFailed'));
+    let lastLogSignature = '';
     while(true){
         const cascadeTargetId = cascadeTargetIdFromOptions(options);
         if(cascadeTargetId) ensureCascadeActive(cascadeTargetId);
@@ -13636,8 +13660,39 @@ async function waitCanvasImageTaskResult(taskId, options={}){
             throw new Error(await responseErrorMessage(res, tr('canvas.generationFailed')));
         }
         const data = await res.json();
-        if(data.status === 'succeeded') return data.result || {};
-        if(data.status === 'failed') throw new Error(data.error || tr('canvas.generationFailed'));
+        if(options?.run){
+            options.run.localTaskId = taskId;
+            options.run.request = {
+                ...(options.run.request || {}),
+                task_id:data.upstream_task_id || data.task_id || taskId,
+                provider_id:data.provider_id || '',
+            };
+            options.run.requestDetails = data.request_details || options.run.requestDetails || null;
+            const attempts = data.request_details?.attempts || [];
+            const latestAttempt = attempts[attempts.length - 1] || {};
+            const logSignature = JSON.stringify([data.status || 'running', attempts.length, latestAttempt.response || null, data.error || '']);
+            if(logSignature !== lastLogSignature){
+                lastLogSignature = logSignature;
+                addGenerationLog({
+                    run:options.run,
+                    outputs:[],
+                    runMs:nowMs() - Number(options.startedAt || nowMs()),
+                    status:data.status || 'running',
+                    error:data.status === 'failed' ? (data.error || tr('canvas.generationFailed')) : '',
+                });
+            }
+        }
+        if(data.status === 'succeeded'){
+            const result = data.result || data;
+            return data.request_details && result && typeof result === 'object'
+                ? {...result, request_details:data.request_details}
+                : result;
+        }
+        if(data.status === 'failed'){
+            const error = new Error(data.error || tr('canvas.generationFailed'));
+            error.requestDetails = data.request_details || null;
+            throw error;
+        }
         await sleep(1800);
     }
 }
@@ -13814,6 +13869,7 @@ function completeCanvasImageTask(taskId, result){
         run: pending.run || {},
     };
     meta.run.request = requestMetaFromResult(result);
+    meta.run.requestDetails = result?.request_details || meta.run.requestDetails || null;
     const images = result.images || [];
     out._pending = (out._pending || []).filter(p => p.id !== pending.id);
     appendOutputImages(out, images, meta.run?.refs?.[0], [meta]);
@@ -13833,6 +13889,7 @@ function failCanvasImageTask(taskId, message, taskData={}){
     if(!found) return;
     const {out, pending} = found;
     const run = pending.run || {};
+    run.requestDetails = taskData?.request_details || run.requestDetails || null;
     const runMs = nowMs() - Number(pending.startedAt || nowMs());
     const recoverTaskId = taskData?.upstream_task_id || taskData?.task_id || extractUpstreamTaskId(message);
     const gen = nodes.find(n => n.id === run?.node?.id);

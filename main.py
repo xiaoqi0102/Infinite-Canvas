@@ -3287,6 +3287,7 @@ async def run_canvas_video_task(task_id: str, payload: Optional["CanvasVideoRequ
             "jimeng_pending": False,
         })
         return
+    result = await dedupe_canvas_video_result(result)
     result = canvas_video_result_with_request_details(task_id, result)
     update_canvas_video_task(task_id, {
         "status": "succeeded",
@@ -7122,6 +7123,89 @@ def output_file_from_url(url):
         if os.path.commonpath([output_root, path]) == output_root and os.path.exists(path):
             return path
     return None
+
+
+def generated_media_item_url(item):
+    if isinstance(item, dict):
+        for key in ("url", "path", "src", "uri"):
+            value = str(item.get(key) or "").strip()
+            if value:
+                return value
+        return ""
+    return str(item or "").strip()
+
+
+def _local_media_sha256(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as media_file:
+        for chunk in iter(lambda: media_file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _dedupe_generated_media_items(items):
+    unique = []
+    seen_urls = set()
+    for item in items or []:
+        url = generated_media_item_url(item)
+        if not url or url in seen_urls:
+            continue
+        seen_urls.add(url)
+        unique.append((item, url))
+    if len(unique) < 2:
+        return [item for item, _url in unique]
+
+    prepared = []
+    size_counts = {}
+    for item, url in unique:
+        path = None
+        size = None
+        try:
+            path = output_file_from_url(url)
+            if path and os.path.isfile(path):
+                size = os.path.getsize(path)
+                size_counts[size] = size_counts.get(size, 0) + 1
+        except (OSError, ValueError, HTTPException):
+            path = None
+            size = None
+        prepared.append((item, path, size))
+
+    result = []
+    seen_content = set()
+    for item, path, size in prepared:
+        signature = ""
+        if path and size_counts.get(size, 0) > 1:
+            try:
+                signature = f"{size}:{_local_media_sha256(path)}"
+            except OSError:
+                signature = ""
+        if signature and signature in seen_content:
+            continue
+        if signature:
+            seen_content.add(signature)
+        result.append(item)
+    return result
+
+
+async def dedupe_generated_media_items(items):
+    return await asyncio.to_thread(_dedupe_generated_media_items, list(items or []))
+
+
+async def dedupe_image_output_items(items):
+    deduped = await dedupe_generated_media_items(items)
+    return [generated_media_item_url(item) for item in deduped], deduped
+
+
+async def dedupe_canvas_video_result(result):
+    if not isinstance(result, dict) or not isinstance(result.get("videos"), list):
+        return result
+    deduped = await dedupe_generated_media_items(result["videos"])
+    if deduped == result["videos"]:
+        return result
+    merged = dict(result)
+    merged["videos"] = deduped
+    return merged
+
 
 def image_has_alpha(img: Image.Image) -> bool:
     if img.mode in ("RGBA", "LA"):
@@ -13105,6 +13189,7 @@ async def runninghub_query(taskId: str = "", useWallet: bool = False):
                     local_url = remote
                 urls.append(local_url)
                 image_items.append(image_output_meta(local_url))
+            urls, image_items = await dedupe_image_output_items(image_items)
         elif code in (804, "804"):
             status = "RUNNING"
         elif code in (813, "813"):
@@ -14303,6 +14388,7 @@ async def build_online_image_result(payload: OnlineImageRequest):
 
     local_urls = [url for urls, _items, _raw in generated for url in (urls or []) if url]
     local_items = [item for _urls, items, _raw in generated for item in (items or []) if item.get("url")]
+    local_urls, local_items = await dedupe_image_output_items(local_items)
     raw = generated[0][2] if generated else {}
     if not local_urls:
         provider_name = provider.get("name") or provider["id"]
@@ -14355,6 +14441,7 @@ async def query_image_task(payload: ImageTaskQueryRequest):
                         if local_url:
                             local_urls.append(local_url)
                             local_items.append(image_output_meta(local_url))
+                    local_urls, local_items = await dedupe_image_output_items(local_items)
                     result = {
                         "status": "succeeded",
                         "prompt": "",
@@ -14422,6 +14509,7 @@ async def query_image_task(payload: ImageTaskQueryRequest):
             if local_url:
                 local_urls.append(local_url)
                 local_items.append(image_output_meta(local_url, item))
+        local_urls, local_items = await dedupe_image_output_items(local_items)
         result = {
             "status": "succeeded",
             "prompt": "",
@@ -16187,7 +16275,8 @@ async def build_canvas_video_result(payload: CanvasVideoRequest, progress=None):
 
 @app.post("/api/canvas-video")
 async def canvas_video(payload: CanvasVideoRequest):
-    return await build_canvas_video_result(payload)
+    result = await build_canvas_video_result(payload)
+    return await dedupe_canvas_video_result(result)
 
 @app.post("/api/canvas-video-tasks")
 async def create_canvas_video_task(payload: CanvasVideoRequest):

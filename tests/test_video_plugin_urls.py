@@ -282,6 +282,33 @@ class VideoDownloadUrlTests(unittest.IsolatedAsyncioTestCase):
                 passthrough,
             )
 
+    async def test_aicost_saves_only_first_video_url_alias(self):
+        saved = []
+
+        async def save_video(url):
+            saved.append(url)
+            return f"/assets/output/video-{len(saved)}.mp4"
+
+        result = await aicost._save_result(
+            {
+                "status": "SUCCESS",
+                "data": {
+                    "result_url": "https://www.aicost.xyz/static-custom/generated-videos/result.mp4",
+                    "videoUrl": "https://www.aicost.xyz/static-custom/generated-videos/alias.mp4",
+                },
+            },
+            "task-id",
+            "grok-imagine-video-1.5-preview",
+            "https://www.aicost.xyz",
+            save_video,
+        )
+
+        self.assertEqual(
+            saved,
+            ["https://www.aicost.xyz/static-custom/generated-videos/result.mp4"],
+        )
+        self.assertEqual(result["videos"], ["/assets/output/video-1.mp4"])
+
     async def test_public_generate_entries_use_canonical_create_urls(self):
         base_url = "https://api.example.com//v1/v1/"
         cases = []

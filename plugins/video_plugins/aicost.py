@@ -463,6 +463,9 @@ async def _save_result(
 ) -> Dict[str, Any]:
     root = _provider_root(base_url)
     urls = _video_urls(payload, root)
+    if urls:
+        # AICost 单个任务只生成一个视频，但响应可能同时返回多个指向同一内容的别名地址。
+        urls = urls[:1]
     if not urls and task_id:
         quoted = urllib.parse.quote(str(task_id), safe="")
         urls = [f"{root}/v1/videos/{quoted}/content"]

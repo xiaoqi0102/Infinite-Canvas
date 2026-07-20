@@ -20,6 +20,7 @@ _SENSITIVE_FIELD_RE = re.compile(
     re.IGNORECASE,
 )
 _BASE64_FIELD_RE = re.compile(r"base64|b64|file[_-]?data|binary", re.IGNORECASE)
+_BASE64_TEXT_RE = re.compile(r"^[A-Za-z0-9+/=_\-\s]+$")
 _HTTP_PREVIEW_MAX_TEXT = 12000
 _HTTP_PREVIEW_MAX_ITEMS = 60
 _FAKE_IP_PROXY_NETWORK = ipaddress.ip_network("198.18.0.0/15")
@@ -70,7 +71,12 @@ def video_http_preview_value(
         for secret in secret_values:
             if secret:
                 text = text.replace(secret, "[敏感信息已隐藏]")
-        if _BASE64_FIELD_RE.search(str(key or "")):
+        likely_inline_data = (
+            str(key or "").strip().lower() == "data"
+            and len(text) >= 256
+            and _BASE64_TEXT_RE.fullmatch(text) is not None
+        )
+        if _BASE64_FIELD_RE.search(str(key or "")) or likely_inline_data:
             return f"[内嵌数据已省略，原长度 {len(text)} 字符]"
         if text.startswith(("http://", "https://", "data:", "blob:")):
             return video_http_preview_url(text)
@@ -171,7 +177,7 @@ def _video_http_response_preview(response: Any, secret_values: Sequence[str]) ->
     }
 
 
-async def submit_video_http_request(
+async def submit_http_request_with_logging(
     client: Any,
     *,
     progress,
@@ -184,7 +190,7 @@ async def submit_video_http_request(
     context: Optional[Mapping[str, Any]] = None,
     **kwargs,
 ):
-    """提交视频创建请求，并持久化不含密钥和二进制内容的真实 HTTP 交换。"""
+    """提交创建请求，并持久化不含密钥和二进制内容的真实 HTTP 交换。"""
     request_headers, secret_values = video_http_preview_headers(headers)
     request: Dict[str, Any] = {
         "method": "POST",
@@ -235,6 +241,10 @@ async def submit_video_http_request(
     exchange["response"] = _video_http_response_preview(response, secret_values)
     report()
     return response
+
+
+# 保留视频插件既有导入名，图片与视频共用同一套脱敏 HTTP 日志契约。
+submit_video_http_request = submit_http_request_with_logging
 
 
 def _is_global_ip_address(value: Any, *, allow_https_fake_ip: bool = False) -> bool:

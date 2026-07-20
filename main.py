@@ -44,6 +44,13 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, Response, StreamingResponse, JSONResponse
 from pydantic import BaseModel, Field, StrictInt
 from fastapi.middleware.cors import CORSMiddleware
+from plugins.image_plugins import (
+    AICOST_IMAGE_REQUEST_MODE,
+    AICostImageProtocolError,
+    generate_aicost_image,
+    is_aicost_image_official_provider,
+    query_aicost_image_task,
+)
 from plugins.video_plugins import (
     AICOST_VIDEO_REQUEST_MODE,
     AICostProtocolError,
@@ -477,7 +484,13 @@ JIMENG_LOGIN_SESSION = {
 
 PROVIDER_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{2,40}$")
 SUPPORTED_PROVIDER_PROTOCOLS = {"openai", "apimart", "gemini", "gemini-cli", "volcengine", "runninghub", "jimeng", "codex"}
-SUPPORTED_IMAGE_REQUEST_MODES = {"openai", "openai-json", "openai-video-proxy", "openai-responses"}
+SUPPORTED_IMAGE_REQUEST_MODES = {
+    "openai",
+    "openai-json",
+    "openai-video-proxy",
+    "openai-responses",
+    AICOST_IMAGE_REQUEST_MODE,
+}
 SUPPORTED_VIDEO_REQUEST_MODES = {
     "openai-videos-generations",
     "openai-video-generations",
@@ -1351,6 +1364,8 @@ def normalize_endpoint_override(value, label):
 
 def normalize_image_request_mode(value):
     mode = str(value or "").strip().lower()
+    if mode in {"aicost", "aicost-images"}:
+        return AICOST_IMAGE_REQUEST_MODE
     return mode if mode in SUPPORTED_IMAGE_REQUEST_MODES else "openai"
 
 def normalize_video_request_mode(value):
@@ -5193,6 +5208,8 @@ def is_fhl_provider(provider):
 
 def detect_image_request_mode(base_url="", models=None):
     base = str(base_url or "").strip().lower()
+    if is_aicost_image_official_provider({"base_url": base}):
+        return AICOST_IMAGE_REQUEST_MODE
     if "apihub.agnes-ai.com" in base:
         return "openai-json"
     for model in models or []:
@@ -6975,7 +6992,19 @@ async def generate_jimeng_video(payload: CanvasVideoRequest, provider, progress=
                 pass
 
 IMAGE_TASK_SUCCESS_STATUSES = {"SUCCESS", "SUCCESSFUL", "SUCCEED", "SUCCEEDED", "COMPLETED", "COMPLETE", "DONE", "FINISHED", "OK", "READY"}
-IMAGE_TASK_FAILED_STATUSES = {"FAILURE", "FAILED", "FAIL", "ERROR", "ERRORED", "CANCELED", "CANCELLED", "TIMEOUT", "REJECTED", "EXPIRED"}
+IMAGE_TASK_FAILED_STATUSES = {
+    "FAILURE",
+    "FAILED",
+    "FAIL",
+    "ERROR",
+    "ERRORED",
+    "CANCELED",
+    "CANCELLED",
+    "TIMEOUT",
+    "REJECTED",
+    "EXPIRED",
+    "CONTENT_FILTER",
+}
 
 def image_task_url_for_provider(provider, task_id):
     base_url = (provider.get("base_url") if provider else AI_BASE_URL).rstrip("/")
@@ -11686,6 +11715,13 @@ async def generate_runninghub_video(payload, provider, progress=None):
         local_urls = [await save_remote_video_to_output(url, prefix="rh_video_") for url in urls]
         return {"videos": local_urls, "task_id": task_id, "raw": result}
 
+def aicost_image_http_exception(exc):
+    error = HTTPException(status_code=exc.status_code, detail=exc.detail)
+    if exc.upstream_task_id:
+        setattr(error, "upstream_task_id", exc.upstream_task_id)
+    return error
+
+
 async def generate_ai_image(
     prompt,
     size,
@@ -11705,6 +11741,27 @@ async def generate_ai_image(
         return await generate_codex_provider_image(prompt, size, model, reference_images, provider)
     if is_gemini_cli_provider(provider):
         return await generate_gemini_cli_provider_image(prompt, size, model, reference_images, provider)
+    image_request_mode = effective_image_request_mode(provider, model)
+    if image_request_mode == AICOST_IMAGE_REQUEST_MODE:
+        try:
+            return await generate_aicost_image(
+                {
+                    "prompt": prompt,
+                    "size": size,
+                    "quality": quality,
+                    "model": model,
+                    "reference_images": reference_images or [],
+                },
+                base_url=provider.get("base_url") or AI_BASE_URL,
+                headers=api_headers(provider=provider, model=model),
+                resolve_local_path=output_file_from_url,
+                content_type_for_path=content_type_for_path,
+                request_timeout=httpx.Timeout(connect=20.0, read=3600.0, write=120.0, pool=20.0),
+                poll_timeout=3600.0,
+                poll_interval=2.0,
+            )
+        except AICostImageProtocolError as exc:
+            raise aicost_image_http_exception(exc) from exc
     if is_jimeng_provider(provider):
         return await generate_jimeng_provider_image(prompt, size, model, reference_images, provider)
     if is_runninghub_provider(provider):
@@ -11734,7 +11791,6 @@ async def generate_ai_image(
     refs = [ref for ref in (reference_images or []) if ref.get("url")]
     mask_refs = [ref for ref in refs if str(ref.get("role") or "").strip().lower() == "mask" or str(ref.get("name") or "").lower().endswith("_mask.png")]
     image_refs = [ref for ref in refs if ref not in mask_refs]
-    image_request_mode = effective_image_request_mode(provider, model)
     request_timeout = httpx.Timeout(connect=20.0, read=1800.0, write=120.0, pool=20.0) if (is_gpt2 or is_apimart or image_request_mode in {"openai-json", "openai-video-proxy", "openai-responses"}) else AI_REQUEST_TIMEOUT
     attempts = request_attempts if isinstance(request_attempts, list) else []
     request_context = {
@@ -14692,16 +14748,27 @@ async def query_image_task(payload: ImageTaskQueryRequest):
         except httpx.HTTPError as exc:
             raise HTTPException(status_code=502, detail=f"查询 RunningHub 任务失败：{exc}") from exc
     timeout = httpx.Timeout(connect=20.0, read=300.0, write=60.0, pool=20.0)
-    try:
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-            raw = await fetch_image_task_payload(client, task_id, provider)
-    except httpx.HTTPStatusError as exc:
-        log_net_error(f"查询生图任务 HTTP状态错误 provider={provider.get('id')} task_id={task_id}", exc)
-        text = exc.response.text or ""
-        raise HTTPException(status_code=exc.response.status_code, detail=f"查询上游生图任务失败：{text[:300]}") from exc
-    except httpx.HTTPError as exc:
-        log_net_error(f"查询生图任务 网络/TLS错误 provider={provider.get('id')} task_id={task_id}", exc)
-        raise HTTPException(status_code=502, detail=f"查询上游生图任务失败：{exc}") from exc
+    if effective_image_request_mode(provider) == AICOST_IMAGE_REQUEST_MODE:
+        try:
+            raw = await query_aicost_image_task(
+                task_id,
+                base_url=provider.get("base_url") or AI_BASE_URL,
+                headers=api_headers(provider=provider),
+                request_timeout=timeout,
+            )
+        except AICostImageProtocolError as exc:
+            raise aicost_image_http_exception(exc) from exc
+    else:
+        try:
+            async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+                raw = await fetch_image_task_payload(client, task_id, provider)
+        except httpx.HTTPStatusError as exc:
+            log_net_error(f"查询生图任务 HTTP状态错误 provider={provider.get('id')} task_id={task_id}", exc)
+            text = exc.response.text or ""
+            raise HTTPException(status_code=exc.response.status_code, detail=f"查询上游生图任务失败：{text[:300]}") from exc
+        except httpx.HTTPError as exc:
+            log_net_error(f"查询生图任务 网络/TLS错误 provider={provider.get('id')} task_id={task_id}", exc)
+            raise HTTPException(status_code=502, detail=f"查询上游生图任务失败：{exc}") from exc
 
     status = image_task_status(raw)
     image_items = []

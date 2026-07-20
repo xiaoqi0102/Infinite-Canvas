@@ -829,7 +829,7 @@ function syncEditor(){
     item.base_url = CLI_PROTOCOLS.has(selectedProtocol) ? '' : baseInput.value.trim();
     // 固定平台不从协议下拉读取
     item.protocol = selectedProtocol;
-    item.image_request_mode = normalizeImageRequestMode(
+    item.image_request_mode = effectiveImageRequestModeForProvider(item,
         item.id === 'modelscope' || item.id === 'runninghub' || item.id === 'volcengine' || CLI_PROTOCOLS.has(selectedProtocol)
             ? 'openai'
             : lockedApi
@@ -2536,8 +2536,10 @@ function renderEditor(){
     const lockedApi = lockedRecommendedApi(item);
     if(lockedApi) applyLockedRecommendedProtocol(item);
     else {
-        const officialMode = officialVideoRequestMode(item.base_url);
-        if(officialMode) item.video_request_mode = officialMode;
+        const officialImageMode = officialImageRequestMode(item.base_url);
+        const officialVideoMode = officialVideoRequestMode(item.base_url);
+        if(officialImageMode) item.image_request_mode = officialImageMode;
+        if(officialVideoMode) item.video_request_mode = officialVideoMode;
     }
     if(protocolInput){
         protocolInput.value = item.id === 'runninghub' ? 'runninghub' : item.id === 'volcengine' ? 'volcengine' : (item.protocol || 'openai');
@@ -2929,7 +2931,8 @@ function currentProviderApiKey(item){
 }
 function normalizeImageRequestMode(value){
     const mode = String(value || '').trim().toLowerCase();
-    return ['openai', 'openai-json', 'openai-video-proxy', 'openai-responses'].includes(mode) ? mode : 'openai';
+    if(['aicost', 'aicost-images'].includes(mode)) return 'aicost-image';
+    return ['openai', 'openai-json', 'openai-video-proxy', 'openai-responses', 'aicost-image'].includes(mode) ? mode : 'openai';
 }
 function normalizeVideoRequestMode(value){
     if(window.StudioVideoApi?.MODES?.TUDOU) return window.StudioVideoApi.normalizeVideoRequestMode(value);
@@ -2979,6 +2982,9 @@ function officialVideoRequestMode(baseUrl){
     if(isTudouBaseUrl(baseUrl)) return 'tudou-video';
     return '';
 }
+function officialImageRequestMode(baseUrl){
+    return isAICostBaseUrl(baseUrl) ? 'aicost-image' : '';
+}
 function isAICostBaseUrl(value){
     if(window.StudioVideoApi) return window.StudioVideoApi.isAICostBaseUrl(value);
     const officialHostnames = new Set(['aicost.xyz', 'www.aicost.xyz']);
@@ -2987,6 +2993,19 @@ function isAICostBaseUrl(value){
     catch (_) {}
     try { return officialHostnames.has(new URL(`https://${text.replace(/^\/+/, '')}`).hostname.toLowerCase()); }
     catch (_) { return false; }
+}
+function effectiveImageRequestModeForProvider(item, requestedMode){
+    const officialMode = officialImageRequestMode(item ? item.base_url : (baseInput?.value || ''));
+    if(officialMode) return officialMode;
+    return normalizeImageRequestMode(requestedMode);
+}
+function applyOfficialImageMode(baseUrl){
+    const item = provider();
+    const officialMode = officialImageRequestMode(baseUrl);
+    if(!item || !officialMode || lockedRecommendedApi(item)) return false;
+    item.image_request_mode = officialMode;
+    if(imageRequestModeInput) imageRequestModeInput.value = item.image_request_mode;
+    return true;
 }
 function effectiveVideoRequestModeForProvider(item, requestedMode){
     const officialMode = officialVideoRequestMode(item?.base_url || baseInput?.value || '');
@@ -3007,6 +3026,7 @@ function normalizeImageEditRoute(value){
 }
 function imageRequestModeLabel(mode){
     const normalized = normalizeImageRequestMode(mode);
+    if(normalized === 'aicost-image') return tr('api.imageRequestModeAICostLabel') || 'aicost: GPT Image / Gemini';
     if(normalized === 'openai-json') return 'OpenAI JSON';
     if(normalized === 'openai-video-proxy') return 'OpenAI 中转';
     if(normalized === 'openai-responses') return 'OpenAI RS';
@@ -3038,7 +3058,7 @@ function applyDetectedImageRequestMode(mode){
         if(videoRequestModeInput) videoRequestModeInput.value = item.video_request_mode;
         return false;
     }
-    const detected = normalizeImageRequestMode(mode);
+    const detected = effectiveImageRequestModeForProvider(item, mode);
     const changed = normalizeImageRequestMode(item.image_request_mode) !== detected || normalizeImageRequestMode(imageRequestModeInput.value) !== detected;
     imageRequestModeInput.value = detected;
     item.image_request_mode = detected;
@@ -3871,7 +3891,7 @@ async function saveProviders(){
             ? 'volcengine'
             : API_PROTOCOLS.includes(String(item.protocol || '').toLowerCase()) ? String(item.protocol).toLowerCase() : 'openai';
         const isCliProtocol = CLI_PROTOCOLS.has(item.protocol);
-        item.image_request_mode = normalizeImageRequestMode(
+        item.image_request_mode = effectiveImageRequestModeForProvider(item,
             item.id === 'modelscope' || item.id === 'runninghub' || item.id === 'volcengine' || isCliProtocol
                 ? 'openai'
                 : item.image_request_mode
@@ -4032,6 +4052,7 @@ window.onload = () => {
     if(protocolInput) protocolInput.addEventListener('change', updateProtocolFromInput);
     if(baseInput) baseInput.addEventListener('input', () => {
         updateApimartDomesticHint();
+        applyOfficialImageMode(baseInput.value);
         applyOfficialVideoMode(baseInput.value);
     });
     if(imageRequestModeInput) imageRequestModeInput.addEventListener('change', () => {
@@ -4043,7 +4064,8 @@ window.onload = () => {
             if(videoRequestModeInput) videoRequestModeInput.value = item.video_request_mode;
             return;
         }
-        item.image_request_mode = normalizeImageRequestMode(imageRequestModeInput.value);
+        item.image_request_mode = effectiveImageRequestModeForProvider(item, imageRequestModeInput.value);
+        imageRequestModeInput.value = item.image_request_mode;
     });
     if(videoRequestModeInput) videoRequestModeInput.addEventListener('change', () => {
         const item = provider();

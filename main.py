@@ -14044,6 +14044,50 @@ def volcengine_task_probe_url(base_url: str):
         return f"{base}/contents/generations/tasks/healthcheck_probe_do_not_submit"
     return f"{base}/api/v3/contents/generations/tasks/healthcheck_probe_do_not_submit"
 
+
+def is_explicit_volcengine_task_error(raw) -> bool:
+    """只把明确指向任务 ID 的无效/不存在错误作为方舟任务端点证据。"""
+    if not isinstance(raw, dict):
+        return False
+    try:
+        error_text = json.dumps(raw, ensure_ascii=False).lower()
+    except Exception:
+        error_text = str(raw).lower()
+    task_markers = (
+        "task id",
+        "task_id",
+        "taskid",
+        "content generation task",
+        "contentgenerationtask",
+        "任务 id",
+        "任务id",
+    )
+    missing_markers = (
+        "invalid",
+        "not found",
+        "notfound",
+        "does not exist",
+        "不存在",
+        "无效",
+    )
+    has_task_marker = any(marker in error_text for marker in task_markers)
+    has_missing_marker = any(marker in error_text for marker in missing_markers)
+    if has_task_marker and has_missing_marker:
+        return True
+
+    error = raw.get("error")
+    if not isinstance(error, dict):
+        return False
+    error_type = str(error.get("type") or "").strip().lower()
+    error_code = str(error.get("code") or "").strip().lower()
+    error_param = str(error.get("param") or "").strip().lower()
+    return (
+        error_type == "notfound"
+        and (error_code == "notfound" or error_code.startswith("notfound."))
+        and error_param in {"id", "task_id", "taskid"}
+    )
+
+
 async def probe_volcengine_task_endpoint(client, base_url: str, api_key: str):
     probe_url = volcengine_task_probe_url(base_url)
     if not probe_url:
@@ -14057,8 +14101,14 @@ async def probe_volcengine_task_endpoint(client, base_url: str, api_key: str):
         return False, {"status": response.status_code, "message": "方舟 API Key 无效或无权限", "raw": raw}
     if looks_like_html_response(response.text):
         return False, {"status": response.status_code, "message": "任务接口返回 HTML，Base URL 可能不是 API 地址", "raw": raw}
-    if response.status_code < 500:
+    if 200 <= response.status_code < 300:
         return True, {"status": response.status_code, "message": "方舟任务查询端点可达", "raw": raw}
+    if response.status_code in (400, 404, 422) and is_explicit_volcengine_task_error(raw):
+        return True, {"status": response.status_code, "message": "方舟任务查询端点可达，测试任务 ID 不存在", "raw": raw}
+    if response.status_code == 404:
+        return False, {"status": response.status_code, "message": "方舟任务查询路径返回普通 404，未检测到任务端点", "raw": raw}
+    if response.status_code < 500:
+        return False, {"status": response.status_code, "message": f"方舟任务接口未返回可识别的任务响应 ({response.status_code})", "raw": raw}
     return False, {"status": response.status_code, "message": f"方舟任务接口服务端错误 {response.status_code}", "raw": raw}
 
 def openai_compat_root_for_probe(base_url: str):
@@ -14087,6 +14137,8 @@ async def probe_openai_compat_bearer_endpoint(client, base_url: str, api_key: st
         return False, {"status": response.status_code, "message": "API Key 无效或无权限", "raw": raw}
     if looks_like_html_response(response.text):
         return False, {"status": response.status_code, "message": "OpenAI 兼容入口返回 HTML，Base URL 可能不是 API 地址", "raw": raw}
+    if response.status_code == 404:
+        return False, {"status": response.status_code, "message": "OpenAI 兼容入口不存在 (HTTP 404)", "raw": raw}
     if response.status_code < 500:
         return True, {"status": response.status_code, "message": "OpenAI 兼容 Bearer 鉴权入口可达", "raw": raw}
     return False, {"status": response.status_code, "message": f"OpenAI 兼容入口服务端错误 {response.status_code}", "raw": raw}
@@ -14411,10 +14463,10 @@ async def probe_async_endpoint(payload: TestConnectionPayload):
             openai_ok, openai_probe = await probe_openai_models_endpoint(client, base_url, api_key)
             if not openai_ok and protocol == "openai":
                 # /v1/models 不可用，先确认是不是“没实现 models 接口的 OpenAI 兼容站”：探一下 /v1/chat/completions。
-                # 可达就判定为 OpenAI 兼容（很多网关不暴露 /v1/models），避免被下面的方舟探测（404 也算可达）误判成方舟。
+                # 可达就判定为 OpenAI 兼容（很多网关不暴露 /v1/models），避免继续执行不必要的方舟探测。
                 compat_ok, compat_probe = await probe_openai_compat_bearer_endpoint(client, base_url, api_key)
                 # 仅当 /v1/chat/completions 确实存在（返回 2xx 或我们发空 messages 触发的 400 等，而非 404 路径不存在）
-                # 才判为 OpenAI 兼容；404 说明该路径不存在，留给后面的方舟探测。
+                # 才判为 OpenAI 兼容；404 说明该路径不存在，后续方舟探测仍须匹配明确的任务错误语义。
                 if compat_ok and (compat_probe.get("status") or 0) != 404:
                     return {
                         "ok": True,

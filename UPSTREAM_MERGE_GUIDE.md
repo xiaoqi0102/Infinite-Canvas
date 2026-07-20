@@ -75,6 +75,10 @@ git status
 - Tudou Sora2 必须保留 JSON `POST /v1/videos/generations`、`GET /v1/tasks/{task_id}`、单图公网 URL、显式 `generate_audio` 和结果 URL 解析；不能套用通用复数视频模式的 data URL 图片载荷。
 - Tudou 官方 hostname `api.ai-tudou.net` 必须在前端保存和后端调用两侧自动识别为 `tudou-video`，并保持完整 hostname 精确匹配，避免配置被降级成通用 `videos` 后请求到网站 HTML fallback。
 - 所有独立视频插件必须复用 `plugins/video_plugins/common.py` 的 Base URL 规则：只折叠 URL 路径中的重复斜杠，循环移除末尾重复的 `/v1`、`/v2` 后再补协议路径。根地址、尾斜杠、`//v1`、`/v1/v1` 和带子路径前缀的配置都只能生成一份版本路径；上游相对下载地址必须通过同一 provider 根地址补全，不能直接交给本地保存函数。
+- AICost 图片协议实现位于 `plugins/image_plugins/`，`main.py` 只保留模式注册、宿主回调和 FastAPI 错误转换；`aicost.xyz` 与 `www.aicost.xyz` 必须按完整 hostname 自动识别为 `aicost-image`。
+- AICost 图片请求必须使用插件内部的 `httpx.AsyncClient(trust_env=False)`，只绕过该协议的系统代理，不能修改其他 provider 的代理行为。
+- AICost 文生图使用 `POST /v1/images/generations`，图生图使用 multipart `POST /v1/images/edits`，异步任务固定查询 `GET /v1/images/generations/{task_id}`；Gemini 图片模型保留 `/v1beta/models/{model}:generateContent` 原生请求格式。
+- AICost 创建图片的 POST 遇到断连、超时或 5xx 时不得自动重试，避免上游已执行后重复扣费；`image[]` 只能在明确的字段校验类 `400/415/422` 后回退为 `image`，不得对结果未知的请求回退。
 - 本地任务 ID 使用 `canvas_video_xxx`，不要和上游任务 ID 混用。
 - 后端任务需要持久化，重启后能恢复已经拿到上游任务 ID 的任务。
 - 没有上游任务 ID 的任务不要自动重提，避免重复扣费。

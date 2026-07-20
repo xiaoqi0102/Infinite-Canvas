@@ -123,14 +123,22 @@ class CanvasLogCleanupTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["removed_files"], [])
         self.assertEqual(result["skipped_referenced"], [path.name])
 
-    async def test_forced_cleanup_removes_result_node_and_media(self):
+    async def test_forced_cleanup_resets_result_node_and_removes_media(self):
         path, url = self.generated_file("node-owned.png")
         self.write_canvas(
             "remove_node",
             [{"id": "log-1", "outputs": [{"url": url}]}],
             nodes=[
                 {"id": "prompt", "type": "smart-prompt"},
-                {"id": "result", "type": "smart-image", "images": [{"url": url}]},
+                {
+                    "id": "result",
+                    "type": "smart-image",
+                    "images": [{"url": url}],
+                    "promptDraftText": "keep this prompt",
+                    "runInputRefs": [{"url": "/assets/input/reference.png"}],
+                    "runSettings": {"model": "test-model"},
+                    "runFinishedAt": 999,
+                },
             ],
         )
         stored = json.loads((self.canvases / "remove_node.json").read_text(encoding="utf-8"))
@@ -142,13 +150,136 @@ class CanvasLogCleanupTests(unittest.IsolatedAsyncioTestCase):
             main.DeleteCanvasLogRequest(
                 log_id="log-1",
                 delete_unreferenced_media=True,
-                delete_referencing_nodes=True,
+                reset_referencing_nodes=True,
             ),
         )
 
         self.assertFalse(path.exists())
-        self.assertEqual([node["id"] for node in result["canvas"]["nodes"]], ["prompt"])
-        self.assertEqual(result["canvas"]["connections"], [])
+        self.assertEqual([node["id"] for node in result["canvas"]["nodes"]], ["prompt", "result"])
+        reset = result["canvas"]["nodes"][1]
+        self.assertEqual(reset["images"], [])
+        self.assertEqual(reset["pending"], 0)
+        self.assertFalse(reset["running"])
+        self.assertEqual(reset["promptDraftText"], "keep this prompt")
+        self.assertEqual(reset["runInputRefs"], [{"url": "/assets/input/reference.png"}])
+        self.assertEqual(reset["runSettings"], {"model": "test-model"})
+        self.assertNotIn("runFinishedAt", reset)
+        self.assertEqual(result["canvas"]["connections"], [{"id": "edge", "from": "prompt", "to": "result"}])
+        self.assertEqual(result["reset_node_ids"], ["result"])
+
+    async def test_forced_cleanup_clears_classic_output_comparison_refs(self):
+        path, url = self.generated_file("classic-output.png")
+        self.write_canvas(
+            "classic_output",
+            [{"id": "log-1", "outputs": [url]}],
+            nodes=[
+                {"id": "generator", "type": "online", "prompt": "keep", "generatedOutputs": [url]},
+                {
+                    "id": "output",
+                    "type": "output",
+                    "images": [{"url": url}],
+                    "_pending": [{"url": url}],
+                    "imageComparisons": {"before": url},
+                },
+            ],
+        )
+        stored = json.loads((self.canvases / "classic_output.json").read_text(encoding="utf-8"))
+        stored["connections"] = [{"id": "edge", "from": "generator", "to": "output"}]
+        (self.canvases / "classic_output.json").write_text(json.dumps(stored), encoding="utf-8")
+
+        result = await main.delete_canvas_log(
+            "classic_output",
+            main.DeleteCanvasLogRequest(
+                log_id="log-1",
+                delete_unreferenced_media=True,
+                reset_referencing_nodes=True,
+            ),
+        )
+
+        self.assertFalse(path.exists())
+        generator, reset = result["canvas"]["nodes"]
+        self.assertEqual(generator["prompt"], "keep")
+        self.assertEqual(generator["generatedOutputs"], [])
+        self.assertEqual(reset["images"], [])
+        self.assertEqual(reset["_pending"], [])
+        self.assertEqual(reset["imageComparisons"], {})
+        self.assertEqual(result["canvas"]["connections"], [{"id": "edge", "from": "generator", "to": "output"}])
+
+    async def test_reset_clears_all_generated_results_but_keeps_reference_preview(self):
+        first, first_url = self.generated_file("first-result.png")
+        second, second_url = self.generated_file("second-result.png")
+        reference = self.inputs / "reference.png"
+        reference.write_bytes(b"reference")
+        reference_url = "/assets/input/reference.png"
+        self.write_canvas(
+            "multi_result",
+            [{"id": "log-1", "outputs": [first_url]}],
+            nodes=[{
+                "id": "result",
+                "type": "smart-image",
+                "images": [
+                    {"url": first_url, "generatedResult": True},
+                    {"url": second_url, "generatedResult": True},
+                    {"url": reference_url, "loopInputPreview": True},
+                ],
+                "promptDraftText": "keep prompt",
+                "runFinishedAt": 999,
+            }],
+        )
+
+        result = await main.delete_canvas_log(
+            "multi_result",
+            main.DeleteCanvasLogRequest(
+                log_id="log-1",
+                delete_unreferenced_media=True,
+                reset_referencing_nodes=True,
+            ),
+        )
+
+        self.assertFalse(first.exists())
+        self.assertFalse(second.exists())
+        self.assertTrue(reference.exists())
+        reset = result["canvas"]["nodes"][0]
+        self.assertEqual(reset["images"], [{"url": reference_url, "loopInputPreview": True}])
+        self.assertEqual(reset["promptDraftText"], "keep prompt")
+        self.assertNotIn("runFinishedAt", reset)
+
+    async def test_reference_only_downstream_node_does_not_expand_deletion(self):
+        source, source_url = self.generated_file("source-result.png")
+        downstream, downstream_url = self.generated_file("downstream-result.png")
+        self.write_canvas(
+            "reference_only",
+            [{"id": "log-1", "outputs": [source_url]}],
+            nodes=[{
+                "id": "downstream",
+                "type": "smart-image",
+                "images": [
+                    {"url": source_url, "loopInputPreview": True},
+                    {"url": downstream_url, "generatedResult": True},
+                ],
+                "runInputRefs": [{"url": source_url}],
+                "promptDraftText": "keep downstream",
+            }],
+        )
+
+        result = await main.delete_canvas_log(
+            "reference_only",
+            main.DeleteCanvasLogRequest(
+                log_id="log-1",
+                delete_unreferenced_media=True,
+                reset_referencing_nodes=True,
+            ),
+        )
+
+        self.assertTrue(source.exists())
+        self.assertTrue(downstream.exists())
+        node = result["canvas"]["nodes"][0]
+        self.assertEqual(node["images"], [
+            {"url": source_url, "loopInputPreview": True},
+            {"url": downstream_url, "generatedResult": True},
+        ])
+        self.assertEqual(node["promptDraftText"], "keep downstream")
+        self.assertEqual(result["reset_node_ids"], [])
 
     async def test_cleanup_deletes_unreferenced_media_and_preview(self):
         path, url = self.generated_file()

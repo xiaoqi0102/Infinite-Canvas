@@ -6872,7 +6872,7 @@ async function deleteCanvasLogEntry(logId, deleteMedia=false){
             body:JSON.stringify({
                 log_id:logId,
                 delete_unreferenced_media:deleteMedia,
-                delete_referencing_nodes:deleteMedia,
+                reset_referencing_nodes:deleteMedia,
                 base_updated_at:Number(canvas.updated_at || 0)
             })
         });
@@ -6889,7 +6889,7 @@ async function deleteCanvasLogEntry(logId, deleteMedia=false){
         renderSmartCanvasLog();
         const notes = [tr('canvas.logDeleted')];
         if(data.removed_files?.length) notes.push(tr('canvas.logMediaRemoved').replace('{n}', data.removed_files.length));
-        if(data.removed_node_ids?.length) notes.push(tr('canvas.logNodesRemoved').replace('{n}', data.removed_node_ids.length));
+        if(data.reset_node_ids?.length) notes.push(tr('canvas.logNodesReset').replace('{n}', data.reset_node_ids.length));
         if(data.skipped_referenced?.length) notes.push(tr('canvas.logMediaReferenced').replace('{n}', data.skipped_referenced.length));
         toast(notes.join(' · '));
     } catch(err) {

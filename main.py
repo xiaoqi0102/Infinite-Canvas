@@ -2469,7 +2469,7 @@ class DeleteHistoryRequest(BaseModel):
 class DeleteCanvasLogRequest(BaseModel):
     log_id: str
     delete_unreferenced_media: bool = False
-    delete_referencing_nodes: bool = False
+    reset_referencing_nodes: bool = False
     base_updated_at: int = 0
 
 class TokenRequest(BaseModel):
@@ -6406,40 +6406,100 @@ def prune_generation_history_for_media(paths: List[str]) -> int:
     except (OSError, UnicodeError, json.JSONDecodeError):
         return 0
 
-def remove_canvas_result_nodes_for_media(canvas: Dict[str, Any], paths: List[str]) -> List[str]:
-    """Remove generated-result nodes that own media selected for hard deletion."""
-    removed_ids = []
-    kept_nodes = []
+def smart_owned_result_items(images: List[Any], paths: List[str]) -> List[Any]:
+    """Return generated results, including legacy results without the marker."""
+    return [
+        item for item in images
+        if isinstance(item, dict)
+        and item.get("loopInputPreview") is not True
+        and (
+            item.get("generatedResult") is True
+            or any(json_references_media_path(item, path) for path in paths)
+        )
+    ]
+
+def expand_canvas_generated_media_paths(canvas: Dict[str, Any], paths: List[str]) -> List[str]:
+    """Include every generated result owned by a result node touched by the log."""
+    expanded = list(paths)
     for node in list(canvas.get("nodes") or []):
         node_type = str(node.get("type") or "").strip().lower()
-        if node_type in {"smart-image", "output"} and isinstance(node.get("images"), list):
-            images = list(node.get("images") or [])
-            kept_images = [
-                item for item in images
+        images = list(node.get("images") or [])
+        if node_type == "output":
+            owned_items = images
+        elif node_type == "smart-image":
+            owned_items = smart_owned_result_items(images, paths)
+        else:
+            owned_items = []
+        if not any(json_references_media_path(item, path) for item in owned_items for path in paths):
+            continue
+        for item in owned_items:
+            for url in collect_local_media_urls(item):
+                candidate = generated_media_path_from_url(url)
+                if candidate and candidate not in expanded:
+                    expanded.append(candidate)
+    return expanded
+
+def reset_canvas_result_nodes_for_media(canvas: Dict[str, Any], paths: List[str]) -> List[str]:
+    """Clear generated media while preserving prompts, references, settings and links."""
+    reset_ids = []
+    updated_nodes = []
+    for node in list(canvas.get("nodes") or []):
+        node = dict(node)
+        node_type = str(node.get("type") or "").strip().lower()
+        changed = False
+        if isinstance(node.get("generatedOutputs"), list):
+            outputs = list(node.get("generatedOutputs") or [])
+            kept_outputs = [
+                item for item in outputs
                 if not any(json_references_media_path(item, path) for path in paths)
             ]
+            if len(kept_outputs) != len(outputs):
+                node["generatedOutputs"] = kept_outputs
+                changed = True
+        if node_type in {"smart-image", "output"} and isinstance(node.get("images"), list):
+            images = list(node.get("images") or [])
+            if node_type == "smart-image":
+                owned_items = smart_owned_result_items(images, paths)
+            else:
+                owned_items = images
+            owns_target = any(
+                json_references_media_path(item, path) for item in owned_items for path in paths
+            )
+            kept_images = [
+                item for item in images
+                if not (
+                    owns_target
+                    and item in owned_items
+                    and any(json_references_media_path(item, path) for path in paths)
+                )
+            ]
             if len(kept_images) != len(images):
-                if not kept_images:
-                    if node.get("id"):
-                        removed_ids.append(str(node["id"]))
-                    continue
-                node = dict(node)
                 node["images"] = kept_images
+                changed = True
+                if node_type == "output":
+                    node["_pending"] = []
+                    node["imageComparisons"] = {}
+                if node_type == "smart-image":
+                    node["pending"] = 0
+                    node["running"] = False
+                    node["queued"] = False
+                    for key in (
+                        "jimengPending", "pendingTasks", "runStartedAt", "runFinishedAt",
+                        "runElapsedMs", "runTimerHidden", "outputKind", "w", "h",
+                    ):
+                        node.pop(key, None)
         elif node_type == "image" and any(json_references_media_path(node.get("url"), path) for path in paths):
-            if node.get("id"):
-                removed_ids.append(str(node["id"]))
-            continue
-        kept_nodes.append(node)
+            node["url"] = ""
+            node["mediaKind"] = "image"
+            node["name"] = "空白图片"
+            changed = True
+        if changed and node.get("id"):
+            reset_ids.append(str(node["id"]))
+        updated_nodes.append(node)
 
-    if removed_ids:
-        removed = set(removed_ids)
-        canvas["nodes"] = kept_nodes
-        canvas["connections"] = [
-            connection for connection in list(canvas.get("connections") or [])
-            if str(connection.get("from") or "") not in removed
-            and str(connection.get("to") or "") not in removed
-        ]
-    return removed_ids
+    if reset_ids:
+        canvas["nodes"] = updated_nodes
+    return reset_ids
 
 def delete_media_preview_cache(path: str) -> int:
     """Delete derived previews for a source file before the source disappears."""
@@ -16123,15 +16183,16 @@ async def delete_canvas_log(canvas_id: str, payload: DeleteCanvasLogRequest):
                     if path and path not in candidate_paths:
                         candidate_paths.append(path)
 
-            removed_node_ids = []
-            if payload.delete_referencing_nodes and candidate_paths:
-                removed_node_ids = remove_canvas_result_nodes_for_media(canvas, candidate_paths)
+            reset_node_ids = []
+            if payload.reset_referencing_nodes and candidate_paths:
+                candidate_paths = expand_canvas_generated_media_paths(canvas, candidate_paths)
+                reset_node_ids = reset_canvas_result_nodes_for_media(canvas, candidate_paths)
 
             canvas["logs"] = [item for item in logs if str(item.get("id") or "") != log_id]
             save_canvas(canvas)
-            return canvas, candidate_paths, removed_node_ids
+            return canvas, candidate_paths, reset_node_ids
 
-    canvas, candidate_paths, removed_node_ids = await asyncio.to_thread(remove_log_record)
+    canvas, candidate_paths, reset_node_ids = await asyncio.to_thread(remove_log_record)
 
     def cleanup_unreferenced_media():
         removed_files = []
@@ -16168,7 +16229,7 @@ async def delete_canvas_log(canvas_id: str, payload: DeleteCanvasLogRequest):
         "canvas": canvas,
         "removed_files": removed_files,
         "removed_previews": removed_previews,
-        "removed_node_ids": removed_node_ids,
+        "reset_node_ids": reset_node_ids,
         "skipped_referenced": skipped_referenced,
     }
 

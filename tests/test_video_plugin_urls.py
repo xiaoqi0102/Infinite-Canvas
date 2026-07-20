@@ -171,6 +171,17 @@ class VideoApiRootTests(unittest.TestCase):
             ["https://www.aicost.xyz/v1/videos/task%2Fid"],
         )
 
+    def test_aicost_task_id_accepts_create_response_identifiers(self):
+        self.assertEqual(aicost._task_id({"id": "bare-task"}), "bare-task")
+        self.assertEqual(aicost._task_id({"request_id": "request-task"}), "request-task")
+        self.assertEqual(aicost._task_id({"data": {"requestId": "nested-task"}}), "nested-task")
+        self.assertEqual(aicost._task_id({"metadata": {"id": "not-a-task"}}), "")
+        self.assertEqual(aicost._task_id({"metadata": {"request_id": "trace-id"}}), "")
+        self.assertEqual(
+            aicost._task_id({"request_id": "trace-id", "data": {"task_id": "real-task"}}),
+            "real-task",
+        )
+
 
     def test_legacy_megabyai_query_failure_is_resumable_without_business_failure(self):
         task = {
@@ -281,6 +292,96 @@ class VideoDownloadUrlTests(unittest.IsolatedAsyncioTestCase):
                 "https://www.aicost.xyz",
                 passthrough,
             )
+
+    async def test_aicost_grok_preview_submission_matches_protocol(self):
+        client = _RecordingClient()
+        image = "data:image/png;base64,aQ=="
+        fixed_uuid = type("FixedUuid", (), {"hex": "grok-request-id"})()
+
+        with patch.object(aicost.uuid, "uuid4", return_value=fixed_uuid):
+            await aicost.generate_aicost_video(
+                client,
+                {
+                    "model": "grok-imagine-video-1.5-preview",
+                    "prompt": "test",
+                    "duration": 10,
+                    "aspect_ratio": "16:9",
+                    "resolution": "1080p",
+                    "images": [{"url": image}],
+                },
+                base_url="https://www.aicost.xyz",
+                headers={"Authorization": "Bearer test"},
+                progress=None,
+                resolve_local_path=self._local_path,
+                content_type_for_path=self._content_type,
+                public_reference_url=self._public_url,
+                save_video=self._save_video,
+                poll_timeout=1,
+                poll_interval=0,
+            )
+
+        _, request = client.post_requests[0]
+        self.assertEqual(request["headers"]["X-Request-ID"], "grok-request-id")
+        self.assertEqual(
+            request["json"],
+            {
+                "model": "grok-imagine-video-1.5-preview",
+                "prompt": "test",
+                "input_reference": image,
+                "seconds": "10",
+                "size": "1280x720",
+                "resolution": "1080p",
+                "resolution_name": "1080p",
+            },
+        )
+
+    async def test_aicost_seedance_submission_matches_public_contract(self):
+        client = _RecordingClient()
+        image_data = "data:image/png;base64,aQ=="
+        audio_data = "data:audio/mpeg;base64,aQ=="
+
+        await aicost.generate_aicost_video(
+            client,
+            {
+                "model": "seedance2.0-fast",
+                "prompt": "test",
+                "duration": 5,
+                "aspect_ratio": "9:16",
+                "resolution": "720p",
+                "images": [
+                    {"url": "https://cdn.example.com/reference.png"},
+                    {"url": image_data},
+                ],
+                "audios": ["https://cdn.example.com/reference.mp3", audio_data],
+                "videos": ["https://cdn.example.com/reference.mp4"],
+            },
+            base_url="https://www.aicost.xyz",
+            headers={"Authorization": "Bearer test"},
+            progress=None,
+            resolve_local_path=self._local_path,
+            content_type_for_path=self._content_type,
+            public_reference_url=self._public_url,
+            save_video=self._save_video,
+            poll_timeout=1,
+            poll_interval=0,
+        )
+
+        _, request = client.post_requests[0]
+        self.assertEqual(
+            request["json"],
+            {
+                "model": "seedance2.0-fast",
+                "prompt": "test",
+                "duration": 5,
+                "aspect_ratio": "9:16",
+                "resolution": "720p",
+                "image_urls": ["https://cdn.example.com/reference.png"],
+                "images_base64": [image_data],
+                "audio_urls": ["https://cdn.example.com/reference.mp3"],
+                "audios_base64": [audio_data],
+                "video_urls": ["https://cdn.example.com/reference.mp4"],
+            },
+        )
 
     async def test_public_generate_entries_use_canonical_create_urls(self):
         base_url = "https://api.example.com//v1/v1/"

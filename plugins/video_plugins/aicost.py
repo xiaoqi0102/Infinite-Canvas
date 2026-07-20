@@ -295,6 +295,7 @@ async def _build_grok_submission(
         raise AICostProtocolError(400, f"{model} 仅支持并且必须提供一张首帧图片")
     duration = _duration(request.get("duration"), (6, 10, 15), model)
     ratio = _aspect_ratio(request.get("aspect_ratio"), tuple(_GROK_SIZE_BY_RATIO), model)
+    resolution = str(request.get("resolution") or "720p").strip().lower() or "720p"
     _, data_urls = await _chat_content(client, images, str(request.get("prompt") or ""), resolve_local_path, content_type_for_path)
     request_id = uuid.uuid4().hex
     return _Submission(
@@ -302,9 +303,11 @@ async def _build_grok_submission(
         {
             "model": model,
             "prompt": str(request.get("prompt") or ""),
-            "images": data_urls,
+            "input_reference": data_urls[0],
             "seconds": str(duration),
             "size": _GROK_SIZE_BY_RATIO[ratio],
+            "resolution": resolution,
+            "resolution_name": resolution,
         },
         request_id=request_id,
     )
@@ -334,34 +337,67 @@ def _json_response(response: httpx.Response, action: str) -> Dict[str, Any]:
     return payload
 
 
-def _task_id(value: Any, depth: int = 0) -> str:
+def _identifier_value(value: Mapping[str, Any], keys: Sequence[str]) -> str:
+    for key in keys:
+        item = value.get(key)
+        if isinstance(item, (str, int)) and str(item).strip():
+            return str(item).strip()
+    return ""
+
+
+def _nested_values(value: Any) -> Sequence[Any]:
+    if isinstance(value, Mapping):
+        return tuple(value.values())
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return value
+    return ()
+
+
+def _generic_task_id(value: Mapping[str, Any], is_root: bool) -> str:
+    identifier = _identifier_value(value, ("id",))
+    has_task_context = (
+        any(key in value for key in ("status", "task_status", "state", "progress", "result_url", "video_url"))
+        or str(value.get("object") or "").strip().lower() in {"video", "video.task", "task"}
+    )
+    return identifier if identifier and (is_root or has_task_context) else ""
+
+
+def _strong_task_id(value: Any, depth: int, root_depth: int) -> str:
     if depth > 8:
         return ""
     if isinstance(value, Mapping):
-        for key in ("task_id", "taskId", "video_id", "videoId"):
-            item = value.get(key)
-            if isinstance(item, (str, int)) and str(item).strip():
-                return str(item).strip()
-        generic_id = value.get("id")
-        if (
-            isinstance(generic_id, (str, int))
-            and str(generic_id).strip()
-            and (
-                any(key in value for key in ("status", "task_status", "state", "progress", "result_url", "video_url"))
-                or str(value.get("object") or "").strip().lower() in {"video", "video.task", "task"}
-            )
-        ):
-            return str(generic_id).strip()
-        for item in value.values():
-            result = _task_id(item, depth + 1)
-            if result:
-                return result
-    elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-        for item in value:
-            result = _task_id(item, depth + 1)
-            if result:
-                return result
+        identifier = _identifier_value(value, ("task_id", "taskId", "video_id", "videoId"))
+        if identifier:
+            return identifier
+        identifier = _generic_task_id(value, depth == root_depth)
+        if identifier:
+            return identifier
+    for item in _nested_values(value):
+        identifier = _strong_task_id(item, depth + 1, root_depth)
+        if identifier:
+            return identifier
     return ""
+
+
+def _request_task_id(value: Any, depth: int) -> str:
+    if depth > 8:
+        return ""
+    if isinstance(value, Mapping):
+        identifier = _identifier_value(value, ("request_id", "requestId"))
+        if identifier:
+            return identifier
+        children = (value.get(key) for key in ("data", "detail", "result", "output", "response"))
+    else:
+        children = _nested_values(value)
+    for item in children:
+        identifier = _request_task_id(item, depth + 1)
+        if identifier:
+            return identifier
+    return ""
+
+
+def _task_id(value: Any, depth: int = 0) -> str:
+    return _strong_task_id(value, depth, depth) or _request_task_id(value, depth)
 
 
 def _status(value: Any, depth: int = 0) -> str:

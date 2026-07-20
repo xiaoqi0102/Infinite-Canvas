@@ -6817,7 +6817,7 @@ function promptMentionTokenHtml(ref, state={}){
     const media = item.kind === 'image'
         ? canvasPreviewImgHtml(item.url, 96, 'class="prompt-mention-thumb" alt="" draggable="false"')
         : `<span class="prompt-mention-kind" aria-hidden="true"><i data-lucide="${item.kind === 'video' ? 'film' : 'file-audio'}"></i></span>`;
-    return `<span class="prompt-mention-token${detached ? ' is-detached' : ''}" contenteditable="false" tabindex="0" role="button" aria-label="${escapeAttr(`${kindLabel} ${item.name}${status}`)}" title="${escapeAttr(`${kindLabel} · ${item.name}${status}`)}" data-prompt-mention-ref="${escapeAttr(encoded)}">${media}<span class="prompt-mention-name">@${escapeHtml(item.name)}</span>${detached ? '<i data-lucide="unlink" class="prompt-mention-state" aria-hidden="true"></i>' : ''}</span>`;
+    return `<span class="prompt-mention-token${detached ? ' is-detached' : ''}" contenteditable="false" tabindex="0" role="button" aria-label="${escapeAttr(`${kindLabel} ${item.name}${status}`)}" title="${escapeAttr(`${kindLabel} · ${item.name}${status}`)}" data-prompt-mention-ref="${escapeAttr(encoded)}">${media}<span class="prompt-mention-name">@${escapeHtml(item.name)}</span>${detached ? '<i data-lucide="unlink" class="prompt-mention-state" aria-hidden="true"></i>' : ''}<button type="button" class="prompt-mention-remove" aria-label="${escapeAttr(tr('common.delete'))}" title="${escapeAttr(tr('common.delete'))}">×</button></span>`;
 }
 function promptRichTextHtml(node){
     return promptRichTextPartsForNode(node).map(part => {
@@ -7254,6 +7254,16 @@ function bindPromptRichEditor(editor, body, node){
     editor.addEventListener('focusout', event => {
         const token = event.target.closest?.('.prompt-mention-token');
         if(token && !token.contains(event.relatedTarget)) hidePromptMentionPreview();
+    });
+    editor.addEventListener('click', event => {
+        const remove = event.target.closest?.('.prompt-mention-remove');
+        if(!remove || !editor.contains(remove)) return;
+        event.preventDefault();
+        event.stopPropagation();
+        remove.closest('.prompt-mention-token')?.remove();
+        hidePromptMentionPreview();
+        editor.focus();
+        sync();
     });
     editor.addEventListener('keydown', event => {
         const token = event.target.closest?.('.prompt-mention-token');

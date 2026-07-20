@@ -346,6 +346,8 @@ body.canvas-selecting .node .llm-bubble { pointer-events:none !important; }
 .prompt-mention-kind svg { width:11px; height:11px; }
 .prompt-mention-name { min-width:0; overflow:hidden; text-overflow:ellipsis; font-size:10.5px; line-height:1; font-weight:750; }
 .prompt-mention-state { width:11px; height:11px; flex:0 0 auto; color:#d97706; }
+.prompt-mention-remove { width:15px; height:15px; flex:0 0 15px; display:inline-flex; align-items:center; justify-content:center; margin:0 -4px 0 -1px; padding:0; border:0; border-radius:50%; background:transparent; color:var(--muted); font-size:14px; line-height:1; cursor:pointer; }
+.prompt-mention-remove:hover,.prompt-mention-remove:focus-visible { background:var(--soft); color:var(--danger,#dc2626); outline:none; }
 .prompt-mention-picker { position:fixed; z-index:1300; max-height:min(330px,calc(100vh - 24px)); overflow:auto; padding:7px; border-radius:14px; border:1px solid var(--line-2); background:var(--panel); color:var(--text); box-shadow:0 18px 48px var(--shadow); backdrop-filter:blur(18px); scrollbar-width:thin; }
 .prompt-mention-picker[hidden] { display:none; }
 .prompt-mention-picker-shell { display:flex; flex-direction:column; gap:7px; }

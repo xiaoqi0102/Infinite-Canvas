@@ -17174,6 +17174,38 @@ promptInput.addEventListener('click', event => {
     scheduleSave();
     promptInput.focus();
 });
+function positionMentionPreview(token){
+    if(!mentionPreview || !token?.isConnected) return false;
+    const pad = 12;
+    const gap = 10;
+    const anchorRect = token.getBoundingClientRect();
+    const editorRect = promptInput.getBoundingClientRect();
+    const width = Math.max(mentionPreview.offsetWidth || 0, 220);
+    const height = Math.max(mentionPreview.offsetHeight || 0, 220);
+    const viewportWidth = window.innerWidth;
+    const viewportHeight = window.innerHeight;
+    const clampLeft = value => Math.max(pad, Math.min(viewportWidth - width - pad, value));
+    const clampTop = value => Math.max(pad, Math.min(viewportHeight - height - pad, value));
+    let left = null;
+    let top = null;
+    if(height <= viewportHeight - pad * 2 && editorRect.right + gap + width <= viewportWidth - pad){
+        left = editorRect.right + gap;
+        top = clampTop(anchorRect.top);
+    } else if(height <= viewportHeight - pad * 2 && editorRect.left - gap - width >= pad){
+        left = editorRect.left - gap - width;
+        top = clampTop(anchorRect.top);
+    } else if(width <= viewportWidth - pad * 2 && editorRect.top - gap - height >= pad){
+        left = clampLeft(anchorRect.left);
+        top = editorRect.top - gap - height;
+    } else if(width <= viewportWidth - pad * 2 && editorRect.bottom + gap + height <= viewportHeight - pad){
+        left = clampLeft(anchorRect.left);
+        top = editorRect.bottom + gap;
+    }
+    if(left === null || top === null) return false;
+    mentionPreview.style.left = `${left}px`;
+    mentionPreview.style.top = `${top}px`;
+    return true;
+}
 promptInput.addEventListener('mouseover', event => {
     const token = event.target.closest?.('.mention-image-token');
     if(!token) return;
@@ -17202,10 +17234,8 @@ promptInput.addEventListener('mouseover', event => {
         media.src = token.dataset.url || '';
         media.alt = 'preview';
     }
-    const rect = token.getBoundingClientRect();
-    mentionPreview.style.left = `${Math.min(window.innerWidth - 236, rect.left)}px`;
-    mentionPreview.style.top = `${Math.min(window.innerHeight - 236, rect.bottom + 8)}px`;
     mentionPreview.style.display = 'block';
+    if(!positionMentionPreview(token)) mentionPreview.style.display = 'none';
 });
 promptInput.addEventListener('mouseout', event => {
     if(event.target.closest?.('.mention-image-token')){

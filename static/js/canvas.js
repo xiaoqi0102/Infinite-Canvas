@@ -7037,6 +7037,38 @@ function ensurePromptMentionPreview(){
     window.addEventListener('resize', hidePromptMentionPreview);
     return preview;
 }
+function positionPromptMentionPreview(preview, token){
+    if(!preview || !token?.isConnected) return false;
+    const pad = 12;
+    const gap = 10;
+    const anchorRect = token.getBoundingClientRect();
+    const editorRect = token.closest('.prompt-rich-input')?.getBoundingClientRect() || anchorRect;
+    const width = Math.max(preview.offsetWidth || 0, 240);
+    const height = Math.max(preview.offsetHeight || 0, 270);
+    const viewportWidth = window.innerWidth;
+    const viewportHeight = window.innerHeight;
+    const clampLeft = value => Math.max(pad, Math.min(viewportWidth - width - pad, value));
+    const clampTop = value => Math.max(pad, Math.min(viewportHeight - height - pad, value));
+    let left = null;
+    let top = null;
+    if(height <= viewportHeight - pad * 2 && editorRect.right + gap + width <= viewportWidth - pad){
+        left = editorRect.right + gap;
+        top = clampTop(anchorRect.top);
+    } else if(height <= viewportHeight - pad * 2 && editorRect.left - gap - width >= pad){
+        left = editorRect.left - gap - width;
+        top = clampTop(anchorRect.top);
+    } else if(width <= viewportWidth - pad * 2 && editorRect.top - gap - height >= pad){
+        left = clampLeft(anchorRect.left);
+        top = editorRect.top - gap - height;
+    } else if(width <= viewportWidth - pad * 2 && editorRect.bottom + gap + height <= viewportHeight - pad){
+        left = clampLeft(anchorRect.left);
+        top = editorRect.bottom + gap;
+    }
+    if(left === null || top === null) return false;
+    preview.style.left = `${left}px`;
+    preview.style.top = `${top}px`;
+    return true;
+}
 function showPromptMentionPreview(token){
     const ref = promptMentionRefFromToken(token);
     if(!ref?.url || !token?.isConnected) return;
@@ -7047,12 +7079,11 @@ function showPromptMentionPreview(token){
         : ref.kind === 'audio'
             ? `<div class="prompt-mention-audio-preview"><i data-lucide="file-audio"></i><span>${escapeHtml(ref.name)}</span><audio src="${escapeAttr(ref.url)}" controls></audio></div>`
             : `${canvasPreviewImgHtml(ref.url, 640, `alt="${escapeAttr(ref.name)}"`)}<div class="prompt-mention-preview-name">${escapeHtml(ref.name)}</div>`;
-    const rect = token.getBoundingClientRect();
     preview.hidden = false;
-    const width = preview.offsetWidth || 240;
-    const height = preview.offsetHeight || 220;
-    preview.style.left = `${Math.max(12, Math.min(window.innerWidth - width - 12, rect.left))}px`;
-    preview.style.top = `${Math.max(12, Math.min(window.innerHeight - height - 12, rect.bottom + 8))}px`;
+    if(!positionPromptMentionPreview(preview, token)){
+        hidePromptMentionPreview();
+        return;
+    }
     lucide.createIcons({attrs:{'stroke-width':1.7}});
 }
 function hidePromptMentionPreview(){

@@ -14981,6 +14981,15 @@ function finishSelection(){
     render();
     if(workflowTransferModal?.classList.contains('open')) updateWorkflowTransferMeta();
 }
+function cancelSelectionDrag(){
+    if(!selectDrag && !document.body.classList.contains('canvas-selecting')) return false;
+    selectionBox.style.display = 'none';
+    selectDrag = null;
+    document.body.classList.remove('canvas-selecting');
+    window.onmousemove = null;
+    window.onmouseup = null;
+    return true;
+}
 function renderSelectionHub(){
     selectionHub.innerHTML = '';
     selectionHub.classList.remove('open');
@@ -15590,8 +15599,9 @@ function sanitizeConnections(){
     connections = (connections || []).filter(c => canConnect(c.from, c.to));
 }
 function endDrag(event=null){
-    const hadContentDrag = Boolean(dragNode || resizeNode || llmPaneDrag || knifeChanged || tempLink);
+    const hadContentDrag = Boolean(dragNode || resizeNode || llmPaneDrag || knifeChanged);
     const hadViewportDrag = Boolean(dragBoard || minimapDrag);
+    const hadTempLink = Boolean(tempLink);
     if(dragNode){
         const moved = [dragNode.node, ...(dragNode.children || []).map(c => c.node)].filter(Boolean);
         // 拖动 group/promptGroup 自身时不重新评估（成员跟着一起走，包含关系不变）
@@ -15600,8 +15610,10 @@ function endDrag(event=null){
     }
     dragNode = null;
     dragBoard = null;
+    minimapDrag = false;
     resizeNode = null;
     llmPaneDrag = null;
+    tempLink = null;
     knifeActive = false;
     knifePoint = null;
     knifeTrail = [];
@@ -15614,9 +15626,21 @@ function endDrag(event=null){
     window.onmousemove = null;
     window.onmouseup = null;
     if(shouldRenderKnife) render();
+    else if(hadTempLink) renderLinks();
     scheduleMinimapRender();
     if(hadContentDrag) scheduleSave();
     else if(hadViewportDrag) scheduleViewportSave();
+}
+function cancelCanvasPointerInteraction(){
+    if(textSelectionGuard) textSelectionGuard.active = false;
+    cancelSelectionDrag();
+    const hasActiveInteraction = Boolean(
+        dragNode || dragBoard || minimapDrag || resizeNode || llmPaneDrag || tempLink || knifeActive || knifeChanged
+    );
+    const hasInputLock = document.body.classList.contains('canvas-node-drag')
+        || document.body.classList.contains('canvas-node-resize')
+        || document.body.classList.contains('canvas-board-pan');
+    if(hasActiveInteraction || hasInputLock) endDrag();
 }
 function nodeRect(n){
     const el = nodesEl.querySelector(`.node[data-id="${n.id}"]`);
@@ -16330,15 +16354,17 @@ window.addEventListener('keyup', e => {
     if(String(e.key || '').toLowerCase() === 'r') isRKeyDown = false;
     if(e.key === 'Shift') setKnifeMode(false);
 });
-window.addEventListener('blur', () => { isRKeyDown = false; setKnifeMode(false); });
 window.addEventListener('blur', () => {
-    if(selectDrag){
-        selectionBox.style.display = 'none';
-        selectDrag = null;
-        document.body.classList.remove('canvas-selecting');
-        window.onmousemove = null;
-        window.onmouseup = null;
-    }
+    isRKeyDown = false;
+    setKnifeMode(false);
+    cancelCanvasPointerInteraction();
+});
+window.addEventListener('pointercancel', cancelCanvasPointerInteraction);
+window.addEventListener('mousemove', e => {
+    if(e.buttons === 0) cancelCanvasPointerInteraction();
+}, true);
+document.addEventListener('visibilitychange', () => {
+    if(document.hidden) cancelCanvasPointerInteraction();
 });
 function deleteSelectedNodes(){
     if(!canvas || selected.size === 0) return;

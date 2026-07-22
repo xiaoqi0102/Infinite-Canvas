@@ -15389,6 +15389,8 @@ async function importWorkflowFile(file){
 function startNodeDrag(e, node){
     if(e.button !== 0) return;
     if(startKnifeDrag(e)) return;
+    const activeElement = document.activeElement;
+    if(activeElement && activeElement !== document.body && isEditableTarget(activeElement)) activeElement.blur();
     e.preventDefault();
     e.stopPropagation();
     let dragTarget = node;
@@ -16091,6 +16093,15 @@ function isEditableTarget(target){
     const tag = target?.tagName;
     return tag === 'INPUT' || tag === 'TEXTAREA' || target?.isContentEditable || target?.closest?.('select, option');
 }
+function canvasKeyboardShortcutBlocked(){
+    return canvasImageEditorIsOpen()
+        || promptTemplateModal?.classList.contains('open')
+        || outputLightbox?.classList.contains('open')
+        || assetManagerModal?.classList.contains('open')
+        || workflowTransferModal?.classList.contains('open')
+        || logModal?.classList.contains('open')
+        || errorModal?.classList.contains('open');
+}
 minimap?.addEventListener('mousedown', e => {
     if(!canvas || e.button !== 0) return;
     if(e.target.closest?.('#canvasArrangeBtn')) return;
@@ -16315,6 +16326,15 @@ window.addEventListener('keydown', e => {
         return;
     }
     if((e.ctrlKey || e.metaKey) && key === 'g' && !isEditableTarget(e.target)) { e.preventDefault(); groupSelectedImages(); }
+    if((e.ctrlKey || e.metaKey) && !e.altKey && key === 'a'
+        && !isEditableTarget(e.target) && !isEditableTarget(document.activeElement)
+        && !canvasKeyboardShortcutBlocked()){
+        e.preventDefault();
+        selected.clear();
+        nodes.forEach(node => selected.add(node.id));
+        refreshSelectionVisuals();
+        return;
+    }
     if((e.ctrlKey || e.metaKey) && key === 'c') {
         // 在输入框/可编辑元素里时，让浏览器原生 Ctrl+C 工作
         const tag = document.activeElement?.tagName;
@@ -16343,8 +16363,7 @@ window.addEventListener('keydown', e => {
         e.preventDefault(); performUndo();
     }
     if(e.key === 'Delete' || e.key === 'Backspace') {
-        const tag = document.activeElement?.tagName;
-        if(tag === 'INPUT' || tag === 'TEXTAREA' || document.activeElement?.isContentEditable) return;
+        if(canvasKeyboardShortcutBlocked() || isEditableTarget(e.target) || isEditableTarget(document.activeElement)) return;
         if(selected.size === 0) return;
         e.preventDefault();
         deleteSelectedNodes();

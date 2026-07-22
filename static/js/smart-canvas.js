@@ -135,6 +135,7 @@ let lastMouseWorld = null;
 let lastConfigRefreshAt = 0;
 let smartMinimapState = null;
 let smartMinimapDrag = false;
+let smartMinimapViewportQueued = false;
 let zoomPreviewState = null;
 let runTimerInterval = null;
 let smartCascadeRunning = false;
@@ -2077,9 +2078,7 @@ function applyViewport(){
     // 缩小时位图被降采样 → 组件发虚。缩放态下关闭这些 backdrop-filter（底色本身已接近不透明，
     // 观感几乎无差），让卡片随矢量重新栅格化，保持清晰。
     world.classList.toggle('canvas-scaled', Math.abs(viewport.scale - 1) > 0.001);
-    shell.style.backgroundSize = '24px 24px';
-    shell.style.backgroundPosition = '0 0';
-    renderMinimap();
+    scheduleSmartMinimapViewportUpdate();
 }
 function screenToWorld(event){
     const rect = shell.getBoundingClientRect();
@@ -2101,38 +2100,79 @@ function viewportCenter(){
         y:(shell.clientHeight / 2 - viewport.y) / viewport.scale
     };
 }
+function smartWorldViewRect(){
+    return {
+        x:-viewport.x / viewport.scale,
+        y:-viewport.y / viewport.scale,
+        width:shell.clientWidth / viewport.scale,
+        height:shell.clientHeight / viewport.scale
+    };
+}
+function projectSmartMinimapRect(rect, state=smartMinimapState){
+    return {
+        left:state.offsetX + (rect.x - state.minX) * state.scale,
+        top:state.offsetY + (rect.y - state.minY) * state.scale,
+        width:Math.max(4, rect.width * state.scale),
+        height:Math.max(4, rect.height * state.scale)
+    };
+}
+function scheduleSmartMinimapViewportUpdate(){
+    if(smartMinimapViewportQueued) return;
+    smartMinimapViewportQueued = true;
+    requestAnimationFrame(() => {
+        smartMinimapViewportQueued = false;
+        updateSmartMinimapViewport();
+    });
+}
 function renderMinimap(){
-    if(!minimapContent || !minimapViewport) return;
+    if(!minimapContent) return;
     smartArrangeBtn?.classList.toggle('visible', selectedNodeIds().length > 0);
     const width = minimapContent.clientWidth || 170;
     const height = minimapContent.clientHeight || 108;
-    const viewW = shell.clientWidth / viewport.scale;
-    const viewH = shell.clientHeight / viewport.scale;
-    const viewX = -viewport.x / viewport.scale;
-    const viewY = -viewport.y / viewport.scale;
+    const viewRect = smartWorldViewRect();
+    const {x:viewX, y:viewY, width:viewW, height:viewH} = viewRect;
     const rects = nodes.filter(n => n.id !== SMART_LOG_PREVIEW_NODE_ID).map(nodeRect);
-    rects.push({x:viewX, y:viewY, width:viewW, height:viewH});
-    const minX = Math.min(...rects.map(r => r.x), -200);
-    const minY = Math.min(...rects.map(r => r.y), -200);
+    rects.push(viewRect);
+    const minX = Math.min(...rects.map(r => r.x), viewX - 200, -200);
+    const minY = Math.min(...rects.map(r => r.y), viewY - 200, -200);
     const maxX = Math.max(...rects.map(r => r.x + r.width), viewX + viewW + 200);
     const maxY = Math.max(...rects.map(r => r.y + r.height), viewY + viewH + 200);
     const scale = Math.min(width / Math.max(1, maxX - minX), height / Math.max(1, maxY - minY));
     const offsetX = (width - (maxX - minX) * scale) / 2;
     const offsetY = (height - (maxY - minY) * scale) / 2;
-    smartMinimapState = {minX, minY, scale, offsetX, offsetY, width, height};
-    const project = r => ({
-        left:offsetX + (r.x - minX) * scale,
-        top:offsetY + (r.y - minY) * scale,
-        width:Math.max(4, r.width * scale),
-        height:Math.max(4, r.height * scale)
-    });
+    smartMinimapState = {minX, minY, maxX, maxY, scale, offsetX, offsetY, width, height};
     const nodeHtml = rects.slice(0, -1).map(r => {
-        const p = project(r);
+        const p = projectSmartMinimapRect(r);
         return `<div class="minimap-node" style="left:${p.left}px;top:${p.top}px;width:${p.width}px;height:${p.height}px"></div>`;
     }).join('');
-    const view = project({x:viewX, y:viewY, width:viewW, height:viewH});
+    const view = projectSmartMinimapRect(viewRect);
     minimapContent.innerHTML = `${nodeHtml}<div id="minimapViewport" class="smart-minimap-viewport" style="left:${view.left}px;top:${view.top}px;width:${view.width}px;height:${view.height}px"></div>`;
     minimapViewport = document.getElementById('minimapViewport');
+}
+function updateSmartMinimapViewport(){
+    if(!minimapViewport || !smartMinimapState){
+        renderMinimap();
+        return;
+    }
+    const viewRect = smartWorldViewRect();
+    const state = smartMinimapState;
+    smartArrangeBtn?.classList.toggle('visible', selectedNodeIds().length > 0);
+    const contentWidth = minimapContent.clientWidth || 170;
+    const contentHeight = minimapContent.clientHeight || 108;
+    if(contentWidth !== state.width || contentHeight !== state.height){
+        renderMinimap();
+        return;
+    }
+    const outsideBounds = viewRect.x < state.minX || viewRect.y < state.minY || viewRect.x + viewRect.width > state.maxX || viewRect.y + viewRect.height > state.maxY;
+    if(outsideBounds){
+        renderMinimap();
+        return;
+    }
+    const view = projectSmartMinimapRect(viewRect, state);
+    minimapViewport.style.left = `${view.left}px`;
+    minimapViewport.style.top = `${view.top}px`;
+    minimapViewport.style.width = `${view.width}px`;
+    minimapViewport.style.height = `${view.height}px`;
 }
 function minimapEventToWorld(event){
     if(!smartMinimapState) renderMinimap();
@@ -6259,7 +6299,23 @@ function shellPoint(event){
     return {x:event.clientX - rect.left, y:event.clientY - rect.top};
 }
 function renderConnections(){
-    const conns = (canvas?.connections || []).map((conn, index) => ({...conn, index})).filter(c => nodes.some(n => n.id === c.from) && nodes.some(n => n.id === c.to));
+    const nodeById = new Map(nodes.map(node => [node.id, node]));
+    const rectById = new Map();
+    const scopeByNodeId = new Map();
+    nodes.forEach(node => {
+        if(!isSmartGroupNode(node) || !Array.isArray(node.items)) return;
+        node.items.forEach(id => {
+            if(!scopeByNodeId.has(id)) scopeByNodeId.set(id, node.id);
+        });
+    });
+    nodes.forEach(node => {
+        if(isSmartGroupNode(node) && !scopeByNodeId.has(node.id)) scopeByNodeId.set(node.id, node.id);
+    });
+    const rectFor = id => {
+        if(!rectById.has(id)) rectById.set(id, nodeRect(nodeById.get(id)));
+        return rectById.get(id);
+    };
+    const conns = (canvas?.connections || []).map((conn, index) => ({...conn, index})).filter(c => nodeById.has(c.from) && nodeById.has(c.to));
     const cascadeKeys = cascadeConnectionKeys();
     const activeCascadeCount = (smartCascadeRunPath?.states && Object.values(smartCascadeRunPath.states).filter(state => state && state !== 'done').length) || 0;
     const reduceMotion = activeCascadeCount > 24;
@@ -6270,8 +6326,8 @@ function renderConnections(){
     const items = [];
     conns.forEach(conn => {
         const kind = conn.kind || 'flow';
-        const fromScope = kind === 'history' ? '' : smartGroupScopeId(conn.from);
-        const toScope = kind === 'history' ? '' : smartGroupScopeId(conn.to);
+        const fromScope = kind === 'history' ? '' : (scopeByNodeId.get(conn.from) || '');
+        const toScope = kind === 'history' ? '' : (scopeByNodeId.get(conn.to) || '');
         // 同一分组内部的连线（成员↔成员、成员↔分组本体）属于内部关系，入组后隐藏，保持整洁。
         if(fromScope && fromScope === toScope) return;
         // 终点是某分组的成员：把同一来源连到该分组各成员的线合并成一条到分组的线。
@@ -6287,10 +6343,10 @@ function renderConnections(){
         }
     });
     const paths = items.map(item => {
-        const fromNode = nodes.find(n => n.id === item.from);
-        const toNode = nodes.find(n => n.id === item.toId);
+        const fromNode = nodeById.get(item.from);
+        const toNode = nodeById.get(item.toId);
         if(!fromNode || !toNode) return '';
-        const fr = nodeRect(fromNode), tr = nodeRect(toNode);
+        const fr = rectFor(item.from), tr = rectFor(item.toId);
         const kind = item.kind;
         const isHistory = kind === 'history';
         const dataIndex = item.indices.join(',');
@@ -6302,7 +6358,7 @@ function renderConnections(){
         else if(states.some(s => s !== 'done')) cascadeState = states.find(s => s !== 'done');
         else if(states.length) cascadeState = 'done';
         const isCascade = !isHistory && (edgeKeys.some(k => cascadeKeys.has(k)) || Boolean(cascadeState) || isInsertPreview);
-        const isPendingLine = !isCascade && item.targets.some(t => nodes.find(n => n.id === t)?.pending);
+        const isPendingLine = !isCascade && item.targets.some(t => nodeById.get(t)?.pending);
         const isSelectedLine = selectedConnIds.size > 0 && (selectedConnIds.has(item.from) || selectedConnIds.has(item.toId) || item.targets.some(t => selectedConnIds.has(t)));
         const fx = isHistory ? fr.x + fr.width / 2 : fr.x + fr.width;
         const fy = isHistory ? fr.y + fr.height : fr.y + fr.height / 2;
@@ -7689,10 +7745,11 @@ function render(){
     // 用户正在提示词框(contenteditable)输入时,本次重渲染不要移动 composer:
     // 移动 DOM 节点会打断输入法合成会话,导致输入中断(即使保留焦点描边也接不上)。
     const promptHadFocus = document.activeElement === promptInput;
+    const nodeById = new Map(nodes.map(node => [String(node.id), node]));
     const reusableNodes = new Map();
     world.querySelectorAll('.image-node').forEach(el => {
-        const node = nodes.find(n => n.id === el.dataset.id);
-        if(smartNodeHasLiveMedia(node)) reusableNodes.set(node.id, el);
+        const node = nodeById.get(el.dataset.id);
+        if(smartNodeHasLiveMedia(node)) reusableNodes.set(String(node.id), el);
     });
     const nodeHtmlEntries = nodes
         .filter(node => node.id !== SMART_LOG_PREVIEW_NODE_ID)
@@ -7735,11 +7792,9 @@ function render(){
     });
     const tpl = document.createElement('template');
     tpl.innerHTML = nodeHtmlEntries.map(entry => entry.html).join('');
-    const renderedNodeEls = new Map();
-    nodeHtmlEntries.forEach(entry => {
-        const fresh = tpl.content.querySelector(`.image-node[data-id="${CSS.escape(entry.node.id)}"]`);
-        if(fresh) renderedNodeEls.set(entry.node.id, fresh);
-    });
+    const renderedNodeEls = new Map(
+        [...tpl.content.querySelectorAll('.image-node[data-id]')].map(el => [el.dataset.id, el])
+    );
     const keepEls = new Set();
     reusableNodes.forEach(el => keepEls.add(el));
     if(composerEl) keepEls.add(composerEl);
@@ -7751,10 +7806,11 @@ function render(){
     if(composerEl && !promptHadFocus) world.appendChild(composerEl);
     world.insertAdjacentHTML('beforeend', renderConnections());
     nodeHtmlEntries.forEach(entry => {
-        const fresh = renderedNodeEls.get(entry.node.id);
+        const nodeKey = String(entry.node.id);
+        const fresh = renderedNodeEls.get(nodeKey);
         if(!fresh) return;
         world.appendChild(fresh);
-        const reusable = reusableNodes.get(entry.node.id);
+        const reusable = reusableNodes.get(nodeKey);
         if(reusable){
             transplantSmartMediaElements(reusable, fresh);
             if(reusable !== fresh) reusable.remove();

@@ -335,7 +335,10 @@ let dragBoard = null;
 let minimapDrag = false;
 let minimapState = null;
 let minimapRenderQueued = false;
+let minimapViewportUpdateQueued = false;
 let linksRenderQueued = false;
+let connectionHoverQueued = false;
+let pendingConnectionHover = null;
 let zoomPreviewState = null;
 let resizeNode = null;
 let llmPaneDrag = null;
@@ -1231,7 +1234,7 @@ function canvasWheelZoomFactor(event, pageSize){
 function applyViewport(){
     hidePromptMentionPreview();
     world.style.transform = `translate(${viewport.x}px, ${viewport.y}px) scale(${viewport.scale})`;
-    scheduleMinimapRender();
+    scheduleMinimapViewportUpdate();
 }
 function estimatedNodeRect(n){
     const el = nodesEl?.querySelector?.(`.node[data-id="${CSS.escape(n.id)}"]`);
@@ -1250,26 +1253,21 @@ function currentWorldViewRect(){
         h:rect.height / scale
     };
 }
-function minimapBounds(){
-    const rects = (nodes || []).map(estimatedNodeRect);
-    rects.push(currentWorldViewRect());
-    if(!rects.length) return {x:0, y:0, w:1000, h:700};
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    rects.forEach(r => {
-        minX = Math.min(minX, r.x);
-        minY = Math.min(minY, r.y);
-        maxX = Math.max(maxX, r.x + r.w);
-        maxY = Math.max(maxY, r.y + r.h);
-    });
-    const pad = Math.max(240, Math.max(maxX - minX, maxY - minY) * 0.08);
-    return {x:minX - pad, y:minY - pad, w:Math.max(1, maxX - minX + pad * 2), h:Math.max(1, maxY - minY + pad * 2)};
-}
 function scheduleMinimapRender(){
     if(minimapRenderQueued) return;
     minimapRenderQueued = true;
     requestAnimationFrame(() => {
         minimapRenderQueued = false;
         renderMinimap();
+    });
+}
+function scheduleMinimapViewportUpdate(){
+    if(minimapViewportUpdateQueued) return;
+    minimapViewportUpdateQueued = true;
+    requestAnimationFrame(() => {
+        minimapViewportUpdateQueued = false;
+        if(minimapRenderQueued) return;
+        updateMinimapViewport();
     });
 }
 // 拖动/缩放节点时每个 mousemove 都全量重建连线 SVG 会掉帧；用 rAF 合并成每帧最多刷新一次。
@@ -1282,9 +1280,25 @@ function scheduleLinksRender(){
     });
 }
 function renderMinimap(){
-    if(!minimapContent || !minimapViewport) return;
+    if(!minimapContent) return;
     canvasArrangeBtn?.classList.toggle('visible', selected.size > 0);
-    const bounds = minimapBounds();
+    const nodeRects = (nodes || []).map(estimatedNodeRect);
+    const viewRect = currentWorldViewRect();
+    const rects = [...nodeRects, viewRect];
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    rects.forEach(r => {
+        minX = Math.min(minX, r.x);
+        minY = Math.min(minY, r.y);
+        maxX = Math.max(maxX, r.x + r.w);
+        maxY = Math.max(maxY, r.y + r.h);
+    });
+    const pad = Math.max(240, Math.max(maxX - minX, maxY - minY) * 0.08);
+    const bounds = {
+        x:minX - pad,
+        y:minY - pad,
+        w:Math.max(1, maxX - minX + pad * 2),
+        h:Math.max(1, maxY - minY + pad * 2)
+    };
     const cw = minimapContent.clientWidth || 172;
     const ch = minimapContent.clientHeight || 110;
     const scale = Math.min(cw / bounds.w, ch / bounds.h);
@@ -1293,8 +1307,8 @@ function renderMinimap(){
     const ox = (cw - mapW) / 2;
     const oy = (ch - mapH) / 2;
     minimapState = {bounds, scale, ox, oy, cw, ch};
-    const nodeHtml = (nodes || []).map(n => {
-        const r = estimatedNodeRect(n);
+    const nodeHtml = (nodes || []).map((n, index) => {
+        const r = nodeRects[index];
         return `<div class="minimap-node ${selected.has(n.id) ? 'selected' : ''}" style="left:${ox + (r.x - bounds.x) * scale}px;top:${oy + (r.y - bounds.y) * scale}px;width:${Math.max(3, r.w * scale)}px;height:${Math.max(3, r.h * scale)}px"></div>`;
     }).join('');
     minimapContent.innerHTML = `${nodeHtml}${nodes?.length ? '' : '<div class="minimap-empty">EMPTY</div>'}<div id="minimapViewport" class="minimap-viewport"></div>`;
@@ -1302,9 +1316,23 @@ function renderMinimap(){
     updateMinimapViewport();
 }
 function updateMinimapViewport(){
-    if(!minimapViewport || !minimapState) return;
+    if(!minimapViewport || !minimapState){
+        renderMinimap();
+        return;
+    }
     const r = currentWorldViewRect();
-    const {bounds, scale, ox, oy} = minimapState;
+    const {bounds, scale, ox, oy, cw, ch} = minimapState;
+    const contentWidth = minimapContent.clientWidth || 172;
+    const contentHeight = minimapContent.clientHeight || 110;
+    if(contentWidth !== cw || contentHeight !== ch){
+        renderMinimap();
+        return;
+    }
+    const outsideBounds = r.x < bounds.x || r.y < bounds.y || r.x + r.w > bounds.x + bounds.w || r.y + r.h > bounds.y + bounds.h;
+    if(outsideBounds){
+        renderMinimap();
+        return;
+    }
     minimapViewport.style.left = `${ox + (r.x - bounds.x) * scale}px`;
     minimapViewport.style.top = `${oy + (r.y - bounds.y) * scale}px`;
     minimapViewport.style.width = `${Math.max(8, r.w * scale)}px`;
@@ -5967,10 +5995,11 @@ function render(){
     hidePromptMentionPreview();
     const outputScrolls = captureOutputScrolls();
     const mediaStates = captureMediaPlaybackStates();
+    const nodeById = new Map(nodes.map(node => [String(node.id), node]));
     const reusableMediaNodes = new Map();
     nodesEl.querySelectorAll('.node').forEach(el => {
-        const node = nodes.find(n => n.id === el.dataset.id);
-        if(nodeHasLiveMedia(node)) reusableMediaNodes.set(node.id, el);
+        const node = nodeById.get(el.dataset.id);
+        if(nodeHasLiveMedia(node)) reusableMediaNodes.set(String(node.id), el);
     });
     applyViewport();
     [...nodesEl.children].forEach(child => {
@@ -5981,7 +6010,7 @@ function render(){
         // 追加进 DOM，连带这些节点的连线也会因找不到 DOM 而画到 (0,0) 变成“消失”。
         try {
             const fresh = renderNode(node);
-            const old = reusableMediaNodes.get(node.id);
+            const old = reusableMediaNodes.get(String(node.id));
             nodesEl.appendChild(fresh);
             if(old){
                 transplantNodeMediaElement(old, fresh);
@@ -6000,6 +6029,7 @@ function render(){
     syncCanvasSelectedImageResolution(nodesEl);
     measureCanvasOriginalImageNodes(nodesEl);
     refreshOutputTimer();
+    scheduleMinimapRender();
 }
 function refreshNodes(ids=[]){
     const uniqueIds = [...new Set((ids || []).filter(Boolean))];
@@ -6031,6 +6061,7 @@ function refreshNodes(ids=[]){
     syncCanvasSelectedImageResolution(nodesEl);
     measureCanvasOriginalImageNodes(nodesEl);
     refreshOutputTimer();
+    scheduleMinimapRender();
 }
 function refreshRunNodes(node, out=null){
     refreshNodes([node?.id, out?.id]);
@@ -15815,17 +15846,23 @@ function connectionDistanceToPoint(connection, point){
     }
     return min;
 }
-function updateConnectionHoverFromMouse(e){
+function updateConnectionHoverFromMouse(e, point=null){
     if(!canvas || tempLink || dragNode || dragBoard || resizeNode || knifeActive){
         setHoveredConnection('');
         return;
     }
-    const button = document.elementFromPoint(e.clientX, e.clientY)?.closest?.('.link-delete');
+    const hitElement = document.elementFromPoint(e.clientX, e.clientY);
+    const button = hitElement?.closest?.('.link-delete');
     if(button?.dataset.connectionId){
         setHoveredConnection(button.dataset.connectionId);
         return;
     }
-    const point = screenToWorld(e.clientX, e.clientY);
+    const linkHit = hitElement?.closest?.('.link-hit');
+    if(linkHit?.dataset.connectionId){
+        setHoveredConnection(linkHit.dataset.connectionId);
+        return;
+    }
+    point = point || screenToWorld(e.clientX, e.clientY);
     const threshold = Math.max(12, 16 / viewport.scale);
     let bestId = '';
     let best = Infinity;
@@ -15834,6 +15871,17 @@ function updateConnectionHoverFromMouse(e){
         if(d < best){ best = d; bestId = c.id; }
     });
     setHoveredConnection(best <= threshold ? bestId : '');
+}
+function scheduleConnectionHover(e, point){
+    pendingConnectionHover = {clientX:e.clientX, clientY:e.clientY, point};
+    if(connectionHoverQueued) return;
+    connectionHoverQueued = true;
+    requestAnimationFrame(() => {
+        connectionHoverQueued = false;
+        const pending = pendingConnectionHover;
+        pendingConnectionHover = null;
+        if(pending) updateConnectionHoverFromMouse(pending, pending.point);
+    });
 }
 function isConnectionSelected(connection){
     return selected.has(connection.from) || selected.has(connection.to);
@@ -16060,14 +16108,17 @@ board.onmousedown = e => {
 board.addEventListener('mousemove', e => {
     const point = screenToWorld(e.clientX, e.clientY);
     lastMouseBoard = point;
-    updateConnectionHoverFromMouse(e);
+    scheduleConnectionHover(e, point);
     if(canvas && knifeActive && !isEditableTarget(e.target) && !dragNode && !dragBoard && !resizeNode && !tempLink){
         continueKnifeDrag(e);
     } else if(!e.shiftKey) {
         setKnifeMode(false);
     }
 });
-board.addEventListener('mouseleave', () => setHoveredConnection(''));
+board.addEventListener('mouseleave', () => {
+    pendingConnectionHover = null;
+    setHoveredConnection('');
+});
 board.ondblclick = null;
 board.oncontextmenu = e => {
     if(!canvas) return;
@@ -16094,8 +16145,7 @@ board.onwheel = e => {
     viewport.x = e.clientX - rect.left - before.x * viewport.scale;
     viewport.y = e.clientY - rect.top - before.y * viewport.scale;
     applyViewport();
-    renderLinks();
-    renderSelectionHub();
+    scheduleLinksRender();
     scheduleViewportSave();
 };
 board.addEventListener('dragover', e => {

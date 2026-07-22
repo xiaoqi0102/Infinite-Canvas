@@ -832,6 +832,18 @@ class CloudMediaUploadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(path, "D:/tmp/reference image.png")
         resolve.assert_called_once_with("/assets/reference image.png")
 
+    def test_cloud_upload_local_url_path_covers_private_host_variants(self):
+        local_urls = (
+            "http://100.64.0.1/assets/reference.png",
+            "http://[fd00::1]/assets/reference.png",
+            "http://canvas.local/assets/reference.png",
+            "http://canvas-host/assets/reference.png",
+        )
+        for value in local_urls:
+            with self.subTest(value=value):
+                self.assertEqual(main.cloud_upload_local_url_path(value), "/assets/reference.png")
+        self.assertIsNone(main.cloud_upload_local_url_path("https://cdn.example.com/reference.png"))
+
     async def test_auto_upload_falls_back_after_sudashui_failure(self):
         provider = {"id": "sudashui", "name": "Sudashui"}
         fallback = {"url": "https://litter.catbox.moe/reference.mp4", "service": "litterbox"}

@@ -26,6 +26,7 @@ import math
 import shlex
 import functools
 import html
+import ipaddress
 import xml.etree.ElementTree as ET
 from typing import List, Dict, Any, Optional, Tuple
 from threading import Lock, Thread
@@ -9767,13 +9768,19 @@ def cloud_upload_local_url_path(value: str) -> Optional[str]:
     if not text.startswith(("http://", "https://")):
         return text
     parsed = urllib.parse.urlsplit(text)
-    host = (parsed.hostname or "").lower()
-    is_private = (
-        host in {"127.0.0.1", "localhost", "::1", "0.0.0.0"}
-        or bool(re.match(r"^(192\.168\.|10\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.)", host))
-        or host.endswith(".localhost")
+    host = (parsed.hostname or "").strip().lower().rstrip(".")
+    local_hostname = (
+        not host
+        or host == "localhost"
+        or host.endswith((".localhost", ".local", ".lan", ".internal", ".home.arpa"))
+        or ("." not in host and ":" not in host)
     )
-    return urllib.parse.unquote(parsed.path or "") if is_private else None
+    local_address = False
+    try:
+        local_address = not ipaddress.ip_address(host).is_global
+    except ValueError:
+        pass
+    return urllib.parse.unquote(parsed.path or "") if local_hostname or local_address else None
 
 def local_media_path_for_cloud_upload(ref_url: str, allowed_prefixes=("image/", "video/", "audio/")) -> str:
     ref_url = str(ref_url or "").strip()

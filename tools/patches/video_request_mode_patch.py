@@ -980,12 +980,13 @@ def normalize_video_request_mode(value):
             required=True,
         )
 
-    text = replace_once(
-        text,
-        '    image_request_mode = detect_image_request_mode(base_url, item.get("image_models") or []) or normalize_image_request_mode(item.get("image_request_mode"))\n',
-        '    image_request_mode = detect_image_request_mode(base_url, item.get("image_models") or []) or normalize_image_request_mode(item.get("image_request_mode"))\n    video_request_mode = normalize_video_request_mode(item.get("video_request_mode"))\n',
-        "normalize_provider video_request_mode",
-    )
+    if '    provider_base_url = {"base_url": base_url}\n' not in text:
+        text = replace_once(
+            text,
+            '    image_request_mode = detect_image_request_mode(base_url, item.get("image_models") or []) or normalize_image_request_mode(item.get("image_request_mode"))\n',
+            '    image_request_mode = detect_image_request_mode(base_url, item.get("image_models") or []) or normalize_image_request_mode(item.get("image_request_mode"))\n    video_request_mode = normalize_video_request_mode(item.get("video_request_mode"))\n',
+            "normalize_provider video_request_mode",
+        )
     text = replace_once(
         text,
         '        "image_request_mode": image_request_mode,\n',
@@ -1169,7 +1170,12 @@ def normalize_video_request_mode(value):
         "async def wait_for_video_task(client, provider, task_id, submit_url=\"\"):",
         "async def wait_for_video_task(client, provider, task_id, submit_url=\"\", on_progress=None):",
     )
-    if "def sudashui_video_task_started(raw)" not in text:
+    modern_sudashui_plugin = (
+        "from plugins.video_plugins import (" in text
+        and "def canvas_video_failed_task_resumable(" in text
+        and "resume_sudashui_video" in text
+    )
+    if not modern_sudashui_plugin and "def sudashui_video_task_started(raw)" not in text:
         text = replace_once(
             text,
             'async def wait_for_video_task(client, provider, task_id, submit_url="", on_progress=None):\n',
@@ -1214,7 +1220,7 @@ async def wait_for_video_task(client, provider, task_id, submit_url="", on_progr
             "Sudashui queue start detector",
             required=True,
         )
-    if "recover_failed_sudashui" not in text:
+    if not modern_sudashui_plugin and "recover_failed_sudashui" not in text:
         text = replace_once(
             text,
             '''        if status in CANVAS_VIDEO_TERMINAL_STATUSES:
@@ -1668,7 +1674,7 @@ def patch_smart_canvas_js(text):
         "smart generateUrls video task polling",
     )
 
-    if "return runApiVideoGeneration(prompt, refs, runSettings);" not in text:
+    if "return runApiVideoGeneration(prompt, refs, runSettings" not in text:
         text = replace_once(
             text,
             "async function runApiGeneration(prompt, refs, runSettings=settings){\n    if(!runSettings.provider_id || !runSettings.model) throw new Error(tr('smart.errNoApiModel'));\n",
@@ -1814,22 +1820,34 @@ def write_if_changed(path, text, root, dry_run, backup_dir, changed):
 
 def validate(root, overrides=None):
     overrides = overrides or {}
+    main_text = overrides.get("main.py", read(root / "main.py"))
+    modern_sudashui_plugin = (
+        "from plugins.video_plugins import (" in main_text
+        and "def canvas_video_failed_task_resumable(" in main_text
+        and (root / "plugins/video_plugins/sudashui.py").exists()
+    )
+    sudashui_main_checks = [
+        "sudashui_video_task_pending",
+        "resume_sudashui_video",
+        "def canvas_video_failed_task_resumable(",
+    ] if modern_sudashui_plugin else [
+        '"sudashui-video-generations"',
+        "def sudashui_video_task_pending(raw)",
+        "def sudashui_video_task_started(raw)",
+        "recover_failed_sudashui",
+        "wait_for_sudashui_start and sudashui_business_failure(raw)",
+        "Sudashui 视频任务查询暂时失败，将自动重试",
+        "def sudashui_video_body(",
+        "async def generate_sudashui_video(",
+        '"metadata": {"payload": json.dumps(',
+        'SUDASHUI_FILES_BASE_URL = "https://files.sudashuiapi.com"',
+    ]
     checks = {
         "main.py": [
             "SUPPORTED_VIDEO_REQUEST_MODES",
-            '"sudashui-video-generations"',
             "def effective_video_request_mode(provider)",
             "def is_sudashui_video_generations_mode(provider)",
-            "def sudashui_video_task_pending(raw)",
-            "def sudashui_video_task_started(raw)",
-            "recover_failed_sudashui",
-            "wait_for_sudashui_start and sudashui_business_failure(raw)",
-            "Sudashui 视频任务查询暂时失败，将自动重试",
-            "def sudashui_video_body(",
-            "async def generate_sudashui_video(",
             "official_asset_indexes: List[StrictInt]",
-            '"metadata": {"payload": json.dumps(',
-            'SUDASHUI_FILES_BASE_URL = "https://files.sudashuiapi.com"',
             "openai_video_generations_reference_urls",
             "is_single_video_generations = is_openai_video_generations_mode(provider)",
             "def video_retry_after_seconds(source):",
@@ -1839,7 +1857,7 @@ def validate(root, overrides=None):
             "CANVAS_VIDEO_TASKS_FILE",
             "def update_canvas_video_task",
             '@app.post("/api/canvas-video-tasks")',
-        ],
+        ] + sudashui_main_checks,
         "static/api-settings.html": [
             "videoRequestModeInput",
             'value="sudashui-video-generations"',
@@ -1883,7 +1901,6 @@ def validate(root, overrides=None):
         "static/js/smart-canvas.js": [
             "async function createSmartCanvasVideoTask",
             "async function pollSmartCanvasVideoTask",
-            "pollSmartCanvasVideoTask(task.taskId)",
             "kind:taskKind",
             "isSmartTerminalTaskError",
             "validateSmartSudashuiVideoRequest",
@@ -1891,6 +1908,20 @@ def validate(root, overrides=None):
             "resolutionReadOnly",
         ],
     }
+    if modern_sudashui_plugin:
+        checks["plugins/video_plugins/sudashui.py"] = [
+            'SUDASHUI_VIDEO_REQUEST_MODE = "sudashui-video-generations"',
+            'SUDASHUI_FILES_BASE_URL = "https://files.sudashuiapi.com"',
+            "async def _video_body(",
+            '"metadata": {"payload": json.dumps(',
+            "def sudashui_video_task_pending(",
+            "def _task_started(",
+            "async def generate_sudashui_video(",
+            "async def resume_sudashui_video(",
+            "deadline: Optional[float] = None",
+            "while deadline is None or time.monotonic() < deadline",
+            "Sudashui 视频任务查询暂时失败，将自动重试",
+        ]
     missing = []
     for rel, needles in checks.items():
         path = root / rel

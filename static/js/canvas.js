@@ -6351,7 +6351,10 @@ function renderNode(node){
     el.appendChild(body);
     el.querySelectorAll('button, select, textarea, input').forEach(control => {
         control.addEventListener('mousedown', e => e.stopPropagation(), true);
-        control.addEventListener('click', e => e.stopPropagation());
+        control.addEventListener('click', e => {
+            if(control.classList.contains('prompt-mention-remove')) return;
+            e.stopPropagation();
+        });
     });
     el.onmousedown = e => {
         if(e.button !== 0 || !isNodeDragSurface(e.target)) return;

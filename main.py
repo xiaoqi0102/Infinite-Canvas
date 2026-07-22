@@ -84,6 +84,7 @@ from plugins.video_plugins import (
     submit_http_request_with_logging,
     submit_video_http_request,
     sudashui_video_task_pending,
+    upload_sudashui_media,
 )
 
 QUIET_ACCESS_PATHS = {
@@ -9761,12 +9762,29 @@ def volcengine_public_asset_url(url: str) -> str:
         return public
     return "ERR:火山要求素材是公网可访问的 http/https URL；本地画布文件需配置 PUBLIC_BASE_URL/PUBLIC_MEDIA_BASE_URL 暴露为公网地址。"
 
+def cloud_upload_local_url_path(value: str) -> Optional[str]:
+    text = str(value or "").strip()
+    if not text.startswith(("http://", "https://")):
+        return text
+    parsed = urllib.parse.urlsplit(text)
+    host = (parsed.hostname or "").lower()
+    is_private = (
+        host in {"127.0.0.1", "localhost", "::1", "0.0.0.0"}
+        or bool(re.match(r"^(192\.168\.|10\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.)", host))
+        or host.endswith(".localhost")
+    )
+    return urllib.parse.unquote(parsed.path or "") if is_private else None
+
 def local_media_path_for_cloud_upload(ref_url: str, allowed_prefixes=("image/", "video/", "audio/")) -> str:
     ref_url = str(ref_url or "").strip()
     if not ref_url:
         raise HTTPException(status_code=400, detail="没有可上传的媒体文件")
-    if ref_url.startswith("http://") or ref_url.startswith("https://"):
+    normalized_url = cloud_upload_local_url_path(ref_url)
+    if normalized_url is None:
         return ""
+    if normalized_url != ref_url and not normalized_url.startswith(("/output/", "/assets/")):
+        raise HTTPException(status_code=400, detail="内网媒体 URL 必须指向画布内的 /assets 或 /output 文件")
+    ref_url = normalized_url
     if not (ref_url.startswith("/output/") or ref_url.startswith("/assets/")):
         raise HTTPException(status_code=400, detail="云端上传只支持画布里的本地图片或视频文件")
     path = output_file_from_url(ref_url)
@@ -9824,20 +9842,74 @@ async def upload_video_to_temp_sh(path: str, source_url: str) -> Dict[str, str]:
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Temp.sh 上传异常：{exc}") from exc
 
+def configured_sudashui_upload_providers() -> List[Dict[str, Any]]:
+    providers = []
+    for provider in load_api_providers():
+        provider_id = str(provider.get("id") or "").strip().lower()
+        if not (
+            provider.get("enabled", True)
+            and is_sudashui_video_generations_mode(provider)
+            and str(provider.get("base_url") or "").strip()
+            and provider_env_key_value(provider_id)
+        ):
+            continue
+        providers.append(provider)
+    return sorted(providers, key=lambda provider: not bool(provider.get("primary")))
+
+async def upload_video_to_sudashui(path: str, source_url: str, provider: Dict[str, Any]) -> Dict[str, str]:
+    media_type = content_type_for_path(path).split("/", 1)[0].strip().lower()
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(connect=20.0, read=600.0, write=600.0, pool=20.0)) as client:
+            direct_url = await upload_sudashui_media(
+                client,
+                source_url,
+                media_type=media_type,
+                headers=api_headers(json_body=False, provider=provider),
+                resolve_local_path=lambda _value: path,
+                content_type_for_path=content_type_for_path,
+            )
+    except SudashuiProtocolError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    return {
+        "url": direct_url,
+        "source": source_url,
+        "name": os.path.basename(path),
+        "service": "sudashui",
+        "provider_id": str(provider.get("id") or ""),
+    }
+
 async def upload_local_video_to_cloud(ref_url: str, service: str = "auto") -> Dict[str, str]:
     ref_url = str(ref_url or "").strip()
-    if ref_url.startswith("http://") or ref_url.startswith("https://"):
+    source_url = ref_url
+    normalized_url = cloud_upload_local_url_path(ref_url)
+    if normalized_url is None:
         return {"url": ref_url, "source": ref_url, "service": "existing"}
+    ref_url = normalized_url
     path = local_media_path_for_cloud_upload(ref_url)
     service = str(service or os.getenv("CLOUD_VIDEO_UPLOAD_SERVICE", "auto") or "auto").strip().lower()
     if service in {"litterbox", "catbox"}:
-        return await upload_video_to_litterbox(path, ref_url)
+        return await upload_video_to_litterbox(path, source_url)
     if service in {"temp", "temp.sh", "tempsh"}:
-        return await upload_video_to_temp_sh(path, ref_url)
+        return await upload_video_to_temp_sh(path, source_url)
     errors = []
+    sudashui_providers = configured_sudashui_upload_providers()
+    if service in {"sudashui", "sudashuiapi"}:
+        if not sudashui_providers:
+            raise HTTPException(status_code=400, detail="未找到已启用且已配置 Base URL 和 API Key 的 Sudashui 视频平台")
+        for provider in sudashui_providers:
+            try:
+                return await upload_video_to_sudashui(path, source_url, provider)
+            except HTTPException as exc:
+                errors.append(f"Sudashui({provider.get('name') or provider.get('id')}): {exc.detail}")
+        raise HTTPException(status_code=502, detail="云端上传失败：" + "；".join(errors))
+    for provider in sudashui_providers:
+        try:
+            return await upload_video_to_sudashui(path, source_url, provider)
+        except HTTPException as exc:
+            errors.append(f"Sudashui({provider.get('name') or provider.get('id')}): {exc.detail}")
     for name, func in (("litterbox", upload_video_to_litterbox), ("temp.sh", upload_video_to_temp_sh)):
         try:
-            return await func(path, ref_url)
+            return await func(path, source_url)
         except HTTPException as exc:
             errors.append(f"{name}: {exc.detail}")
     raise HTTPException(status_code=502, detail="云端上传失败：" + "；".join(errors))

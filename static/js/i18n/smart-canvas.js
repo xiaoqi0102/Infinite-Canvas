@@ -148,6 +148,8 @@
         "smart.videoTrustedAsset": { zh: "可信素材模式", en: "Trusted Asset Mode" },
         "smart.cloudUpload": { zh: "上传云端", en: "Upload to Cloud" },
         "smart.cloudUploadTip": { zh: "上传当前输入图片或视频到云端直链", en: "Upload current input images or videos to a direct cloud link" },
+        "smart.cloudUploadDone": { zh: "云端上传完成：{count} 个媒体文件，已使用实际上传链接。", en: "Cloud upload complete: {count} media file(s), using the actual uploaded URL(s)." },
+        "smart.cloudUploadExpiryNote": { zh: "链接有效期 {value}。", en: "Link expiry: {value}." },
         "smart.manualMediaUrl": { zh: "输入网址", en: "Enter URL" },
         "smart.manualMediaUrlTip": { zh: "手动输入媒体网址", en: "Enter a media URL manually" },
         "smart.videoAspectKeep": { zh: "原图比例", en: "Keep" },

@@ -1242,6 +1242,7 @@ Sudashui Base URL 带不带末尾 `/` 或 `/v1` 均会统一拼接为单一的 `
 
 - 公网 HTTP(S) URL 原样提交，不主动下载或转存。
 - 受控本地素材上传到 `https://files.sudashuiapi.com`，使用当前 provider 的 Bearer Key 和 multipart `file` 字段。
+- 通用“上传云端”入口在自动模式下，会先查找已启用、已配置 Base URL 与 API Key 且明确选择 `sudashui-video-generations` 的 provider；多个候选中优先使用主平台。上传成功后接口直接返回 Sudashui 文件服务响应中的实际 `url`，并标记 `service=sudashui`，前端不得用本地源地址或固定有效期替代该链接。只有自动模式的 Sudashui 上传失败时才继续尝试 Litterbox/temp.sh；显式指定 Sudashui 时失败即返回错误，不做静默降级。
 - 单个任务内相同本地素材只上传一次，但最终数组顺序必须保持不变。
 - 视频创建请求不能自动重发，避免响应丢失时重复扣费。
 - `references` 最多 9 图、3 视频、3 音频，三类总数不超过 12。

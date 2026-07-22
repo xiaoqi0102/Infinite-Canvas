@@ -716,6 +716,162 @@ class VideoDownloadUrlTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(client.gets), 1)
 
 
+class CloudMediaUploadTests(unittest.IsolatedAsyncioTestCase):
+    async def test_sudashui_upload_returns_actual_response_url(self):
+        actual_url = "https://files.sudashuiapi.com/uploaded/reference.png"
+
+        class UploadResponse:
+            status_code = 200
+            text = ""
+
+            @staticmethod
+            def json():
+                return {"url": actual_url}
+
+        class UploadClient:
+            def __init__(self):
+                self.requests = []
+
+            async def post(self, url, **kwargs):
+                self.requests.append((url, kwargs))
+                return UploadResponse()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = os.path.join(temp_dir, "reference.png")
+            with open(path, "wb") as media_file:
+                media_file.write(b"image-content")
+            client = UploadClient()
+            result = await sudashui.upload_sudashui_media(
+                client,
+                "/assets/reference.png",
+                media_type="image",
+                headers={"Authorization": "Bearer test"},
+                resolve_local_path=lambda _value: path,
+                content_type_for_path=lambda _value: "image/png",
+            )
+
+        self.assertEqual(result, actual_url)
+        self.assertEqual(client.requests[0][0], sudashui.SUDASHUI_FILES_BASE_URL)
+
+    def test_configured_sudashui_provider_requires_complete_configuration_and_prefers_primary(self):
+        providers = [
+            {"id": "disabled", "enabled": False, "base_url": "https://api.example.com", "video_request_mode": main.SUDASHUI_VIDEO_REQUEST_MODE},
+            {"id": "no-base", "enabled": True, "base_url": "", "video_request_mode": main.SUDASHUI_VIDEO_REQUEST_MODE},
+            {"id": "no-key", "enabled": True, "base_url": "https://api.example.com", "video_request_mode": main.SUDASHUI_VIDEO_REQUEST_MODE},
+            {"id": "secondary", "enabled": True, "primary": False, "base_url": "https://api.example.com", "video_request_mode": main.SUDASHUI_VIDEO_REQUEST_MODE},
+            {"id": "primary", "enabled": True, "primary": True, "base_url": "https://api.example.com", "video_request_mode": main.SUDASHUI_VIDEO_REQUEST_MODE},
+        ]
+
+        with (
+            patch.object(main, "load_api_providers", return_value=providers),
+            patch.object(main, "provider_env_key_value", side_effect=lambda provider_id: "key" if provider_id in {"disabled", "no-base", "secondary", "primary"} else ""),
+        ):
+            configured = main.configured_sudashui_upload_providers()
+
+        self.assertEqual([provider["id"] for provider in configured], ["primary", "secondary"])
+
+    async def test_auto_upload_uses_sudashui_before_public_file_hosts(self):
+        provider = {"id": "sudashui", "name": "Sudashui"}
+        uploaded = {
+            "url": "https://files.sudashuiapi.com/uploaded/reference.mp4",
+            "service": "sudashui",
+        }
+        with (
+            patch.object(main, "local_media_path_for_cloud_upload", return_value="D:/tmp/reference.mp4"),
+            patch.object(main, "configured_sudashui_upload_providers", return_value=[provider]),
+            patch.object(main, "upload_video_to_sudashui", new=AsyncMock(return_value=uploaded)) as sudashui_upload,
+            patch.object(main, "upload_video_to_litterbox", new=AsyncMock()) as litterbox_upload,
+            patch.object(main, "upload_video_to_temp_sh", new=AsyncMock()) as temp_upload,
+        ):
+            result = await main.upload_local_video_to_cloud("/assets/reference.mp4", "auto")
+
+        self.assertEqual(result["url"], uploaded["url"])
+        sudashui_upload.assert_awaited_once_with("D:/tmp/reference.mp4", "/assets/reference.mp4", provider)
+        litterbox_upload.assert_not_awaited()
+        temp_upload.assert_not_awaited()
+
+    async def test_private_http_media_is_uploaded_instead_of_returned_as_existing(self):
+        provider = {"id": "sudashui", "name": "Sudashui"}
+        private_url = "http://127.0.0.1:3000/assets/reference%20image.png?cache=1"
+        uploaded = {
+            "url": "https://files.sudashuiapi.com/uploaded/reference.png",
+            "service": "sudashui",
+        }
+        with (
+            patch.object(main, "local_media_path_for_cloud_upload", return_value="D:/tmp/reference image.png") as local_path,
+            patch.object(main, "configured_sudashui_upload_providers", return_value=[provider]),
+            patch.object(main, "upload_video_to_sudashui", new=AsyncMock(return_value=uploaded)) as sudashui_upload,
+        ):
+            result = await main.upload_local_video_to_cloud(private_url, "auto")
+
+        self.assertEqual(result, uploaded)
+        local_path.assert_called_once_with("/assets/reference image.png")
+        sudashui_upload.assert_awaited_once_with("D:/tmp/reference image.png", private_url, provider)
+
+    async def test_public_http_media_is_returned_without_upload(self):
+        public_url = "https://cdn.example.com/reference.png"
+        with (
+            patch.object(main, "local_media_path_for_cloud_upload") as local_path,
+            patch.object(main, "configured_sudashui_upload_providers") as configured,
+        ):
+            result = await main.upload_local_video_to_cloud(public_url, "auto")
+
+        self.assertEqual(result, {"url": public_url, "source": public_url, "service": "existing"})
+        local_path.assert_not_called()
+        configured.assert_not_called()
+
+    def test_private_http_media_path_is_resolved_under_controlled_roots(self):
+        private_url = "http://192.168.1.5:3000/assets/reference%20image.png?cache=1"
+        with (
+            patch.object(main, "output_file_from_url", return_value="D:/tmp/reference image.png") as resolve,
+            patch.object(main, "content_type_for_path", return_value="image/png"),
+            patch.object(main.os.path, "getsize", return_value=1024),
+        ):
+            path = main.local_media_path_for_cloud_upload(private_url)
+
+        self.assertEqual(path, "D:/tmp/reference image.png")
+        resolve.assert_called_once_with("/assets/reference image.png")
+
+    async def test_auto_upload_falls_back_after_sudashui_failure(self):
+        provider = {"id": "sudashui", "name": "Sudashui"}
+        fallback = {"url": "https://litter.catbox.moe/reference.mp4", "service": "litterbox"}
+        with (
+            patch.object(main, "local_media_path_for_cloud_upload", return_value="D:/tmp/reference.mp4"),
+            patch.object(main, "configured_sudashui_upload_providers", return_value=[provider]),
+            patch.object(
+                main,
+                "upload_video_to_sudashui",
+                new=AsyncMock(side_effect=main.HTTPException(status_code=502, detail="Sudashui unavailable")),
+            ),
+            patch.object(main, "upload_video_to_litterbox", new=AsyncMock(return_value=fallback)) as litterbox_upload,
+            patch.object(main, "upload_video_to_temp_sh", new=AsyncMock()) as temp_upload,
+        ):
+            result = await main.upload_local_video_to_cloud("/assets/reference.mp4", "auto")
+
+        self.assertEqual(result, fallback)
+        litterbox_upload.assert_awaited_once_with("D:/tmp/reference.mp4", "/assets/reference.mp4")
+        temp_upload.assert_not_awaited()
+
+    async def test_explicit_sudashui_failure_does_not_fall_back(self):
+        provider = {"id": "sudashui", "name": "Sudashui"}
+        with (
+            patch.object(main, "local_media_path_for_cloud_upload", return_value="D:/tmp/reference.mp4"),
+            patch.object(main, "configured_sudashui_upload_providers", return_value=[provider]),
+            patch.object(
+                main,
+                "upload_video_to_sudashui",
+                new=AsyncMock(side_effect=main.HTTPException(status_code=502, detail="Sudashui unavailable")),
+            ),
+            patch.object(main, "upload_video_to_litterbox", new=AsyncMock()) as litterbox_upload,
+            patch.object(main, "upload_video_to_temp_sh", new=AsyncMock()) as temp_upload,
+        ):
+            with self.assertRaisesRegex(main.HTTPException, "Sudashui unavailable"):
+                await main.upload_local_video_to_cloud("/assets/reference.mp4", "sudashui")
+
+        litterbox_upload.assert_not_awaited()
+        temp_upload.assert_not_awaited()
+
+
 class PublicReferenceSafetyTests(unittest.IsolatedAsyncioTestCase):
     @staticmethod
     def _local_path(_value):

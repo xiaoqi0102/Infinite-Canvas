@@ -265,6 +265,34 @@ async def _upload_media(
     return uploaded_url
 
 
+async def upload_sudashui_media(
+    client: httpx.AsyncClient,
+    value: Any,
+    *,
+    media_type: str,
+    headers: Mapping[str, str],
+    resolve_local_path: ResolveLocalPath,
+    content_type_for_path: ContentTypeForPath,
+) -> str:
+    """上传单个素材并返回 Sudashui 文件服务实际响应的直链。"""
+    kind = {
+        "image": "图片",
+        "video": "视频",
+        "audio": "音频",
+    }.get(str(media_type or "").strip().lower())
+    if not kind:
+        raise SudashuiProtocolError(400, f"Sudashui 不支持当前素材类型：{media_type or '(empty)'}")
+    return await _upload_media(
+        client,
+        headers,
+        value,
+        kind,
+        {},
+        resolve_local_path,
+        content_type_for_path,
+    )
+
+
 def _image_refs(request: Mapping[str, Any]) -> List[Dict[str, Any]]:
     refs = []
     for item in request.get("images") or []:

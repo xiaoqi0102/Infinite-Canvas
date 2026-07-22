@@ -37,6 +37,7 @@ from .sudashui import (
     generate_sudashui_video,
     resume_sudashui_video,
     sudashui_video_task_pending,
+    upload_sudashui_media,
 )
 from .tudou import (
     TUDOU_VIDEO_REQUEST_MODE,
@@ -75,6 +76,7 @@ __all__ = [
     "generate_sudashui_video",
     "resume_sudashui_video",
     "sudashui_video_task_pending",
+    "upload_sudashui_media",
     "TUDOU_VIDEO_REQUEST_MODE",
     "TudouProtocolError",
     "generate_tudou_video",

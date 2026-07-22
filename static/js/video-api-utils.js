@@ -49,6 +49,32 @@
         } catch (_) { return ''; }
     }
 
+    function isPublicHttpUrl(value){
+        let parsed;
+        try { parsed = new URL(String(value || '').trim()); }
+        catch (_) { return false; }
+        if(!['http:', 'https:'].includes(parsed.protocol)) return false;
+        const hostname = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '');
+        if(!hostname || hostname === 'localhost' || hostname.endsWith('.localhost')) return false;
+        if(!hostname.includes('.') && !hostname.includes(':')) return false;
+        if(/\.(?:local|lan|internal|home\.arpa)$/.test(hostname)) return false;
+        const ipv4 = hostname.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+        if(ipv4){
+            const octets = ipv4.slice(1).map(Number);
+            if(octets.some(part => part > 255)) return false;
+            const [a, b] = octets;
+            if(a === 0 || a === 10 || a === 127 || (a === 100 && b >= 64 && b <= 127)
+                || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31)
+                || (a === 192 && b === 168)) return false;
+        }
+        if(hostname.includes(':')){
+            if(hostname === '::' || hostname === '::1' || /^f[cd]/.test(hostname) || /^fe[89ab]/.test(hostname)) return false;
+            const mapped = hostname.match(/(?:^|:)ffff:(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+            if(mapped && !isPublicHttpUrl(`http://${mapped.slice(1).join('.')}`)) return false;
+        }
+        return true;
+    }
+
     function isMegabyAiBaseUrl(value){
         return MEGABYAI_OFFICIAL_HOSTNAME_SET.has(videoProviderHostname(value));
     }
@@ -381,6 +407,7 @@
         TUDOU_OFFICIAL_HOSTNAMES,
         normalizeVideoRequestMode,
         videoProviderHostname,
+        isPublicHttpUrl,
         isMegabyAiBaseUrl,
         isAICostBaseUrl,
         isGeekNowBaseUrl,

@@ -3754,7 +3754,7 @@ async function uploadMediaRefToCloud(ref){
     if(!sourceUrl) throw new Error('没有可上传的媒体');
     const existing = tempShUploadedUrlFor(sourceUrl);
     if(existing && existing !== sourceUrl) return existing;
-    if(/^https?:\/\//i.test(sourceUrl)) return sourceUrl;
+    if(window.StudioVideoApi?.isPublicHttpUrl?.(sourceUrl)) return sourceUrl;
     const response = await fetch('/api/cloud-video/upload', {
         method:'POST',
         headers:{'Content-Type':'application/json'},
@@ -3766,7 +3766,7 @@ async function uploadMediaRefToCloud(ref){
     if(!uploadedUrl) throw new Error('云端没有返回链接');
     transientSmartCloudLinks = [
         ...(transientSmartCloudLinks || []).filter(item => item?.source !== sourceUrl),
-        {source:sourceUrl, url:uploadedUrl, expires:data.expires || '3 days', kind}
+        {source:sourceUrl, url:uploadedUrl, expires:data.expires || '', service:data.service || '', kind}
     ];
     return uploadedUrl;
 }
@@ -3830,7 +3830,7 @@ async function uploadCurrentSmartVideosToCloud(){
         const sourceUrl = ref?.sourceUrl || ref?.originalLocalUrl || ref?.url || '';
         if(!sourceUrl) return false;
         const uploaded = tempShUploadedUrlFor(sourceUrl);
-        return uploaded !== sourceUrl || !isRemoteVideoReferenceUrl(sourceUrl);
+        return uploaded !== sourceUrl || !isCloudHostedMediaUrl(sourceUrl);
     });
     if(!localRefs.length){
         toast('当前输入图片或视频已是云端链接');
@@ -3844,7 +3844,14 @@ async function uploadCurrentSmartVideosToCloud(){
         for(const ref of localRefs){
             urls.push(await uploadMediaRefToCloud(ref));
         }
-        toast(`云端上传完成：${urls.length} 个媒体文件`);
+        const expires = [...new Set(urls.map(url =>
+            (transientSmartCloudLinks || []).find(item => item?.url === url)?.expires || ''
+        ).filter(Boolean))];
+        const message = [
+            trf('smart.cloudUploadDone', {count:urls.length}),
+            expires.length === 1 ? trf('smart.cloudUploadExpiryNote', {value:expires[0]}) : ''
+        ].filter(Boolean).join(' ');
+        toast(message);
         return urls;
     } finally {
         if(btn) btn.disabled = false;
@@ -6488,7 +6495,7 @@ function localDisplayUrlForMediaItem(img){
         img.source_url,
         img.url
     ];
-    const local = candidates.find(url => url && !/^https?:\/\//i.test(String(url)));
+    const local = candidates.find(url => url && !isCloudHostedMediaUrl(url));
     return local || img.url || '';
 }
 function imageForDisplay(img){
@@ -6565,6 +6572,9 @@ function videoRefsOnly(refs){
 }
 function isRemoteVideoReferenceUrl(url){
     return /^https?:\/\//i.test(String(url || '')) || /^asset:\/\//i.test(String(url || ''));
+}
+function isCloudHostedMediaUrl(url){
+    return /^asset:\/\//i.test(String(url || '')) || Boolean(window.StudioVideoApi?.isPublicHttpUrl?.(url));
 }
 function audioRefsOnly(refs){
     return (refs || []).filter(ref => ref?.url && mediaKindForItem(ref) === 'audio');

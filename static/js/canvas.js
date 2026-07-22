@@ -3709,6 +3709,9 @@ function videoRefsOnly(refs){
 function isRemoteVideoReferenceUrl(url){
     return /^https?:\/\//i.test(String(url || '')) || /^asset:\/\//i.test(String(url || ''));
 }
+function isCloudHostedMediaUrl(url){
+    return /^asset:\/\//i.test(String(url || '')) || Boolean(window.StudioVideoApi?.isPublicHttpUrl?.(url));
+}
 function tempShUploadedUrlForNode(node, url){
     const match = (node?.tempShLinks || []).find(item => item?.source === url && item?.url);
     return match?.url || url;
@@ -3787,7 +3790,7 @@ function applyTempShUrlToCanvasRef(ref, uploadedUrl){
 async function uploadCanvasMediaRefToCloud(node, ref){
     const kind = mediaKindForRef(ref);
     if(!ref?.url) throw new Error('没有可上传的媒体');
-    if(/^https?:\/\//i.test(ref.url)) return ref.url;
+    if(window.StudioVideoApi?.isPublicHttpUrl?.(ref.url)) return ref.url;
     const response = await fetch('/api/cloud-video/upload', {
         method:'POST',
         headers:{'Content-Type':'application/json'},
@@ -3799,7 +3802,7 @@ async function uploadCanvasMediaRefToCloud(node, ref){
     if(!uploadedUrl) throw new Error('云端没有返回链接');
     node.tempShLinks = [
         ...(node.tempShLinks || []).filter(item => item?.source !== ref.url),
-        {source:ref.url, url:uploadedUrl, expires:data.expires || '3 days', service:data.service || '', kind}
+        {source:ref.url, url:uploadedUrl, expires:data.expires || '', service:data.service || '', kind}
     ];
     applyTempShUrlToCanvasRef(ref, uploadedUrl);
     return uploadedUrl;
@@ -3808,7 +3811,7 @@ async function uploadCanvasVideosToCloud(nodeId){
     const node = nodes.find(n => n.id === nodeId);
     if(!node) return [];
     const refs = resolveGeneratorRequestInputs(node).refs.filter(ref => ref?.url && ['image','video'].includes(mediaKindForRef(ref)));
-    const localRefs = refs.filter(ref => ref?.url && !isRemoteVideoReferenceUrl(ref.url));
+    const localRefs = refs.filter(ref => ref?.url && !isCloudHostedMediaUrl(ref.url));
     if(!localRefs.length){
         showErrorModal('没有需要上传的本地图片或视频', '上传云端');
         return [];
@@ -3824,7 +3827,14 @@ async function uploadCanvasVideosToCloud(nodeId){
         refreshNodes([node.id, ...localRefs.map(ref => ref.nodeId).filter(Boolean)]);
         scheduleSave();
         await copyTextToClipboard(urls[0]);
-        showErrorModal(`已上传 ${urls.length} 个媒体文件到云端，首个链接已复制。链接约 3 天有效。`, '上传云端');
+        const expires = [...new Set(urls.map(url =>
+            (node.tempShLinks || []).find(item => item?.url === url)?.expires || ''
+        ).filter(Boolean))];
+        const message = [
+            trf('canvas.cloudUploadDone', {count:urls.length}),
+            expires.length === 1 ? trf('canvas.cloudUploadExpiryNote', {value:expires[0]}) : ''
+        ].filter(Boolean).join(' ');
+        showErrorModal(message, tr('canvas.cloudUpload'));
         return urls;
     } catch(e) {
         node.tempShUploading = false;

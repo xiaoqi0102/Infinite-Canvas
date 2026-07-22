@@ -881,3 +881,23 @@ git config core.excludesfile "E:/Infinite-Canvas/.git/info/exclude"
 - `ELECTRON_DESKTOP.md` 已同步任何新的桌面端数据目录策略。
 
 完成后记录本次合并中遇到的新坑，追加到本文档。
+
+## 10. 2026-07-22 上游合并记录
+
+本次从共同祖先 `06eb6f5` 合并 `upstream/main@387157e`，上游新增 15 个提交，主要包含画布日志安全删除、画布并发保存、即梦模型与分辨率修复。实际冲突文件为：
+
+- `main.py`
+- `static/js/canvas.js`
+- `static/js/smart-canvas.js`
+- `static/smart-canvas.html`
+
+本次新增的合并注意事项：
+
+- 上游日志删除流程会在持有 `CANVAS_LOCK` 时再次调用 `save_canvas()`，必须使用 `RLock`；同时保留便携 Python 的 `APP_IMPORT_ROOT` 插件加载引导。
+- 媒体引用扫描必须包含 `CANVAS_VIDEO_TASKS_FILE`。视频任务快照仍引用本地视频时，只删除日志记录，不物理删除视频文件，避免恢复查询返回失效地址。
+- 普通画布和智能画布的日志项需要同时保留详情双击/键盘入口与上游删除按钮；删除按钮事件必须阻止冒泡。
+- 智能画布分辨率控件继续优先使用 `smartVideoProtocolProfile()`。Sudashui 的模型推导分辨率保持只读，通用协议再吸收上游 720P、1080P、4K 选项。
+- 上游新增 `seedance2.0mini` 时同时检查 `JIMENG_VIDEO_MODEL_VERSIONS`、`jimeng_video_model_version()`、后端默认模型和两套前端模型列表，防止 UI 可选但 CLI 未传 `--model_version`。
+- `video_request_mode_patch.py` 需要识别 `plugins/video_plugins/sudashui.py` 的插件化实现；不能继续只校验旧的 `main.py` 内联函数锚点。
+
+本次自动验证结果：93 个 Python 测试通过，视频工具与生成日志详情 JavaScript 测试通过，全量 JavaScript 语法检查、Python 编译、i18n 校验、用户数据目录断言、桌面配置断言和视频补丁 dry-run 均通过。未执行安装包构建与发布文件在线验证。

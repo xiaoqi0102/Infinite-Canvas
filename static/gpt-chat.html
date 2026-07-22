@@ -16,7 +16,6 @@
             } catch(e) {}
         })();
     </script>
-    <script src="/static/vendor/js/tailwindcss-cdn.js?v=2026.07.20.1783050005"></script>
     <script src="/static/vendor/js/lucide.js?v=2026.07.20.1783050005"></script>
     <script src="/static/js/theme.js?v=2026.07.20.1783301528"></script>
     <script src="/static/js/i18n.js?v=2026.07.20.1784683020"></script>
@@ -98,7 +97,12 @@
         .thread-item { width:100%; min-height:58px; min-width:0; border:1px solid transparent; background:transparent; color:var(--chat-text); border-radius:12px; padding:11px 34px 11px 12px; text-align:left; transition:background .16s var(--ease), border-color .16s var(--ease), color .16s var(--ease); }
         .thread-item:hover { background:var(--chat-soft); border-color:var(--chat-line); }
         .thread-item.active { background:var(--chat-active-bg); color:var(--chat-active-text); border-color:var(--chat-active-border); box-shadow:0 8px 18px rgba(15,23,42,.06); }
+        .thread-empty { padding:32px 12px; color:var(--chat-faint); font-size:11px; font-weight:700; letter-spacing:.1em; text-align:center; text-transform:uppercase; }
+        .thread-item-title,.thread-item-preview { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+        .thread-item-title { font-size:14px; font-weight:700; }
+        .thread-item-preview { margin-top:4px; font-size:11px; opacity:.5; }
         .thread-delete { position:absolute; top:7px; right:7px; width:22px; height:22px; border-radius:7px; display:flex; align-items:center; justify-content:center; color:var(--chat-faint); background:transparent; opacity:0; transition:opacity .16s var(--ease), background .16s var(--ease), color .16s var(--ease); }
+        .thread-delete i,.thread-delete svg { width:14px; height:14px; }
         .thread-row:hover .thread-delete,
         .thread-row:focus-within .thread-delete { opacity:1; }
         .thread-delete:hover { background:rgba(100,116,139,.13); color:var(--chat-text); }
@@ -127,7 +131,7 @@
         .system-prompt-actions button:hover { background:var(--chat-soft); color:var(--chat-text); border-color:var(--chat-line-2); }
         .system-prompt-actions .primary { background:var(--chat-strong); color:var(--chat-strong-text); border-color:var(--chat-strong); }
         .system-prompt-actions .primary:hover { background:var(--chat-strong); color:var(--chat-strong-text); opacity:.92; }
-        .messages { width:min(var(--chat-width),calc(100% - 60px)); min-height:0; margin:0 auto; overflow-y:auto; overflow-x:hidden; padding:24px 0 18px; display:flex; flex-direction:column; align-items:center; gap:16px; scroll-behavior:smooth; scrollbar-gutter:stable; }
+        .messages { width:min(var(--chat-width),calc(100% - 60px)); min-height:0; margin:0 auto; overflow-y:auto; overflow-x:hidden; padding:24px 0 18px; display:flex; flex-direction:column; align-items:center; gap:16px; scroll-behavior:auto; scrollbar-gutter:stable; }
         .empty-state { margin:auto; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:12px; color:var(--chat-faint); text-align:center; }
         .empty-state i,.empty-state svg { width:54px; height:54px; stroke-width:1.2; }
         .empty-state-text { font-size:11px; line-height:1; font-weight:950; letter-spacing:.22em; text-transform:uppercase; }
@@ -1050,7 +1054,7 @@
             const list = document.getElementById('threadList');
             list.innerHTML = '';
             if(!conversations.length){
-                list.innerHTML = `<div class="px-3 py-8 text-center text-[11px] font-bold text-gray-300 uppercase tracking-widest">${tr('chat.noHistory')}</div>`;
+                list.innerHTML = `<div class="thread-empty">${tr('chat.noHistory')}</div>`;
                 return;
             }
             conversations.forEach(item => {
@@ -1059,12 +1063,12 @@
                 const btn = document.createElement('button');
                 btn.className = `thread-item ${currentConversation?.id === item.id ? 'active' : ''}`;
                 btn.onclick = () => openConversation(item.id, true);
-                btn.innerHTML = `<div class="text-sm font-bold truncate">${escapeHtml(item.title || defaultTitle())}</div><div class="text-[11px] opacity-50 truncate mt-1">${escapeHtml(item.last_message || '')}</div>`;
+                btn.innerHTML = `<div class="thread-item-title">${escapeHtml(item.title || defaultTitle())}</div><div class="thread-item-preview">${escapeHtml(item.last_message || '')}</div>`;
                 const del = document.createElement('button');
                 del.className = 'thread-delete';
                 del.title = tr('chat.deleteTitle');
                 del.onclick = (event) => deleteConversation(item.id, event);
-                del.innerHTML = '<i data-lucide="x" class="w-3.5 h-3.5"></i>';
+                del.innerHTML = '<i data-lucide="x"></i>';
                 row.appendChild(btn);
                 row.appendChild(del);
                 list.appendChild(row);
@@ -1324,12 +1328,14 @@
                 lucide.createIcons();
                 return;
             }
-            messages.forEach(addMessageBubble);
+            const fragment = document.createDocumentFragment();
+            messages.forEach(message => addMessageBubble(message, fragment, false));
+            box.appendChild(fragment);
+            lucide.createIcons();
             scrollBottom();
         }
 
-        function addMessageBubble(msg){
-            const box = document.getElementById('messages');
+        function addMessageBubble(msg, parent = document.getElementById('messages'), renderIcons = true){
             const row = document.createElement('div');
             row.className = `bubble-row ${msg.role === 'user' ? 'user' : 'assistant'}`;
             const bubble = document.createElement('div');
@@ -1356,6 +1362,8 @@
                     const img = document.createElement('img');
                     img.className = 'generated';
                     img.src = url;
+                    img.loading = 'lazy';
+                    img.decoding = 'async';
                     img.onclick = () => openImagePreview(url);
                     grid.appendChild(img);
                 });
@@ -1371,8 +1379,8 @@
                 bubble.appendChild(badge);
             }
             row.appendChild(bubble);
-            box.appendChild(row);
-            lucide.createIcons();
+            parent.appendChild(row);
+            if(renderIcons) lucide.createIcons();
             return {row, bubble, text};
         }
 
@@ -1408,6 +1416,8 @@
                 const img = document.createElement('img');
                 img.className = 'thumb';
                 img.src = ref.url;
+                img.loading = 'lazy';
+                img.decoding = 'async';
                 img.title = attachmentName(ref);
                 img.onclick = () => openImagePreview(ref.url);
                 return img;
@@ -1421,7 +1431,7 @@
 
         function renderRefChip(ref, i){
             if(isImageRef(ref)){
-                return `<div class="ref-chip"><img src="${escapeHtml(ref.url)}" title="${escapeHtml(attachmentName(ref))}"><button onclick="removeRef(${i})">×</button></div>`;
+                return `<div class="ref-chip"><img src="${escapeHtml(ref.url)}" title="${escapeHtml(attachmentName(ref))}" loading="lazy" decoding="async"><button onclick="removeRef(${i})">×</button></div>`;
             }
             return `<div class="ref-chip file"><i data-lucide="file"></i><span class="ref-file-name" title="${escapeHtml(attachmentName(ref))}">${escapeHtml(attachmentName(ref))}</span><button onclick="removeRef(${i})">×</button></div>`;
         }
@@ -1445,7 +1455,7 @@
             const strip = document.getElementById('refStrip');
             strip.innerHTML = refs.map((ref,i) => renderRefChip(ref, i)).join('');
             lucide.createIcons();
-            updateComposerOverflow();
+            scheduleComposerOverflowUpdate();
         }
 
         function removeRef(i){ refs.splice(i,1); renderRefs(); }
@@ -1456,6 +1466,11 @@
         });
 
         const composerBody = document.getElementById('composerBody');
+        const messageInput = document.getElementById('messageInput');
+        composerBody.addEventListener('pointerdown', event => {
+            if(event.target.closest('button,input,textarea,.model-picker-popover,.resolution-picker-popover')) return;
+            requestAnimationFrame(() => messageInput.focus({preventScroll:true}));
+        });
         composerBody.addEventListener('dragover', e => {
             if(!hasUploadFiles(e.dataTransfer?.items)) return;
             e.preventDefault();
@@ -1478,17 +1493,38 @@
             if(!body) return;
             body.classList.toggle('has-overflow', body.scrollHeight > body.clientHeight + 2);
         }
-        function autoGrow(el){ el.style.height = 'auto'; el.style.height = Math.min(el.scrollHeight, 150) + 'px'; updateComposerOverflow(); }
-        function handleKey(e){ if(e.key === 'Enter' && !e.shiftKey){ e.preventDefault(); sendMessage(); } }
+        let composerOverflowFrame = 0;
+        function scheduleComposerOverflowUpdate(){
+            if(composerOverflowFrame) return;
+            composerOverflowFrame = requestAnimationFrame(() => {
+                composerOverflowFrame = 0;
+                updateComposerOverflow();
+            });
+        }
+        function autoGrow(el){
+            el.style.height = 'auto';
+            el.style.height = Math.min(el.scrollHeight, 150) + 'px';
+            scheduleComposerOverflowUpdate();
+        }
+        function handleKey(e){
+            if(e.isComposing || e.keyCode === 229) return;
+            if(e.key === 'Enter' && !e.shiftKey){
+                e.preventDefault();
+                sendMessage();
+            }
+        }
         window.addEventListener('keydown', e => {
             if(e.key === 'Escape') closeImagePreview();
         });
 
+        let isSending = false;
         async function sendMessage(){
+            if(isSending) return;
             const input = document.getElementById('messageInput');
             const message = input.value.trim();
             if(!message) return;
             const btn = document.getElementById('sendBtn');
+            isSending = true;
             btn.disabled = true;
             const requestedSize = chatSizeFromPrompt(message);
             const pendingRefs = refs.slice();
@@ -1496,6 +1532,7 @@
             renderRefs();
             input.value = '';
             autoGrow(input);
+            input.focus({preventScroll:true});
             if(!currentConversation){
                 currentConversation = {id:'', title:'新对话', messages:[]};
                 document.getElementById('messages').innerHTML = '';
@@ -1578,6 +1615,7 @@
             } catch(err) {
                 renderMessages([...(currentConversation.messages || []), {role:'assistant', content:err.message || tr('chat.requestFailed')}]);
             } finally {
+                isSending = false;
                 btn.disabled = false;
                 scrollBottom();
             }
@@ -1607,6 +1645,17 @@
             const decoder = new TextDecoder();
             let buffer = '';
             let fullText = '';
+            let textRenderFrame = 0;
+            const flushStreamText = () => {
+                if(textRenderFrame) cancelAnimationFrame(textRenderFrame);
+                textRenderFrame = 0;
+                assistantBubble.text.textContent = fullText;
+                scrollBottom(false);
+            };
+            const scheduleStreamText = () => {
+                if(textRenderFrame) return;
+                textRenderFrame = requestAnimationFrame(flushStreamText);
+            };
             while(true){
                 const {value, done} = await reader.read();
                 if(done) break;
@@ -1624,11 +1673,11 @@
                     }
                     if(event.type === 'delta'){
                         fullText += event.delta || '';
-                        assistantBubble.text.textContent = fullText;
-                        scrollBottom();
+                        scheduleStreamText();
                     }
                     if(event.type === 'error') throw new Error(event.detail || tr('chat.requestFailed'));
                     if(event.type === 'done'){
+                        flushStreamText();
                         assistantBubble.bubble.classList.remove('streaming');
                         currentConversation = event.conversation;
                         rememberConversation(currentConversation.id);
@@ -1638,10 +1687,25 @@
                     }
                 }
             }
+            flushStreamText();
             assistantBubble.bubble.classList.remove('streaming');
         }
 
-        function scrollBottom(){ requestAnimationFrame(() => { const box = document.getElementById('messages'); box.scrollTop = box.scrollHeight; }); }
+        const messagesBox = document.getElementById('messages');
+        let shouldFollowMessages = true;
+        let scrollFrame = 0;
+        messagesBox.addEventListener('scroll', () => {
+            shouldFollowMessages = messagesBox.scrollHeight - messagesBox.scrollTop - messagesBox.clientHeight < 120;
+        }, {passive:true});
+        function scrollBottom(force = true){
+            if(!force && !shouldFollowMessages) return;
+            shouldFollowMessages = true;
+            if(scrollFrame) return;
+            scrollFrame = requestAnimationFrame(() => {
+                scrollFrame = 0;
+                messagesBox.scrollTop = messagesBox.scrollHeight;
+            });
+        }
         function escapeHtml(str){ return String(str).replace(/[&<>"']/g, s => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[s])); }
 
         window.onload = async () => {

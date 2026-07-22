@@ -31,6 +31,8 @@ Run the Electron development client with:
 
 The Electron main process starts the local FastAPI backend and opens a desktop window.
 
+桌面客户端使用 Electron 单实例锁。同一用户会话中重复启动客户端时，后续进程不会再次启动后端或创建窗口，而是恢复、显示并聚焦已运行客户端的主窗口。
+
 Electron installer updates are disabled in development mode. The update flow only runs when `app.isPackaged` is true.
 
 ## Build Installer
@@ -396,3 +398,4 @@ Keep these points intact when changing the desktop packaging or update flow:
 9. The web page "one-click update" is still for source-project updates, not installer-level updates.
 10. The visible installer download progress belongs to the Electron main-process update flow. Do not move it into the in-page source update flow or require broad renderer IPC exposure.
 11. User data must stay outside the installation directory and survive uninstall/reinstall cycles.
+12. 桌面客户端必须保持单实例运行；重复启动只恢复并聚焦主窗口，不得再次启动本地后端。

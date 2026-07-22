@@ -1288,6 +1288,15 @@ async function createWindow() {
   await mainWindow.loadURL(`http://${HOST}:${PORT}/`);
 }
 
+function focusMainWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (mainWindow.isMinimized()) {
+    mainWindow.restore();
+  }
+  mainWindow.show();
+  mainWindow.focus();
+}
+
 function stopBackend() {
   if (!backendProcess) return;
   const child = backendProcess;
@@ -1295,30 +1304,38 @@ function stopBackend() {
   child.kill();
 }
 
-app.whenReady().then(async () => {
-  try {
-    configureClientUpdater();
-    registerClientUpdateIpc();
-    startBackend();
-    await waitForServer();
-    await createWindow();
-    scheduleClientUpdateCheck();
-  } catch (error) {
-    dialog.showErrorBox('Infinite Canvas 启动失败', error.message);
-    app.quit();
-  }
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
 
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
-      createWindow();
+if (!hasSingleInstanceLock) {
+  app.quit();
+} else {
+  app.on('second-instance', focusMainWindow);
+
+  app.whenReady().then(async () => {
+    try {
+      configureClientUpdater();
+      registerClientUpdateIpc();
+      startBackend();
+      await waitForServer();
+      await createWindow();
+      scheduleClientUpdateCheck();
+    } catch (error) {
+      dialog.showErrorBox('Infinite Canvas 启动失败', error.message);
+      app.quit();
+    }
+
+    app.on('activate', () => {
+      if (BrowserWindow.getAllWindows().length === 0) {
+        createWindow();
+      }
+    });
+  });
+
+  app.on('before-quit', stopBackend);
+
+  app.on('window-all-closed', () => {
+    if (process.platform !== 'darwin') {
+      app.quit();
     }
   });
-});
-
-app.on('before-quit', stopBackend);
-
-app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') {
-    app.quit();
-  }
-});
+}

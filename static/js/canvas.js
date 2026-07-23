@@ -11761,6 +11761,7 @@ async function runVideoNode(nodeId, opts={}){
         if(pending?.failed && pending.recoverTaskId){
             refreshRunNodes(node, out);
             scheduleSave();
+            if(opts.cascade) throw err;
             return;
         }
         refreshRunNodes(node, out);
@@ -13664,8 +13665,9 @@ async function queryRecoverPendingOutput(pendingId){
                 return;
             }
             if(data.status === 'failed'){
-                pending.error = data.error || tr('canvas.videoFailed');
-                showErrorModal(pending.error, tr('canvas.apiFailed'));
+                const message = data.error || tr('canvas.videoFailed');
+                failCanvasVideoTask(taskId, message, data);
+                showErrorModal(message, tr('canvas.apiFailed'));
             } else {
                 pending.failed = false;
                 pending.error = '';
@@ -13873,6 +13875,11 @@ async function pollCanvasVideoTask(taskId, options={}){
                 failCanvasVideoTask(taskId, data.error || tr('canvas.videoFailed'), data);
                 return 'failed';
             }
+            if(found.pending.failed){
+                found.pending.failed = false;
+                found.pending.querying = false;
+                found.pending.error = '';
+            }
             refreshNodes([found.out.id]);
             await sleep(5000);
         }
@@ -13958,8 +13965,9 @@ function failCanvasVideoTask(taskId, message, taskData={}){
     run.requestDetails = taskData?.request_details || run.requestDetails || null;
     const runMs = nowMs() - Number(pending.startedAt || nowMs());
     const recoverTaskId = taskData?.upstream_task_id || taskData?.task_id || taskData?.submit_id || pending.canvasTaskId || extractUpstreamTaskId(message);
+    const terminalFailure = String(taskData?.status || '').trim().toLowerCase() === 'failed';
     const gen = nodes.find(n => n.id === run?.node?.id);
-    if(recoverTaskId){
+    if(recoverTaskId && !terminalFailure){
         pending.failed = true;
         pending.querying = false;
         pending.error = message || tr('canvas.videoFailed');
@@ -14054,7 +14062,7 @@ function resumeCanvasImageTasks(){
     nodes.filter(n => n.type === 'output').forEach(out => {
         (out._pending || []).forEach(p => {
             if(p.canvasTaskType === 'online-image' && p.canvasTaskId && !p.failed) pollCanvasImageTask(p.canvasTaskId, {cascadeTargetId:p.cascadeTargetId || ''});
-            if(p.canvasTaskType === 'online-video' && p.canvasTaskId && !p.failed) pollCanvasVideoTask(p.canvasTaskId, {cascadeTargetId:p.cascadeTargetId || ''});
+            if(p.canvasTaskType === 'online-video' && p.canvasTaskId && (!p.failed || p.recoverTaskId)) pollCanvasVideoTask(p.canvasTaskId, {cascadeTargetId:p.cascadeTargetId || ''});
         });
     });
 }

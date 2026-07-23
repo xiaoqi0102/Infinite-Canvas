@@ -672,6 +672,10 @@ completeCanvasVideoTask(taskId, data.result || data);
 failCanvasVideoTask(taskId, data.error || tr('canvas.videoFailed'), data);
 ```
 
+后端返回 `status: "failed"` 时，该状态是权威终态。`failCanvasVideoTask()` 会移除对应 pending、
+释放生成节点状态并让一键运行抛出错误停止后续节点。只有前端查询请求本身异常、且后端没有返回
+明确任务终态时，才保留任务 ID 和“查询结果”入口。
+
 7. 非终态继续等待：
 
 ```javascript
@@ -716,6 +720,10 @@ GET /api/canvas-video-tasks/{taskId}
 - 清除 failed 标记。
 - 更新状态。
 - 重新启动 `pollCanvasVideoTask()`。
+
+如果后端确认失败，则调用 `failCanvasVideoTask()` 清理 pending；旧画布里已经保存为失败的
+视频 pending 会在加载后重新查询一次，以便确认成功、继续轮询或清理终态失败。图片任务的
+可恢复行为不受影响。
 
 ## 10. 智能画布视频流程
 

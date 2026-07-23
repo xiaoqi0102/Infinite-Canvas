@@ -385,7 +385,7 @@ API_PROVIDER_CUSTOM_API_KEY
 | 保存配置 | 保存 WebDAV 地址、账号、密码、目录和自动上传开关。 |
 | 上传到云端 | 先保存同步配置，再上传当前 API 设置快照。 |
 | 从云端下载 | 二次确认后下载并覆盖本机 API 配置和 Key。 |
-| 选择备份 JSON | 手动选择本地备份 JSON，确认后导入并覆盖本机 API 配置和 Key。 |
+| 导入 API 备份 | 手动选择本地备份 JSON，确认后导入并覆盖本机 API 配置和 Key。 |
 | 导出 API 备份 | 手动导出当前 API 设置快照到本地 JSON 文件。 |
 
 ### 6.1 自动上传
@@ -418,7 +418,7 @@ queueCloudSyncAutoUpload();
 云同步页顶部新增“手动导入导出”模块：
 
 - `导出 API 备份`：调用 `/api/cloud-sync/export`，下载当前本机 API 设置快照。
-- `选择备份 JSON`：读取用户选择的 JSON 文件，二次确认后调用 `/api/cloud-sync/import`。
+- `导入 API 备份`：读取用户选择的 JSON 文件，二次确认后调用 `/api/cloud-sync/import`。
 - 导入成功后同样广播 `providers-changed`，让画布和 API 设置页重新读取平台配置。
 - 导入前后端会自动备份当前配置，备份目录仍是 `data/cloud_sync_backups/{YYYYMMDD-HHMMSS}/`。
 

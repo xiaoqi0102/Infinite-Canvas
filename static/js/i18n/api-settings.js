@@ -133,7 +133,7 @@
         "api.cloudSyncDownloadConfirm": { zh: "从云端下载会覆盖本机 API 平台配置和 Key。继续吗？", en: "Downloading will overwrite local API providers and keys. Continue?" },
         "api.cloudSyncManualTitle": { zh: "手动导入导出", en: "Manual Import / Export" },
         "api.cloudSyncManualDesc": { zh: "导出本机 API 配置备份，或导入备份文件恢复到本机。", en: "Export a local API settings backup, or import a backup file onto this device." },
-        "api.cloudSyncManualImport": { zh: "选择备份 JSON", en: "Choose Backup JSON" },
+        "api.cloudSyncManualImport": { zh: "导入 API 备份", en: "Import API Backup" },
         "api.cloudSyncManualExport": { zh: "导出 API 备份", en: "Export API Backup" },
         "api.cloudSyncManualExporting": { zh: "正在导出 API 备份...", en: "Exporting API backup..." },
         "api.cloudSyncManualExportOk": { zh: "API 备份已导出", en: "API backup exported" },

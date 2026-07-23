@@ -14571,7 +14571,7 @@ async function runLoopRoundIntoSlot(loopNode, rootNode, outputSlot, loopIndex, c
             render();
             scheduleSave();
             await saveCanvas();
-            await resumeSmartPendingNode(outputSlot, {run:runLog, runLogStart});
+            outputSlot = await resumeSmartPendingNode(outputSlot, {run:runLog, runLogStart}) || liveSmartNode(outputSlot);
             if(outputSlot.jimengPending || smartRecoverableImageTask(outputSlot)){
                 outputSlot.queued = false;
                 return [];
@@ -14971,7 +14971,7 @@ async function runGeneration(){
     undoSuppressed = true;
     if(shouldCreateBranchOutput) branchNode = createPendingOutputFromSource(node, expectedCount, pendingMeta, {connectSource:false, selectOutput:true, refs});
     undoSuppressed = false;
-    const pendingNode = branchNode || node;
+    let pendingNode = branchNode || node;
     if(extracted) pendingNode._runMetaTargetId = extracted.id;
     if(!branchNode){
         pendingNode.pending = Math.max(1, Number(expectedCount) || 1);
@@ -15028,7 +15028,7 @@ async function runGeneration(){
             render();
             scheduleSave();
             await saveCanvas();
-            await resumeSmartPendingNode(pendingNode, {run:runLog, runLogStart});
+            pendingNode = await resumeSmartPendingNode(pendingNode, {run:runLog, runLogStart}) || liveSmartNode(pendingNode);
             if(pendingNode.jimengPending || smartRecoverableImageTask(pendingNode)){
                 if(sourceVisualState) restoreSourceVisualState(node, sourceVisualState);
                 clearPromptInput({preserveDraft:true});
@@ -15806,6 +15806,7 @@ async function pollSmartCanvasVideoTask(taskId, onProgress=null){
 }
 function removeSmartPendingTask(node, taskId){
     if(!node || !taskId) return;
+    node = liveSmartNode(node);
     const remaining = smartPendingTasks(node).filter(task => task.taskId !== taskId);
     if(remaining.length) node.pendingTasks = remaining;
     else delete node.pendingTasks;
@@ -15818,11 +15819,15 @@ function removeSmartPendingTask(node, taskId){
             delete node.h;
         }
     }
+    return node;
 }
 function finalizeSmartPendingTask(node, taskId, images, kind='image'){
     if(!node || !taskId) return;
-    node.pendingTasks = smartPendingTasks(node).filter(task => task.taskId !== taskId);
-    node.pending = Math.max(0, Number(node.pending || 0) - 1);
+    node = liveSmartNode(node);
+    const remaining = smartPendingTasks(node).filter(task => task.taskId !== taskId);
+    if(remaining.length) node.pendingTasks = remaining;
+    else delete node.pendingTasks;
+    node.pending = remaining.length;
     const ext = kind === 'video' ? 'mp4' : kind === 'audio' ? 'mp3' : kind === 'text' ? 'txt' : 'png';
     const mediaItems = resultMediaUrls(images);
     const existing = cleanHistoryImages(node.images || []);
@@ -15852,10 +15857,13 @@ function finalizeSmartPendingTask(node, taskId, images, kind='image'){
         delete node.w;
         delete node.h;
     }
+    return node;
 }
 async function resumeSmartPendingNode(node, logContext={}){
+    node = liveSmartNode(node);
     const tasks = smartPendingTasks(node);
-    if(!node || !tasks.length) return;
+    if(!node || !tasks.length) return node;
+    const nodeId = node.id;
     const logTaskFailure = (message, task, context=logContext) => {
         if(!context?.run || !message) return;
         const runMs = Math.max(0, nowMs() - Number(context.startedAt || context.runLogStart || nowMs()));
@@ -15890,13 +15898,16 @@ async function resumeSmartPendingNode(node, logContext={}){
             if(result?.request_details && taskLogContext?.run){
                 taskLogContext.run.requestDetails = result.request_details;
             }
+            node = nodes.find(item => item.id === nodeId) || node;
             const media = taskKind === 'video'
                 ? (result?.videos?.length ? result.videos : (result?.result || result))
                 : (result?.image_items?.length ? result.image_items : (result?.images?.length ? result.images : result));
-            finalizeSmartPendingTask(node, task.taskId, resultMediaUrls(media), taskKind);
+            node = finalizeSmartPendingTask(node, task.taskId, resultMediaUrls(media), taskKind) || node;
             render();
             scheduleSave();
         } catch(e) {
+            node = nodes.find(item => item.id === nodeId) || node;
+            const currentTask = smartPendingTasks(node).find(item => item.taskId === task.taskId) || task;
             if(e?.requestDetails && taskLogContext?.run) taskLogContext.run.requestDetails = e.requestDetails;
             if(e && e.jimengPending && e.submitId){
                 node.pendingTasks = smartPendingTasks(node).filter(item => item.taskId !== task.taskId);
@@ -15906,15 +15917,15 @@ async function resumeSmartPendingNode(node, logContext={}){
                 return;
             }
             if(e && e.imageTaskRecover && e.recoverTaskId){
-                task.failed = true;
-                task.querying = false;
-                task.recoverTaskId = e.recoverTaskId;
-                task.providerId = e.providerId || task.providerId || providerIdForSmartTask(node, task);
-                task.kind = e.kind || task.kind || 'image';
-                task.error = e.message || tr('smart.errRunFailed');
+                currentTask.failed = true;
+                currentTask.querying = false;
+                currentTask.recoverTaskId = e.recoverTaskId;
+                currentTask.providerId = e.providerId || currentTask.providerId || providerIdForSmartTask(node, currentTask);
+                currentTask.kind = e.kind || currentTask.kind || 'image';
+                currentTask.error = e.message || tr('smart.errRunFailed');
                 node.running = false;
                 node.pending = Math.max(1, smartPendingTasks(node).length);
-                logTaskFailure(task.error, task);
+                logTaskFailure(currentTask.error, currentTask);
                 toast('任务未丢失，可稍后手动查询结果');
                 render();
                 scheduleSave();
@@ -15932,6 +15943,7 @@ async function resumeSmartPendingNode(node, logContext={}){
     if(failures.length && !(node.images || []).length){
         throw failures[0];
     }
+    return liveSmartNode(node);
 }
 function resumeSmartPendingTasks(){
     nodes.filter(node => smartPendingTasks(node).length).forEach(node => {

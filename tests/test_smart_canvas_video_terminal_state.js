@@ -19,6 +19,7 @@ const sandbox = {
         }),
     }),
     smartPendingTasks:node => Array.isArray(node?.pendingTasks) ? node.pendingTasks : [],
+    liveSmartNode:node => node,
     smartResponseErrorMessage:async () => '请求失败',
     tr:key => key,
     sleep:async () => {},

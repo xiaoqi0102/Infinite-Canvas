@@ -3758,6 +3758,30 @@ function cloudUploadSourceUrlForCanvasRef(node, ref){
         .map(value => String(value || '').trim())
         .find(url => url && !isCloudHostedMediaUrl(url)) || '';
 }
+function deleteCanvasCloudLink(node, link){
+    if(!node || !link?.url) return false;
+    const targetUrl = String(link.url || '');
+    const targetSource = String(link.source || '');
+    const refs = resolveGeneratorRequestInputs(node).refs.filter(ref => {
+        const current = cloudUploadLinkForCanvasRef(node, ref);
+        return current
+            && String(current.url || '') === targetUrl
+            && String(current.source || '') === targetSource;
+    });
+    const nextLinks = (node.tempShLinks || []).filter(item =>
+        item?.manual === true
+        || String(item?.url || '') !== targetUrl
+        || String(item?.source || '') !== targetSource
+    );
+    if(nextLinks.length === (node.tempShLinks || []).length) return false;
+    node.tempShLinks = nextLinks;
+    if(targetSource && !isCloudHostedMediaUrl(targetSource)){
+        refs.forEach(ref => applyTempShUrlToCanvasRef(ref, targetSource, targetSource));
+    }
+    refreshNodes([node.id, ...refs.map(ref => ref.nodeId).filter(Boolean)]);
+    scheduleSave();
+    return true;
+}
 function applyUploadedUrlToRefs(refs, node){
     return (refs || []).map(ref => {
         if(!ref?.url) return ref;
@@ -9568,7 +9592,7 @@ function renderVideoCloudLinks(host, node, imageInputs){
         const uploaded = cloudUploadLinkForCanvasRef(node, ref);
         return uploaded ? {label, ...uploaded} : null;
     }).filter(Boolean);
-    host.innerHTML = links.map(link => {
+    host.innerHTML = links.map((link, index) => {
         const url = String(link.url || '');
         const expires = link.expires ? trf('canvas.cloudLinkExpires', {value:link.expires}) : '';
         const meta = [link.service, expires].filter(Boolean).join(' · ');
@@ -9577,6 +9601,7 @@ function renderVideoCloudLinks(host, node, imageInputs){
             <a class="video-cloud-link-url" href="${escapeAttr(url)}" target="_blank" rel="noopener noreferrer" title="${escapeAttr(url)}" aria-label="${escapeAttr(trf('canvas.cloudLinkOpenAria', {label:link.label}))}">${escapeHtml(url)}</a>
             ${meta ? `<span class="video-cloud-link-expiry">${escapeHtml(meta)}</span>` : ''}
             <button type="button" class="video-cloud-link-copy" data-copy-cloud-url="${escapeAttr(url)}" title="${escapeAttr(tr('canvas.cloudLinkCopy'))}" aria-label="${escapeAttr(trf('canvas.cloudLinkCopyAria', {label:link.label}))}"><i data-lucide="copy"></i></button>
+            <button type="button" class="video-cloud-link-delete" data-delete-cloud-link="${index}" title="${escapeAttr(tr('canvas.cloudLinkDelete'))}" aria-label="${escapeAttr(trf('canvas.cloudLinkDeleteAria', {label:link.label}))}"><i data-lucide="trash-2"></i></button>
         </div>`;
     }).join('');
     host.querySelectorAll('a,button').forEach(el => {
@@ -9603,6 +9628,14 @@ function renderVideoCloudLinks(host, node, imageInputs){
                 btn.title = tr('canvas.cloudLinkCopy');
                 refreshIcons();
             }, 1200);
+        };
+    });
+    host.querySelectorAll('[data-delete-cloud-link]').forEach(btn => {
+        btn.onclick = event => {
+            event.preventDefault();
+            event.stopPropagation();
+            const link = links[Number(btn.dataset.deleteCloudLink)];
+            if(link) deleteCanvasCloudLink(node, link);
         };
     });
     refreshIcons();

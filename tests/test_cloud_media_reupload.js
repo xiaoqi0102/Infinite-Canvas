@@ -193,6 +193,66 @@ async function testCanvasSourceUrlIsPersistedForLaterRefresh() {
     ]);
 }
 
+function testCanvasCloudLinkDeleteClearsCacheAndRestoresSource() {
+    const firstLocalUrl = '/assets/delete-first.png';
+    const secondLocalUrl = '/assets/delete-second.png';
+    const firstCloudUrl = 'https://files.sudashuiapi.com/proxy/uploads/delete-first.png';
+    const secondCloudUrl = 'https://files.sudashuiapi.com/proxy/uploads/delete-second.png';
+    const firstMedia = {id:'delete-image-1', type:'image', url:firstCloudUrl, originalLocalUrl:firstLocalUrl, mediaKind:'image'};
+    const secondMedia = {id:'delete-image-2', type:'image', url:secondCloudUrl, originalLocalUrl:secondLocalUrl, mediaKind:'image'};
+    const videoNode = {
+        id:'delete-video',
+        type:'video',
+        tempShLinks:[
+            {source:firstLocalUrl, url:firstCloudUrl, service:'sudashui', kind:'image'},
+            {source:firstLocalUrl, url:'https://example.com/manual.png', manual:true},
+            {source:secondLocalUrl, url:secondCloudUrl, service:'sudashui', kind:'image'},
+        ],
+    };
+    let saveCount = 0;
+    let refreshedIds = [];
+    const sandbox = {
+        nodes:[firstMedia, secondMedia, videoNode],
+        window:{StudioVideoApi:{isPublicHttpUrl:url => /^https?:\/\//i.test(String(url || ''))}},
+        mediaKindForRef:ref => ref?.kind || 'image',
+        resolveGeneratorRequestInputs:() => ({refs:[
+            {url:firstMedia.url, originalLocalUrl:firstMedia.originalLocalUrl, nodeId:firstMedia.id, kind:'image'},
+            {url:secondMedia.url, originalLocalUrl:secondMedia.originalLocalUrl, nodeId:secondMedia.id, kind:'image'},
+        ]}),
+        refreshNodes:ids => { refreshedIds = ids; },
+        scheduleSave:() => { saveCount += 1; },
+    };
+    vm.createContext(sandbox);
+    vm.runInContext(
+        sourceBetween(canvasSource, 'function isCloudHostedMediaUrl', 'function applyManualVideoUrlToCanvasRef'),
+        sandbox,
+    );
+
+    assert.equal(sandbox.deleteCanvasCloudLink(videoNode, videoNode.tempShLinks[0]), true);
+    assert.deepEqual(
+        JSON.parse(JSON.stringify(videoNode.tempShLinks)),
+        [
+            {source:firstLocalUrl, url:'https://example.com/manual.png', manual:true},
+            {source:secondLocalUrl, url:secondCloudUrl, service:'sudashui', kind:'image'},
+        ],
+    );
+    assert.equal(firstMedia.url, firstLocalUrl);
+    assert.equal(firstMedia.originalLocalUrl, firstLocalUrl);
+    assert.equal(secondMedia.url, secondCloudUrl);
+    assert.deepEqual(JSON.parse(JSON.stringify(refreshedIds)), [videoNode.id, firstMedia.id]);
+    assert.equal(saveCount, 1);
+    assert.equal(
+        sandbox.applyUploadedUrlToRefs([{url:firstCloudUrl, originalLocalUrl:firstLocalUrl, kind:'image'}], videoNode)[0].url,
+        firstLocalUrl,
+    );
+    assert.equal(
+        sandbox.applyUploadedUrlToRefs([{url:secondCloudUrl, originalLocalUrl:secondLocalUrl, kind:'image'}], videoNode)[0].url,
+        secondCloudUrl,
+    );
+    assert.match(canvasSource, /data-delete-cloud-link/);
+    assert.match(canvasSource, /data-lucide="trash-2"/);
+}
+
 function testCanvasRefsKeepLocalSource() {
     const normalizedSandbox = {mediaKindForRef:ref => ref?.kind || 'image'};
     vm.createContext(normalizedSandbox);
@@ -380,6 +440,7 @@ async function main() {
     await testCanvasCloudUploadRefreshesExpiredLink();
     await testCanvasFailedRefreshFallsBackToLocalSource();
     await testCanvasSourceUrlIsPersistedForLaterRefresh();
+    testCanvasCloudLinkDeleteClearsCacheAndRestoresSource();
     testCanvasRefsKeepLocalSource();
     await testSmartCanvasCloudUploadBypassesTransientCache();
     await testSmartCanvasFailedRefreshDropsExpiredCache();

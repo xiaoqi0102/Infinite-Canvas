@@ -225,6 +225,8 @@
         "canvas.cloudLink": { zh: "云端链接", en: "Cloud link" },
         "canvas.cloudLinkCopy": { zh: "复制云端链接", en: "Copy cloud link" },
         "canvas.cloudLinkCopyAria": { zh: "复制{label}的云端链接", en: "Copy the cloud link for {label}" },
+        "canvas.cloudLinkDelete": { zh: "删除云端链接", en: "Delete cloud link" },
+        "canvas.cloudLinkDeleteAria": { zh: "删除{label}的云端链接", en: "Delete the cloud link for {label}" },
         "canvas.cloudLinkOpenAria": { zh: "打开{label}的云端链接", en: "Open the cloud link for {label}" },
         "canvas.cloudLinkExpires": { zh: "有效期 {value}", en: "Expires in {value}" },
         "canvas.rerun": { zh: "再次运行", en: "Run Again" },

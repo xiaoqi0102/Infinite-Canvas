@@ -3796,9 +3796,10 @@ async function uploadMediaRefToCloud(ref){
     const kind = mediaKindForItem(ref);
     const sourceUrl = mediaRefSourceUrl(ref);
     if(!sourceUrl) throw new Error('没有可上传的媒体');
-    const existing = tempShUploadedUrlFor(sourceUrl);
-    if(existing && existing !== sourceUrl) return existing;
     if(window.StudioVideoApi?.isPublicHttpUrl?.(sourceUrl)) return sourceUrl;
+    transientSmartCloudLinks = (transientSmartCloudLinks || []).filter(item =>
+        item?.source !== sourceUrl && item?.originalLocalUrl !== sourceUrl && item?.url !== ref?.url
+    );
     const response = await fetch('/api/cloud-video/upload', {
         method:'POST',
         headers:{'Content-Type':'application/json'},
@@ -3871,10 +3872,8 @@ async function uploadCurrentSmartVideosToCloud(){
     savePromptDraftForCurrent();
     const refs = currentUploadMediaRefs(node);
     const localRefs = refs.filter(ref => {
-        const sourceUrl = ref?.sourceUrl || ref?.originalLocalUrl || ref?.url || '';
-        if(!sourceUrl) return false;
-        const uploaded = tempShUploadedUrlFor(sourceUrl);
-        return uploaded !== sourceUrl || !isCloudHostedMediaUrl(sourceUrl);
+        const sourceUrl = mediaRefSourceUrl(ref);
+        return sourceUrl && !isCloudHostedMediaUrl(sourceUrl);
     });
     if(!localRefs.length){
         toast('当前输入图片或视频已是云端链接');

@@ -3752,6 +3752,12 @@ function cloudUploadLinkForCanvasRef(node, ref){
         && (urls.has(String(item.url)) || urls.has(String(item.source || '')))
     ) || null;
 }
+function cloudUploadSourceUrlForCanvasRef(node, ref){
+    const cached = cloudUploadLinkForCanvasRef(node, ref);
+    return [ref?.originalLocalUrl, ref?.sourceUrl, cached?.source, ref?.url]
+        .map(value => String(value || '').trim())
+        .find(url => url && !isCloudHostedMediaUrl(url)) || '';
+}
 function applyUploadedUrlToRefs(refs, node){
     return (refs || []).map(ref => {
         if(!ref?.url) return ref;
@@ -3762,6 +3768,10 @@ function applyUploadedUrlToRefs(refs, node){
                 url:link.url,
                 originalLocalUrl:ref.originalLocalUrl || link.source || ref.url,
             };
+        }
+        const sourceUrl = cloudUploadSourceUrlForCanvasRef(node, ref);
+        if(sourceUrl && sourceUrl !== ref.url){
+            return {...ref, url:sourceUrl, originalLocalUrl:ref.originalLocalUrl || sourceUrl};
         }
         const url = tempShUploadedUrlForNode(node, ref.url);
         return url && url !== ref.url ? {...ref, url, originalLocalUrl:ref.originalLocalUrl || ref.url} : ref;
@@ -3782,13 +3792,13 @@ function clearManualVideoUrlForNode(node){
     node.manualVideoUrls = [];
     node.tempShLinks = (node.tempShLinks || []).filter(item => item?.manual !== true);
 }
-function applyTempShUrlToCanvasRef(ref, uploadedUrl){
+function applyTempShUrlToCanvasRef(ref, uploadedUrl, sourceUrl=''){
     if(!ref?.url || !uploadedUrl) return false;
     const source = nodes.find(n => n.id === ref.nodeId);
     if(!source) return false;
     const kind = mediaKindForRef(ref);
-    if(source.type === 'image' && source.url === ref.url){
-        source.originalLocalUrl = source.originalLocalUrl || source.url;
+    if(source.type === 'image'){
+        source.originalLocalUrl = sourceUrl || source.originalLocalUrl || source.url;
         source.url = uploadedUrl;
         source.mediaKind = kind;
         return true;
@@ -3798,7 +3808,7 @@ function applyTempShUrlToCanvasRef(ref, uploadedUrl){
             ? source.images[Number(ref.outputIndex)]
             : source.images.find(img => outputUrlValue(img) === ref.url);
         if(item && typeof item === 'object'){
-            item.originalLocalUrl = item.originalLocalUrl || outputUrlValue(item);
+            item.originalLocalUrl = sourceUrl || item.originalLocalUrl || outputUrlValue(item);
             item.url = uploadedUrl;
             item.kind = kind;
             return true;
@@ -3807,7 +3817,7 @@ function applyTempShUrlToCanvasRef(ref, uploadedUrl){
     if(Array.isArray(source.generatedOutputs)){
         const item = source.generatedOutputs.find(img => outputUrlValue(img) === ref.url);
         if(item && typeof item === 'object'){
-            item.originalLocalUrl = item.originalLocalUrl || outputUrlValue(item);
+            item.originalLocalUrl = sourceUrl || item.originalLocalUrl || outputUrlValue(item);
             item.url = uploadedUrl;
             item.kind = kind;
             return true;
@@ -3817,29 +3827,37 @@ function applyTempShUrlToCanvasRef(ref, uploadedUrl){
 }
 async function uploadCanvasMediaRefToCloud(node, ref){
     const kind = mediaKindForRef(ref);
-    if(!ref?.url) throw new Error('没有可上传的媒体');
-    if(window.StudioVideoApi?.isPublicHttpUrl?.(ref.url)) return ref.url;
-    const response = await fetch('/api/cloud-video/upload', {
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({url:ref.url, service:'auto'})
-    });
-    if(!response.ok) throw new Error(await responseErrorMessage(response, '云端上传失败'));
-    const data = await response.json();
-    const uploadedUrl = data.url || '';
-    if(!uploadedUrl) throw new Error('云端没有返回链接');
-    node.tempShLinks = [
-        ...(node.tempShLinks || []).filter(item => item?.source !== ref.url),
-        {source:ref.url, url:uploadedUrl, expires:data.expires || '', service:data.service || '', kind}
-    ];
-    applyTempShUrlToCanvasRef(ref, uploadedUrl);
-    return uploadedUrl;
+    const sourceUrl = cloudUploadSourceUrlForCanvasRef(node, ref);
+    if(!sourceUrl) throw new Error('没有可上传的本地媒体');
+    node.tempShLinks = (node.tempShLinks || []).filter(item =>
+        item?.source !== sourceUrl && item?.url !== ref?.url
+    );
+    try {
+        const response = await fetch('/api/cloud-video/upload', {
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({url:sourceUrl, service:'auto'})
+        });
+        if(!response.ok) throw new Error(await responseErrorMessage(response, '云端上传失败'));
+        const data = await response.json();
+        const uploadedUrl = data.url || '';
+        if(!uploadedUrl) throw new Error('云端没有返回链接');
+        node.tempShLinks = [
+            ...(node.tempShLinks || []),
+            {source:sourceUrl, url:uploadedUrl, expires:data.expires || '', service:data.service || '', kind}
+        ];
+        applyTempShUrlToCanvasRef(ref, uploadedUrl, sourceUrl);
+        return uploadedUrl;
+    } catch(error) {
+        applyTempShUrlToCanvasRef(ref, sourceUrl, sourceUrl);
+        throw error;
+    }
 }
 async function uploadCanvasVideosToCloud(nodeId){
     const node = nodes.find(n => n.id === nodeId);
     if(!node) return [];
     const refs = resolveGeneratorRequestInputs(node).refs.filter(ref => ref?.url && ['image','video'].includes(mediaKindForRef(ref)));
-    const localRefs = refs.filter(ref => ref?.url && !isCloudHostedMediaUrl(ref.url));
+    const localRefs = refs.filter(ref => cloudUploadSourceUrlForCanvasRef(node, ref));
     if(!localRefs.length){
         showErrorModal('没有需要上传的本地图片或视频', '上传云端');
         return [];
@@ -3866,7 +3884,8 @@ async function uploadCanvasVideosToCloud(nodeId){
         return urls;
     } catch(e) {
         node.tempShUploading = false;
-        refreshNodes([node.id]);
+        refreshNodes([node.id, ...localRefs.map(ref => ref.nodeId).filter(Boolean)]);
+        scheduleSave();
         throw e;
     }
 }
@@ -6781,6 +6800,8 @@ function normalizedPromptMentionRef(raw={}){
     const kind = ['image','video','audio'].includes(String(raw.kind || '').toLowerCase()) ? String(raw.kind).toLowerCase() : mediaKindForRef(raw);
     const url = String(raw.url || '').trim();
     const name = String(raw.name || raw.label || kind || 'asset').trim() || 'asset';
+    const originalLocalUrl = String(raw.originalLocalUrl || raw.original_local_url || '').trim();
+    const sourceUrl = String(raw.sourceUrl || raw.source_url || '').trim();
     const assetUris = Array.isArray(raw.assetUris) ? raw.assetUris.filter(Boolean).map(String)
         : Array.isArray(raw.asset_uris) ? raw.asset_uris.filter(Boolean).map(String) : [];
     return {
@@ -6793,6 +6814,8 @@ function normalizedPromptMentionRef(raw={}){
         ...(raw.nodeId ? {nodeId:String(raw.nodeId)} : {}),
         ...(raw.outputIndex !== undefined && raw.outputIndex !== null && raw.outputIndex !== '' ? {outputIndex:Number(raw.outputIndex)} : {}),
         ...(raw.assetId ? {assetId:String(raw.assetId)} : {}),
+        ...(originalLocalUrl ? {originalLocalUrl} : {}),
+        ...(sourceUrl ? {sourceUrl} : {}),
         ...(assetUris.length ? {assetUris} : {})
     };
 }
@@ -11160,20 +11183,20 @@ function mediaRefsFromNode(node){
     if(!node) return [];
     if(node.type === 'image' && node.url){
         const kind = mediaKindForNode(node);
-        return [{url:node.url, name:node.name || kind, role:node.role || '', kind}];
+        return [{url:node.url, name:node.name || kind, role:node.role || '', kind, originalLocalUrl:node.originalLocalUrl || ''}];
     }
     if(node.type === 'group'){
         return (node.items || [])
             .map(id => nodes.find(x => x.id === id))
             .filter(x => x?.type === 'image' && x?.url)
-            .map(item => ({url:item.url, name:item.name || mediaKindForNode(item), role:item.role || '', kind:mediaKindForNode(item)}));
+            .map(item => ({url:item.url, name:item.name || mediaKindForNode(item), role:item.role || '', kind:mediaKindForNode(item), originalLocalUrl:item.originalLocalUrl || ''}));
     }
     if(node.type === 'output'){
         return (node.images || []).map((item, i) => {
             const url = outputUrlValue(item);
             if(!url) return null;
             const kind = mediaKindForOutputItem(item);
-            return {url, name:outputImageName(url) || `output-${i + 1}`, kind, nodeId:node.id, outputIndex:i};
+            return {url, name:outputImageName(url) || `output-${i + 1}`, kind, nodeId:node.id, outputIndex:i, originalLocalUrl:item?.originalLocalUrl || ''};
         }).filter(Boolean);
     }
     if(CANVAS_MEDIA_OUTPUT_TYPES.includes(node.type)) return generatedImageRefs(node);
@@ -11188,7 +11211,7 @@ function generatorSources(gen){
             if(found){
                 const last = outputUrlValue(found.item);
                 const kind = mediaKindForOutputItem(found.item);
-                return {id:n.id, type:'outputImage', label:'上游输出', preview:last, refs:[{url:last, name:'output.png', kind, nodeId:n.id, outputIndex:found.index}], prompt:''};
+                return {id:n.id, type:'outputImage', label:'上游输出', preview:last, refs:[{url:last, name:'output.png', kind, nodeId:n.id, outputIndex:found.index, originalLocalUrl:found.item?.originalLocalUrl || ''}], prompt:''};
             }
         }
         if(CANVAS_MEDIA_OUTPUT_TYPES.includes(n.type)){
@@ -11199,14 +11222,14 @@ function generatorSources(gen){
                     type:'generatedImage',
                     label:`上游生成 ${i + 1}`,
                     preview:ref.url,
-                    refs:[ref],
+                    refs:[{...ref, nodeId:n.id}],
                     prompt:''
                 }));
             }
         }
         if(n.type === 'image' && n.url) {
             const kind = mediaKindForNode(n);
-            return {id:n.id, type:kind, nodeId:n.id, label:n.name || kind, preview:n.url, refs:[{url:n.url, name:n.name || kind, role:n.role || '', kind, nodeId:n.id}], prompt:''};
+            return {id:n.id, type:kind, nodeId:n.id, label:n.name || kind, preview:n.url, refs:[{url:n.url, name:n.name || kind, role:n.role || '', kind, nodeId:n.id, originalLocalUrl:n.originalLocalUrl || ''}], prompt:''};
         }
         if(n.type === 'group') {
             const items = (n.items || []).map(id => nodes.find(x => x.id === id)).filter(Boolean);
@@ -11217,7 +11240,7 @@ function generatorSources(gen){
                 imageId:img.id,
                 label:img.name || mediaKindForNode(img),
                 preview:img.url,
-                refs:[{url:img.url, name:img.name || mediaKindForNode(img), role:img.role || '', kind:mediaKindForNode(img), nodeId:img.id}],
+                refs:[{url:img.url, name:img.name || mediaKindForNode(img), role:img.role || '', kind:mediaKindForNode(img), nodeId:img.id, originalLocalUrl:img.originalLocalUrl || ''}],
                 prompt:''
             }));
             const promptNodes = items.filter(x => x.type === 'prompt' && (x.text || x.promptRichText));

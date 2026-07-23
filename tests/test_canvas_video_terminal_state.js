@@ -21,7 +21,7 @@ const sandbox = {
     nodes:[generator, output],
     findPendingTask:taskId => {
         const pending = output._pending.find(item => item.canvasTaskId === taskId);
-        return pending ? {out:output, pending} : null;
+        return pending ? {host:output, out:output, pending} : null;
     },
     nowMs:() => 2000,
     extractUpstreamTaskId:() => '',

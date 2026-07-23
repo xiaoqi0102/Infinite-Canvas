@@ -44,6 +44,278 @@ async function testParallelRoundsStopAtFirstError() {
     assert.deepEqual(crossedBoundary, [], '已在执行的 worker 必须在下一个边界停止');
 }
 
+function testParallelFailureContextKeepsOriginalNode() {
+    const nodeA = {id:'node-a'};
+    const nodeB = {id:'node-b'};
+    const sandbox = {nodes:[nodeA, nodeB]};
+    vm.runInNewContext(
+        sourceBetween('function cascadeErrorWithFailureContext', 'async function runLimitedCascadeRounds'),
+        sandbox,
+    );
+
+    const originalError = new Error('node A failed');
+    const firstContext = {nodeId:'node-a', round:1, totalRounds:2, loopIndex:10, roundLabel:'10/13'};
+    const sameError = sandbox.cascadeErrorWithFailureContext(originalError, firstContext);
+    sandbox.cascadeErrorWithFailureContext(sameError, {
+        nodeId:'node-b',
+        round:2,
+        totalRounds:2,
+        loopIndex:13,
+        roundLabel:'13/13',
+    });
+
+    assert.equal(sameError, originalError, '必须保留首个原始错误对象');
+    assert.deepEqual(
+        JSON.parse(JSON.stringify(originalError.cascadeFailure)),
+        firstContext,
+        '其它 worker 不能覆盖首错的节点和轮次',
+    );
+    assert.equal(
+        sandbox.cascadeFailureNodeForError(originalError, 'node-b', nodeB),
+        nodeA,
+        '失败节点必须来自错误上下文而不是共享 currentNodeId',
+    );
+    assert.match(
+        source,
+        /const node = cascadeFailureNodeForError\(err, nodeId, target\)/,
+        '并行失败收尾必须使用错误携带的节点上下文',
+    );
+}
+
+async function testIntermediateVideoTaskIsPersistedOnGenerator() {
+    const node = {
+        id:'video-intermediate',
+        type:'video',
+        apiProvider:'comfly',
+        model:'video-model',
+        duration:5,
+        aspectRatio:'16:9',
+    };
+    let saveCompleted = false;
+    let createCalls = 0;
+    let pollCalls = 0;
+    const sandbox = {
+        nodes:[node],
+        window:{},
+        tr:key => key,
+        trf:key => key,
+        canvasVideoBlockingTasksForNode:() => [],
+        syncCanvasVideoNodeState:() => {},
+        normalizeMegabyVideoNodeSettings:() => {},
+        cascadeTargetIdFromOptions:options => options?.cascadeTargetId || '',
+        resolveGeneratorRequestInputs:() => ({
+            modelPrompt:'生成视频',
+            displayPrompt:'生成视频',
+            refs:[],
+            promptParts:[],
+        }),
+        validateMentionRequestInputs:() => {},
+        applyUploadedUrlToRefs:value => value,
+        imageRefsOnly:() => [],
+        videoRefsOnly:() => [],
+        audioRefsOnly:() => [],
+        outputForNode:() => null,
+        uid:() => 'pending-intermediate',
+        runSnapshot:videoNode => ({node:{id:videoNode.id}, refs:[]}),
+        manualVideoUrlForNode:() => '',
+        resolveVideoProviderId:value => value,
+        videoProviderConfig:() => ({}),
+        tempShUploadedUrlForNode:() => '',
+        validateCanvasSudashuiVideoRequest:() => ({
+            duration:5,
+            aspectRatio:'16:9',
+            officialAssetIndexes:[],
+        }),
+        nowMs:() => 1000,
+        createCanvasVideoTask:async () => {
+            createCalls += 1;
+            return {task_id:'canvas-video-intermediate', status:'queued'};
+        },
+        addGenerationLog:() => {},
+        makePendingForRun:(id, run, videoNode, context, extra) => ({
+            id,
+            run,
+            ...context,
+            ...extra,
+        }),
+        refreshRunNodes:() => {},
+        scheduleSave:() => {},
+        saveCanvas:async () => {
+            saveCompleted = true;
+        },
+        pollCanvasVideoTask:async taskId => {
+            pollCalls += 1;
+            assert.equal(saveCompleted, true, '进入长轮询前必须先持久化任务');
+            assert.equal(taskId, 'canvas-video-intermediate');
+            assert.equal(node._pending?.[0]?.canvasTaskId, taskId);
+            node._pending = [];
+            return 'succeeded';
+        },
+        pendingById:(host, id) => (host?._pending || []).find(item => item.id === id),
+        collectRunMeta:() => ({runMs:0, run:{}}),
+        shouldKeepCanvasVideoPending:() => false,
+        isCascadeAbortError:() => false,
+        cascadeAbortError:message => new Error(message),
+        cascadeStopMessage:() => 'stopped',
+        showErrorModal:() => {},
+        alert:() => {},
+    };
+    vm.runInNewContext(
+        sourceBetween('async function runVideoNode', 'async function uploadCanvasUrlToComfy'),
+        sandbox,
+    );
+
+    await sandbox.runVideoNode(node.id, {cascade:true, cascadeTargetId:'cascade-target'});
+    assert.equal(createCalls, 1);
+    assert.equal(pollCalls, 1);
+    assert.equal(node._pending.length, 0);
+}
+
+async function testCascadeRejectsBlockingPending() {
+    const node = {id:'video-blocked', type:'video', running:false};
+    let createCalls = 0;
+    const sandbox = {
+        nodes:[node],
+        tr:key => key,
+        canvasVideoBlockingTasksForNode:() => [{pending:{canvasTaskId:'existing-task'}}],
+        syncCanvasVideoNodeState:() => {},
+        createCanvasVideoTask:async () => {
+            createCalls += 1;
+        },
+    };
+    vm.runInNewContext(
+        sourceBetween('async function runVideoNode', 'async function uploadCanvasUrlToComfy'),
+        sandbox,
+    );
+
+    await assert.rejects(
+        sandbox.runVideoNode(node.id, {cascade:true}),
+        error => error.message === 'canvas.videoPendingExists',
+    );
+    assert.equal(createCalls, 0, '已有未分离任务时级联不能重复提交');
+}
+
+function testNodeHostedVideoTaskCompletesAndResumes() {
+    const pending = {
+        id:'pending-node-hosted',
+        canvasTaskId:'canvas-video-node-hosted',
+        canvasTaskType:'online-video',
+        startedAt:1000,
+        run:{node:{id:'video-node-hosted'}},
+    };
+    const node = {
+        id:'video-node-hosted',
+        type:'video',
+        _pending:[pending],
+    };
+    let appendCalls = 0;
+    let mergeCalls = 0;
+    let pollCalls = 0;
+    const sandbox = {
+        nodes:[node],
+        tr:key => key,
+        resultMediaUrls:value => value?.videos || [],
+        outputUrlValue:value => typeof value === 'string' ? value : value?.url || '',
+        canvasVideoOutputItems:value => (value?.videos || []).map(url => ({url, kind:'video'})),
+        nowMs:() => 2000,
+        requestMetaFromResult:() => ({}),
+        appendOutputImages:() => { appendCalls += 1; },
+        mergeGeneratedOutputs:(videoNode, outputs) => {
+            mergeCalls += 1;
+            videoNode.generatedOutputs = outputs;
+        },
+        addGenerationLog:() => {},
+        refreshRunNodes:() => {},
+        scheduleSave:() => {},
+        pollCanvasImageTask:() => {},
+        pollCanvasVideoTask:taskId => {
+            pollCalls += 1;
+            assert.equal(taskId, pending.canvasTaskId);
+        },
+    };
+    vm.runInNewContext(
+        sourceBetween('function findPendingTask', 'async function createCanvasImageTask'),
+        sandbox,
+    );
+    vm.runInNewContext(
+        sourceBetween('function completeCanvasVideoTask', 'function failCanvasVideoTask'),
+        sandbox,
+    );
+    vm.runInNewContext(
+        sourceBetween('function resumeCanvasImageTasks', 'function renderOutputMedia'),
+        sandbox,
+    );
+
+    const found = sandbox.findPendingTask(pending.canvasTaskId);
+    assert.equal(found.host, node);
+    assert.equal(found.out, null);
+    sandbox.resumeCanvasImageTasks();
+    assert.equal(pollCalls, 1, '重新加载后必须恢复节点自身保存的视频任务');
+
+    sandbox.completeCanvasVideoTask(pending.canvasTaskId, {videos:['/output/video.mp4']});
+    assert.equal(node._pending.length, 0);
+    assert.equal(appendCalls, 0, '中间节点不能写入不存在的 Output');
+    assert.equal(mergeCalls, 1);
+    assert.equal(node.generatedOutputs[0].url, '/output/video.mp4');
+    assert.equal(node.runStatus, 'done');
+}
+
+async function testNodeHostedVideoTaskCanBeQueried() {
+    const pending = {
+        id:'pending-node-query',
+        canvasTaskId:'canvas-video-node-query',
+        canvasTaskType:'online-video',
+        recoverTaskId:'canvas-video-node-query',
+        failed:true,
+        run:{node:{id:'video-node-query'}},
+    };
+    const node = {
+        id:'video-node-query',
+        type:'video',
+        _pending:[pending],
+    };
+    const completed = [];
+    const sandbox = {
+        nodes:[node],
+        findPendingHostById:pendingId => sandbox.nodes.find(item => (item._pending || []).some(task => task.id === pendingId)),
+        pendingById:(host, pendingId) => (host?._pending || []).find(task => task.id === pendingId),
+        fetch:async () => ({
+            ok:true,
+            status:200,
+            json:async () => ({status:'succeeded', result:{videos:['/output/recovered.mp4']}}),
+        }),
+        refreshNodes:() => {},
+        completeCanvasVideoTask:(taskId, result) => completed.push({taskId, result}),
+        failCanvasVideoTask:() => {},
+        showErrorModal:() => {},
+        responseErrorMessage:async () => 'query failed',
+        cascadeBackendRestartMessage:() => 'missing task',
+        missingCanvasVideoTaskData:() => ({status:'failed', status_code:404}),
+        setStatus:() => {},
+        pollCanvasVideoTask:() => {},
+        providerIdForPending:() => 'provider',
+        extractUpstreamTaskId:() => '',
+        completeRecoverPendingOutput:() => {},
+        scheduleSave:() => {},
+        tr:key => key,
+    };
+    vm.runInNewContext(
+        sourceBetween('async function queryRecoverPendingOutput', 'function sleep'),
+        sandbox,
+    );
+
+    await sandbox.queryRecoverPendingOutput(pending.id);
+    assert.equal(completed.length, 1);
+    assert.equal(completed[0].taskId, pending.canvasTaskId);
+    assert.equal(completed[0].result.videos[0], '/output/recovered.mp4');
+    assert.equal(pending.querying, false);
+    assert.match(
+        source,
+        /video-node-pending[\s\S]*?bindOutputWrap\(item, node\)/,
+        '中间视频节点必须渲染并绑定 pending 查询与删除入口',
+    );
+}
+
 function createVideoStateSandbox() {
     const generator = {id:'video-1', type:'video', running:false};
     const output = {
@@ -67,7 +339,7 @@ function createVideoStateSandbox() {
         isCascadeAbortError:err => Boolean(err?.isCascadeAbort),
         findPendingTask:taskId => {
             const pending = output._pending.find(item => item.canvasTaskId === taskId);
-            return pending ? {out:output, pending} : null;
+            return pending ? {host:output, out:output, pending} : null;
         },
         refreshRunNodes:(gen, out) => refreshed.push([gen?.id, out?.id]),
         scheduleSave:() => { saves += 1; },
@@ -90,7 +362,9 @@ function testDetachedTaskRemainsTracked() {
     assert.equal(pending.cascadeTargetId, undefined, '独立轮询不能继续携带已停止级联的信号');
     assert.equal(pending.canvasTaskStatus, 'polling');
     assert.equal(pending.recoverTaskId, 'task-1');
-    assert.equal(state.generator.running, true, '仍有 pending 时节点必须保持占用，避免重复提交');
+    assert.equal(pending.detachedFromCascade, true);
+    assert.equal(state.generator.running, false, '停止后后台任务不能继续占用前台运行锁');
+    assert.equal(state.sandbox.canvasVideoBlockingTasksForNode(state.generator.id).length, 0);
     assert.equal(state.saves, 1, '分离后的 pending 状态必须持久化');
 
     const abortError = Object.assign(new Error('stopped'), {isCascadeAbort:true});
@@ -131,6 +405,16 @@ function testConcurrentPendingStateAggregation() {
 
     state.sandbox.syncCanvasVideoNodeState(state.generator, {status:'removed'});
     assert.equal(state.generator.runStatus, '');
+
+    state.generator.runStatus = 'done';
+    state.generator.runError = '';
+    state.sandbox.syncCanvasVideoNodeState(state.generator, {
+        status:'failed',
+        error:'detached task failed late',
+        detached:true,
+    });
+    assert.equal(state.generator.runStatus, 'done', '后台分离任务不能覆盖后来一次运行的状态');
+    assert.equal(state.generator.runError, '');
 }
 
 async function runPollScenario({response, thrown, cascadeAbort=false}) {
@@ -138,7 +422,7 @@ async function runPollScenario({response, thrown, cascadeAbort=false}) {
     const pending = {canvasTaskId:'task-1', cascadeTargetId:'cascade-1'};
     const sandbox = {
         activeCanvasTaskPolls:new Set(),
-        findPendingTask:() => ({out:{id:'output-1'}, pending}),
+        findPendingTask:() => ({host:{id:'output-1'}, out:{id:'output-1'}, pending}),
         ensureCascadeActive:() => {
             if(cascadeAbort){
                 const error = new Error('stopped');
@@ -243,6 +527,11 @@ function testPendingDeletePersists() {
 
 (async () => {
     await testParallelRoundsStopAtFirstError();
+    testParallelFailureContextKeepsOriginalNode();
+    await testIntermediateVideoTaskIsPersistedOnGenerator();
+    await testCascadeRejectsBlockingPending();
+    testNodeHostedVideoTaskCompletesAndResumes();
+    await testNodeHostedVideoTaskCanBeQueried();
     testDetachedTaskRemainsTracked();
     testConcurrentPendingStateAggregation();
     await testPollTerminalAndRecoverableErrors();

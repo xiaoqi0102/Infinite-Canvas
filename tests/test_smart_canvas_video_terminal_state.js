@@ -3,7 +3,7 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 
 const source = fs.readFileSync('static/js/smart-canvas.js', 'utf8');
-const pollStart = source.indexOf('async function pollSmartCanvasVideoTask');
+const pollStart = source.indexOf('async function smartCanvasVideoResponseError');
 const helperEnd = source.indexOf('function finalizeSmartPendingTask', pollStart);
 
 assert.ok(pollStart >= 0 && helperEnd > pollStart, '无法定位智能画布视频任务状态函数');
@@ -12,6 +12,7 @@ const sandbox = {
     activeSmartTaskPolls:new Map(),
     fetch:async () => ({
         ok:true,
+        status:200,
         json:async () => ({
             status:'failed',
             error:'视频生成任务失败：MODERATION_ERROR；task_failed',
@@ -33,6 +34,30 @@ vm.runInNewContext(source.slice(pollStart, helperEnd), sandbox);
         error => error.canvasTaskFailed === true
             && error.message.includes('MODERATION_ERROR')
             && error.requestDetails?.attempts?.length === 0,
+    );
+    assert.equal(sandbox.activeSmartTaskPolls.size, 0);
+
+    sandbox.fetch = async () => ({
+        ok:false,
+        status:404,
+    });
+    await assert.rejects(
+        sandbox.pollSmartCanvasVideoTask('canvas_video_missing'),
+        error => error.canvasTaskFailed === true
+            && error.canvasTaskMissing === true
+            && error.message === '请求失败',
+    );
+    assert.equal(sandbox.activeSmartTaskPolls.size, 0);
+
+    sandbox.fetch = async () => ({
+        ok:false,
+        status:503,
+    });
+    await assert.rejects(
+        sandbox.pollSmartCanvasVideoTask('canvas_video_temporary_error'),
+        error => error.canvasTaskFailed !== true
+            && error.canvasTaskMissing !== true
+            && error.message === '请求失败',
     );
     assert.equal(sandbox.activeSmartTaskPolls.size, 0);
 

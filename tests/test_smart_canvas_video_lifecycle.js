@@ -109,6 +109,50 @@ async function testPendingFailureSemantics() {
     assert.equal(warnings.length, 1, '后台恢复失败应被 catch 消费并记录，而不是产生 unhandledrejection');
 }
 
+async function testManualQueryMissingVideoClearsPending() {
+    const node = {
+        id:'video-missing',
+        running:false,
+        queued:false,
+        pending:1,
+        pendingTasks:[{
+            taskId:'canvas_video_missing',
+            recoverTaskId:'canvas_video_missing',
+            kind:'video',
+            failed:true,
+        }],
+        images:[],
+    };
+    let saves = 0;
+    const sandbox = {
+        nodes:[node],
+        fetch:async () => ({ok:false, status:404}),
+        smartPendingTasks:value => Array.isArray(value?.pendingTasks) ? value.pendingTasks.filter(task => task?.taskId) : [],
+        liveSmartNode:value => sandbox.nodes.find(item => item.id === value?.id) || value,
+        smartResponseErrorMessage:async () => '视频任务不存在',
+        tr:key => key,
+        render:() => {},
+        scheduleSave:() => { saves += 1; },
+        toast:() => {},
+    };
+    vm.createContext(sandbox);
+    vm.runInContext(
+        sourceBetween('function providerIdForSmartTask', 'function startJimengPoll'),
+        sandbox
+    );
+    vm.runInContext(
+        sourceBetween('function removeSmartPendingTask', 'function preserveSmartVideoPendingTask'),
+        sandbox
+    );
+
+    await sandbox.querySmartImageTaskNow(node.id, 'canvas_video_missing');
+    assert.equal(node.pendingTasks, undefined, '404 后必须删除不可恢复的视频 pending');
+    assert.equal(node.pending, 0);
+    assert.equal(node.running, false);
+    assert.equal(node.queued, false);
+    assert.equal(saves, 1);
+}
+
 async function testCascadeStopKeepsSubmittedVideo() {
     const resume = deferred();
     const node = {
@@ -228,6 +272,7 @@ async function testParallelFailureStopsNewRounds() {
 
 (async () => {
     await testPendingFailureSemantics();
+    await testManualQueryMissingVideoClearsPending();
     await testCascadeStopKeepsSubmittedVideo();
     await testParallelFailureStopsNewRounds();
     console.log('smart canvas video lifecycle ok');

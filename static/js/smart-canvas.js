@@ -15677,6 +15677,14 @@ function isSmartTerminalTaskError(message){
     const text = String(message || '').toLowerCase();
     return /(insufficient[_\s-]*quota|insufficient\s+credits?|credits[_\s-]*remaining|not\s+enough\s+credits?|quota\s+exceeded|payment\s+required|billing[_\s-]*(?:error|failed|failure|disabled|issue|problem)|billing\s+account\s+(?:disabled|inactive|suspended)|余额不足|额度不足)/i.test(text);
 }
+async function smartCanvasVideoResponseError(response){
+    const error = new Error(await smartResponseErrorMessage(response, tr('smart.errRunFailed')));
+    if(response?.status === 404){
+        error.canvasTaskFailed = true;
+        error.canvasTaskMissing = true;
+    }
+    return error;
+}
 async function fetchImageTaskQuery(providerId, taskId){
     return fetch('/api/image-task-query', {
         method:'POST',
@@ -15705,7 +15713,7 @@ async function querySmartImageTaskNow(nodeId, localTaskId){
     try {
         if(task.kind === 'video'){
             const res = await fetch(`/api/canvas-video-tasks/${encodeURIComponent(task.taskId || localTaskId)}`);
-            if(!res.ok) throw new Error(await smartResponseErrorMessage(res, tr('smart.errRunFailed')));
+            if(!res.ok) throw await smartCanvasVideoResponseError(res);
             const data = await res.json();
             if(data.status === 'succeeded'){
                 task.failed = false;
@@ -15757,8 +15765,13 @@ async function querySmartImageTaskNow(nodeId, localTaskId){
             toast(task.error);
         }
     } catch(e){
-        task.error = e.message || '查询失败';
-        toast(task.error.slice(0, 160));
+        const message = e.message || '查询失败';
+        if(task.kind === 'video' && e?.canvasTaskFailed){
+            removeSmartPendingTask(node, task.taskId || localTaskId);
+        } else {
+            task.error = message;
+        }
+        toast(message.slice(0, 160));
     } finally {
         const latest = smartPendingTasks(node).find(item => item.taskId === localTaskId);
         if(latest) latest.querying = false;
@@ -15851,7 +15864,7 @@ async function pollSmartCanvasVideoTask(taskId, onProgress=null){
     const promise = (async () => {
         for(let i = 0; i < 1440; i++){
             const task = await fetch(`/api/canvas-video-tasks/${encodeURIComponent(taskId)}`).then(async r => {
-                if(!r.ok) throw new Error(await smartResponseErrorMessage(r, tr('smart.errRunFailed')));
+                if(!r.ok) throw await smartCanvasVideoResponseError(r);
                 return r.json();
             });
             if(typeof onProgress === 'function') onProgress(task);

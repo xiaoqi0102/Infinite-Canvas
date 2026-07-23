@@ -242,6 +242,8 @@ body.theme-dark .node-run-status.failed { background:rgba(239,68,68,.22); color:
 .node.sized.video-node .input-list { flex:1; min-height:64px; max-height:none; }
 .node.sized.video-node .gen-run-row,
 .node.sized.video-node .gen-btn { margin-top:auto; }
+.video-node-pending { display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:8px; margin-top:8px; }
+.video-node-pending .output-img-wrap.loading-wrap { max-width:none; min-height:112px; aspect-ratio:auto; }
 .prompt-list { min-width:0; }
 .prompt-preview-card { min-width:0; display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2; overflow:hidden; overflow-wrap:anywhere; white-space:pre-wrap; padding:8px 12px; border:1px solid var(--line-2); border-radius:12px; background:var(--soft); color:var(--muted); font-size:11px; line-height:1.5; cursor:zoom-in; user-select:text; }
 .prompt-preview-card + .prompt-preview-card { margin-top:6px; }

@@ -1477,11 +1477,11 @@ function scheduleViewportSave(){
     saveLocalViewport();
 }
 function refreshOutputTimer(){
-    const hasPending = nodes.some(n => n.type === 'output' && (n._pending || []).length);
+    const hasPending = nodes.some(n => (n._pending || []).length);
     if(hasPending && !outputTimer){
         outputTimer = setInterval(() => {
             const pendingById = new Map();
-            nodes.filter(n => n.type === 'output').forEach(node => {
+            nodes.forEach(node => {
                 (node._pending || []).forEach(p => pendingById.set(p.id, p));
             });
             if(pendingById.size){
@@ -9293,6 +9293,7 @@ function renderVideoBody(node){
     const resolutionOptionsHtml = resolutionOptions.map(value => `<option value="${escapeAttr(value)}">${escapeHtml(value ? String(value).toUpperCase() : 'Auto')}</option>`).join('');
     const resolutionLabel = profile.resolutionLabel ? trf('canvas.videoResolutionModelValue', {resolution:profile.resolutionLabel}) : tr('canvas.videoResolutionModelAuto');
     const officialImages = currentImageRefs.map((ref, index) => `${index + 1}. ${ref.name || `图${index + 1}`}`).join(' · ');
+    const nodePendingHtml = (node._pending || []).map(renderPendingOutput).join('');
     wrap.innerHTML = `
         <div class="prompt-list mb-3"></div>
         <div class="video-input-head">
@@ -9349,8 +9350,10 @@ function renderVideoBody(node){
             <button class="gen-btn ${node.running ? 'running' : ''}" ${node.running ? 'disabled' : ''}><i data-lucide="clapperboard" class="w-4 h-4"></i>${node.running ? tr('canvas.generating') : tr('canvas.videoGenerate')}</button>
             ${cascadeBtnHtml(node)}
         </div>
+        ${nodePendingHtml ? `<div class="video-node-pending">${nodePendingHtml}</div>` : ''}
         ${retryBarHtml(node)}
     `;
+    wrap.querySelectorAll('.video-node-pending .output-img-wrap').forEach(item => bindOutputWrap(item, node));
     const providerSelect = wrap.querySelector('.video-provider');
     const modelSelect = wrap.querySelector('.video-model');
     const durationSelect = wrap.querySelector('.video-duration');
@@ -11636,10 +11639,11 @@ function validateCanvasSudashuiVideoRequest(node, profile, refs, videoUrls, audi
 async function runVideoNode(nodeId, opts={}){
     const node = nodes.find(n => n.id === nodeId);
     if(!node) return;
-    const existingVideoTasks = canvasVideoPendingTasksForNode(nodeId);
-    if(existingVideoTasks.length && !opts.cascade){
+    const existingVideoTasks = canvasVideoBlockingTasksForNode(nodeId);
+    if(existingVideoTasks.length){
         syncCanvasVideoNodeState(node);
         const message = tr('canvas.videoPendingExists');
+        if(opts.cascade) throw new Error(message);
         setStatus(message);
         showErrorModal(message, tr('canvas.apiFailed'));
         return;
@@ -11663,6 +11667,7 @@ async function runVideoNode(nodeId, opts={}){
     const audioRefs = audioRefsOnly(mediaRefs);
     if(!prompt){ alert(tr('canvas.videoNeedsPrompt')); return; }
     let out = outputForNode(node, 460);
+    const pendingHost = out || node;
     const pendingId = uid('p');
     const run = runSnapshot(node, displayPrompt, mediaRefs, prompt, inputs.promptParts);
     const manualVideoUrl = manualVideoUrlForNode(node);
@@ -11729,23 +11734,8 @@ async function runVideoNode(nodeId, opts={}){
         run.localTaskId = taskInfo.task_id;
         run.request = {...(run.request || {}), task_id:taskInfo.task_id, provider_id:payload.provider_id};
         addGenerationLog({run, outputs:[], runMs:nowMs() - startedAt, status:taskInfo.status || 'queued'});
-        if(!out){
-            const result = await waitCanvasVideoTaskResult(taskInfo.task_id, {cascadeTargetId, run, startedAt});
-            const outputUrls = canvasVideoOutputItems(result);
-            if(!outputUrls.length) throw new Error(tr('canvas.videoFailed'));
-            run.request = requestMetaFromResult(result);
-            run.requestDetails = result?.request_details || null;
-            mergeGeneratedOutputs(node, outputUrls, Boolean(opts.cascade));
-            addGenerationLog({run, outputs:outputUrls, runMs:nowMs() - startedAt});
-            node.runStatus = 'done';
-            node.runError = '';
-            node.running = false;
-            refreshRunNodes(node, out);
-            scheduleSave();
-            return;
-        }
-        out._pending = [
-            ...(out._pending || []),
+        pendingHost._pending = [
+            ...(pendingHost._pending || []),
             makePendingForRun(pendingId, run, node, {refs, cascadeTargetId}, {
                 canvasTaskId:taskInfo.task_id,
                 canvasTaskType:'online-video',
@@ -11754,7 +11744,7 @@ async function runVideoNode(nodeId, opts={}){
                 appendGenerated:Boolean(opts.cascade)
             })
         ];
-        refreshRunNodes(node, out);
+        refreshRunNodes(node, out || pendingHost);
         scheduleSave();
         await saveCanvas();
         const status = await pollCanvasVideoTask(taskInfo.task_id, {cascadeTargetId});
@@ -11762,12 +11752,12 @@ async function runVideoNode(nodeId, opts={}){
         if(status === 'failed') throw new Error(node.runError || tr('canvas.videoFailed'));
     } catch(err) {
         if(err?.requestDetails) run.requestDetails = err.requestDetails;
-        const pending = pendingById(out, pendingId);
+        const pending = pendingById(pendingHost, pendingId);
         const keepPending = shouldKeepCanvasVideoPending(pending, err, taskInfo);
         if(pending && !keepPending){
-            const meta = collectRunMeta(out, pendingId);
+            const meta = collectRunMeta(pendingHost, pendingId);
             addGenerationLog({run, outputs:[], runMs:meta.runMs || 0, error:err.message || String(err)});
-            if(out) out._pending = (out._pending || []).filter(p => p.id !== pendingId);
+            pendingHost._pending = (pendingHost._pending || []).filter(p => p.id !== pendingId);
         } else if(!pending && !taskInfo) {
             addGenerationLog({run, outputs:[], runMs:nowMs() - startedAt, error:err.message || String(err)});
         }
@@ -11788,7 +11778,7 @@ async function runVideoNode(nodeId, opts={}){
         showErrorModal(err.message || tr('canvas.videoFailed'), tr('canvas.apiFailed'));
     } finally {
         syncCanvasVideoNodeState(node);
-        refreshRunNodes(node, out);
+        refreshRunNodes(node, out || pendingHost);
     }
 }
 async function uploadCanvasUrlToComfy(url){
@@ -12791,6 +12781,18 @@ function cascadeParallelLimit(order, totalRounds){
     if(hasComfy) return Math.max(1, Math.min(totalRounds, comfyBackendCount || 1));
     return Math.max(1, Math.min(totalRounds, 6));
 }
+function cascadeErrorWithFailureContext(err, context){
+    const error = err && (typeof err === 'object' || typeof err === 'function')
+        ? err
+        : new Error(String(err));
+    error.cascadeFailure ||= context;
+    return error;
+}
+function cascadeFailureNodeForError(err, fallbackId, fallbackNode){
+    return nodes.find(node => node.id === err?.cascadeFailure?.nodeId)
+        || nodes.find(node => node.id === fallbackId)
+        || fallbackNode;
+}
 async function runLimitedCascadeRounds(rounds, limit, runner, options={}){
     let next = 0;
     let firstError = null;
@@ -12952,7 +12954,7 @@ async function runNodeCascade(nodeId){
         let done = 0;
         const rounds = Array.from({length:totalRounds}, (_, idx) => ({idx, index:startIdx + idx * loopBatchSize}));
         const limit = cascadeParallelLimit(order, totalRounds);
-        const parallelRun = await runLimitedCascadeRounds(rounds, limit, async ({index}, control) => {
+        const parallelRun = await runLimitedCascadeRounds(rounds, limit, async ({idx, index}, control) => {
             control.throwIfFailed();
             ensureCascadeActive(nodeId, ctx.message);
             const loopCtx = {index, total:endIdx, nodeId:loop.node.id};
@@ -12964,14 +12966,24 @@ async function runNodeCascade(nodeId){
                 if(!node) continue;
                 ctx.currentNodeId = id;
                 ctx.currentRoundLabel = `${index}/${endIdx}`;
-                node.runStatus = 'running';
-                node._cascadeIdx = `${order.indexOf(id)+1}/${order.length} · ${index}/${endIdx}`;
-                refreshNodes([id]);
-                await runCascadeNodeWithLoopContext(node, loopCtx, {cascadeTargetId:nodeId});
-                control.throwIfFailed();
-                ensureCascadeActive(nodeId, ctx.message);
-                node.runStatus = 'done';
-                refreshNodes([id]);
+                try {
+                    node.runStatus = 'running';
+                    node._cascadeIdx = `${order.indexOf(id)+1}/${order.length} · ${index}/${endIdx}`;
+                    refreshNodes([id]);
+                    await runCascadeNodeWithLoopContext(node, loopCtx, {cascadeTargetId:nodeId});
+                    control.throwIfFailed();
+                    ensureCascadeActive(nodeId, ctx.message);
+                    node.runStatus = 'done';
+                    refreshNodes([id]);
+                } catch(err) {
+                    throw cascadeErrorWithFailureContext(err, {
+                        nodeId:id,
+                        round:idx + 1,
+                        totalRounds,
+                        loopIndex:index,
+                        roundLabel:`${index}/${endIdx}`,
+                    });
+                }
             }
             done += 1;
             order.forEach(id => {
@@ -12989,9 +13001,11 @@ async function runNodeCascade(nodeId){
                 finalizeCascade(nodeId, 'stopped', {order});
                 return;
             }
-            const node = nodes.find(n => n.id === ctx.currentNodeId) || nodes.find(n => n.id === nodeId) || target;
+            const failure = err?.cascadeFailure;
+            const node = cascadeFailureNodeForError(err, nodeId, target);
             node.runStatus = 'failed';
-            node.runError = err.message || String(err);
+            const prefix = failure ? `${tr('canvas.loopRound')} ${failure.round}/${failure.totalRounds}: ` : '';
+            node.runError = `${prefix}${err.message || String(err)}`;
             node._cascadeFailed = true;
             finalizeCascade(nodeId, 'failed', {order});
             return;
@@ -13586,34 +13600,37 @@ function collectRunMetas(out, ids){
 function collectRunMeta(out, id){
     return collectRunMetas(out, [id])[0] || {runMs:0, run:{}};
 }
-function findOutputByPendingId(pendingId){
-    return nodes.find(n => n.type === 'output' && (n._pending || []).some(p => p.id === pendingId));
+function findPendingHostById(pendingId){
+    return nodes.find(n => (n._pending || []).some(p => p.id === pendingId));
 }
 function findPendingTask(taskId){
-    for(const out of nodes.filter(n => n.type === 'output')){
-        const pending = (out._pending || []).find(p => p.canvasTaskId === taskId);
-        if(pending) return {out, pending};
+    for(const host of nodes){
+        const pending = (host._pending || []).find(p => p.canvasTaskId === taskId);
+        if(pending) return {host, out:host.type === 'output' ? host : null, pending};
     }
     return null;
 }
 function canvasVideoPendingTasksForNode(nodeId){
     if(!nodeId) return [];
     const pendingTasks = [];
-    nodes.filter(n => n.type === 'output').forEach(out => {
-        (out._pending || []).forEach(pending => {
+    nodes.forEach(host => {
+        (host._pending || []).forEach(pending => {
             if(pending.canvasTaskType === 'online-video' && pending?.run?.node?.id === nodeId){
-                pendingTasks.push({out, pending});
+                pendingTasks.push({host, out:host.type === 'output' ? host : null, pending});
             }
         });
     });
     return pendingTasks;
 }
+function canvasVideoBlockingTasksForNode(nodeId){
+    return canvasVideoPendingTasksForNode(nodeId).filter(item => !item.pending.detachedFromCascade);
+}
 function syncCanvasVideoNodeState(node, outcome={}){
     if(!node) return false;
-    const remaining = canvasVideoPendingTasksForNode(node.id);
+    const remaining = canvasVideoBlockingTasksForNode(node.id);
     const active = remaining.find(item => !item.pending.failed);
     const failed = remaining.find(item => item.pending.failed);
-    if(outcome.status === 'failed'){
+    if(outcome.status === 'failed' && !outcome.detached){
         node._videoTaskFailure = {
             error:outcome.error || tr('canvas.videoFailed'),
             cascadeFailed:Boolean(outcome.cascadeFailed),
@@ -13635,6 +13652,7 @@ function syncCanvasVideoNodeState(node, outcome={}){
         return true;
     }
     node.running = false;
+    if(outcome.detached) return false;
     if(rememberedFailure && outcome.status === 'succeeded'){
         node.runStatus = 'failed';
         node.runError = rememberedFailure.error;
@@ -13664,8 +13682,9 @@ function shouldKeepCanvasVideoPending(pending, err, taskInfo){
 function detachCanvasVideoTaskFromCascade(taskId){
     const found = findPendingTask(taskId);
     if(!found) return false;
-    const {out, pending} = found;
+    const {host, out, pending} = found;
     delete pending.cascadeTargetId;
+    pending.detachedFromCascade = true;
     pending.failed = false;
     pending.querying = false;
     pending.error = '';
@@ -13673,7 +13692,7 @@ function detachCanvasVideoTaskFromCascade(taskId){
     pending.canvasTaskStatus = 'polling';
     const gen = nodes.find(n => n.id === pending?.run?.node?.id);
     syncCanvasVideoNodeState(gen);
-    refreshRunNodes(gen, out);
+    refreshRunNodes(gen, out || host);
     scheduleSave();
     return true;
 }
@@ -13766,9 +13785,9 @@ function completeRecoverPendingOutput(out, pending, result){
     scheduleSave();
 }
 async function queryRecoverPendingOutput(pendingId){
-    const out = findOutputByPendingId(pendingId);
-    const pending = pendingById(out, pendingId);
-    if(!out || !pending || pending.querying) return;
+    const host = findPendingHostById(pendingId);
+    const pending = pendingById(host, pendingId);
+    if(!host || !pending || pending.querying) return;
     const taskId = pending.canvasTaskType === 'online-video'
         ? (pending.canvasTaskId || pending.recoverTaskId || '')
         : (pending.recoverTaskId || extractUpstreamTaskId(pending.error || ''));
@@ -13778,7 +13797,7 @@ async function queryRecoverPendingOutput(pendingId){
     }
     pending.querying = true;
     pending.recoverTaskId = taskId;
-    refreshNodes([out.id]);
+    refreshNodes([host.id]);
     if(pending.canvasTaskType === 'online-video'){
         try {
             const res = await fetch(`/api/canvas-video-tasks/${encodeURIComponent(taskId)}`);
@@ -13811,10 +13830,10 @@ async function queryRecoverPendingOutput(pendingId){
             pending.error = err.message || tr('canvas.videoFailed');
             showErrorModal(pending.error, tr('canvas.apiFailed'));
         } finally {
-            const latest = pendingById(out, pendingId);
+            const latest = pendingById(host, pendingId);
             if(latest){
                 latest.querying = false;
-                refreshNodes([out.id]);
+                refreshNodes([host.id]);
                 scheduleSave();
             }
         }
@@ -13829,7 +13848,7 @@ async function queryRecoverPendingOutput(pendingId){
         if(!res.ok) throw new Error(await responseErrorMessage(res, '查询失败'));
         const data = await res.json();
         if(data.status === 'succeeded'){
-            completeRecoverPendingOutput(out, pending, data);
+            completeRecoverPendingOutput(host, pending, data);
             return;
         }
         if(data.status === 'failed'){
@@ -13843,10 +13862,10 @@ async function queryRecoverPendingOutput(pendingId){
         pending.error = err.message || '查询失败';
         showErrorModal(pending.error, tr('canvas.apiFailed'));
     } finally {
-        const latest = pendingById(out, pendingId);
+        const latest = pendingById(host, pendingId);
         if(latest){
             latest.querying = false;
-            refreshNodes([out.id]);
+            refreshNodes([host.id]);
             scheduleSave();
         }
     }
@@ -14015,7 +14034,7 @@ async function pollCanvasVideoTask(taskId, options={}){
                 found.pending.querying = false;
                 found.pending.error = '';
             }
-            refreshNodes([found.out.id]);
+            refreshNodes([found.host.id]);
             await sleep(5000);
         }
     } catch(err) {
@@ -14069,7 +14088,7 @@ async function waitCanvasVideoTaskResult(taskId, options={}){
 function completeCanvasVideoTask(taskId, result){
     const found = findPendingTask(taskId);
     if(!found) return;
-    const {out, pending} = found;
+    const {host, out, pending} = found;
     const meta = {
         runMs: nowMs() - Number(pending.startedAt || nowMs()),
         run: pending.run || {},
@@ -14082,21 +14101,24 @@ function completeCanvasVideoTask(taskId, result){
         failCanvasVideoTask(taskId, tr('canvas.videoFailed'));
         return;
     }
-    out._pending = (out._pending || []).filter(p => p.id !== pending.id);
-    appendOutputImages(out, outputUrls, meta.run?.refs?.[0], [meta]);
+    host._pending = (host._pending || []).filter(p => p.id !== pending.id);
+    if(out) appendOutputImages(out, outputUrls, meta.run?.refs?.[0], [meta]);
     const gen = nodes.find(n => n.id === meta.run?.node?.id);
     if(gen){
         mergeGeneratedOutputs(gen, outputUrls, Boolean(pending.appendGenerated));
-        syncCanvasVideoNodeState(gen, {status:'succeeded'});
+        syncCanvasVideoNodeState(gen, {
+            status:'succeeded',
+            detached:Boolean(pending.detachedFromCascade),
+        });
     }
     addGenerationLog({run:meta.run, outputs:outputUrls, runMs:meta.runMs || 0, status:'succeeded'});
-    refreshRunNodes(gen, out);
+    refreshRunNodes(gen, out || host);
     scheduleSave();
 }
 function failCanvasVideoTask(taskId, message, taskData={}){
     const found = findPendingTask(taskId);
     if(!found) return;
-    const {out, pending} = found;
+    const {host, out, pending} = found;
     const run = pending.run || {};
     run.requestDetails = taskData?.request_details || run.requestDetails || null;
     const runMs = nowMs() - Number(pending.startedAt || nowMs());
@@ -14114,20 +14136,21 @@ function failCanvasVideoTask(taskId, message, taskData={}){
             syncCanvasVideoNodeState(gen);
         }
         addGenerationLog({run, outputs:[], runMs, error:pending.error, status:'failed'});
-        refreshRunNodes(gen, out);
+        refreshRunNodes(gen, out || host);
         scheduleSave();
         return;
     }
-    out._pending = (out._pending || []).filter(p => p.id !== pending.id);
+    host._pending = (host._pending || []).filter(p => p.id !== pending.id);
     if(gen){
         syncCanvasVideoNodeState(gen, {
             status:'failed',
             error:message || tr('canvas.videoFailed'),
             cascadeFailed:Boolean(pending?.cascadeTargetId),
+            detached:Boolean(pending.detachedFromCascade),
         });
     }
     addGenerationLog({run, outputs:[], runMs, error:message || tr('canvas.videoFailed'), status:'failed'});
-    refreshRunNodes(gen, out);
+    refreshRunNodes(gen, out || host);
     scheduleSave();
 }
 function completeCanvasImageTask(taskId, result){
@@ -14193,8 +14216,8 @@ function failCanvasImageTask(taskId, message, taskData={}){
     scheduleSave();
 }
 function resumeCanvasImageTasks(){
-    nodes.filter(n => n.type === 'output').forEach(out => {
-        (out._pending || []).forEach(p => {
+    nodes.forEach(host => {
+        (host._pending || []).forEach(p => {
             if(p.canvasTaskType === 'online-image' && p.canvasTaskId && !p.failed) pollCanvasImageTask(p.canvasTaskId, {cascadeTargetId:p.cascadeTargetId || ''});
             if(p.canvasTaskType === 'online-video' && p.canvasTaskId && (!p.failed || p.recoverTaskId)) pollCanvasVideoTask(p.canvasTaskId, {cascadeTargetId:p.cascadeTargetId || ''});
         });

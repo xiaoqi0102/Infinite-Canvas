@@ -611,7 +611,12 @@ POST /api/canvas-video-tasks
 
 ### 9.2 pending 保存
 
-创建任务成功后，普通画布会把 pending 写入输出节点：
+创建任务成功后，普通画布会把 pending 写入实际任务宿主：
+
+- 有显式或终点 Output 时写入输出节点。
+- 视频节点直接连接下游生成器、无需创建 Output 时，写入视频节点自身 `_pending`。
+
+不能因为视频节点是工作流中间节点就跳过 pending；否则刷新页面或停止一键运行后会丢失本地任务 ID。
 
 ```javascript
 makePendingForRun(pendingId, run, node, {refs, cascadeTargetId}, {
@@ -632,7 +637,7 @@ await saveCanvas();
 
 这一步很关键：
 
-- 只要本地任务 ID 保存进画布，刷新页面后仍然能看到 pending。
+- 只要本地任务 ID 保存进画布，刷新页面后仍然能看到 pending；中间视频节点直接显示自己的任务状态和查询入口。
 - 后端重启后，如果持久化任务里有上游任务 ID，也能恢复查询。
 
 ### 9.3 轮询流程
@@ -690,7 +695,7 @@ await sleep(5000);
 
 - 从 result 中提取视频 URL。
 - 移除 pending。
-- 把视频作为 `kind: 'video'` 添加到输出节点。
+- 有 Output 时，把视频作为 `kind: 'video'` 添加到输出节点。
 - 合并到生成节点输出。
 - 写入生成日志。
 - 调用 `scheduleSave()` 保存。
@@ -730,11 +735,14 @@ GET /api/canvas-video-tasks/{taskId}
 ### 9.6 停止、404 与手动删除
 
 - 停止一键运行只阻止后续节点和新循环轮次继续提交。已经成功提交到后端的视频任务不能丢失：
-  应解除一键运行的控制关系，并继续独立轮询，或保留为可手动查询的 pending。
+  应删除 `cascadeTargetId`、标记 `detachedFromCascade` 并继续独立轮询，或保留为可手动查询的
+  pending。分离任务不再占用前台运行锁，因此用户可以再次运行；未分离 pending 对普通运行和
+  一键运行都必须阻止重复提交，避免重复扣费。
 - 本地任务查询接口返回 `404` 表示本地任务记录已经不存在，属于不可恢复终态；前端应清理
   对应 pending，不能在每次打开画布时重复查询同一个任务 ID。
 - 用户手动删除 pending 卡片后必须保存画布，避免刷新或远程同步后旧卡片重新出现。
 - 并行循环任一轮发生非停止错误后，不再向 worker 分配新轮次；已经开始的轮次在下一个安全边界停止。
+  首个错误必须携带自己的节点 ID 和轮次，不能从多个 worker 共享的 `currentNodeId` 推断失败节点。
 
 ## 10. 智能画布视频流程
 
@@ -902,8 +910,8 @@ if(task.kind === 'video'){
 
 ### 10.6 临时异常、停止与恢复
 
-- 只有本地任务接口明确返回 `status: "failed"` 时才移除视频 pending。断网、超时或临时非
-  `2xx` 查询错误必须保留本地任务 ID 和查询入口。
+- 本地任务接口明确返回 `status: "failed"`，或返回表示本地任务记录已不存在的 HTTP `404`
+  时，应移除视频 pending。断网、超时及其它临时非 `2xx` 查询错误必须保留本地任务 ID 和查询入口。
 - 停止一键运行应立即阻止后续节点和新循环轮次，并释放一键运行按钮；已经提交的视频任务
   转为独立后台跟踪或可手动查询状态，不能因停止操作丢失。
 - 并行循环任一轮失败后，共享停止状态必须阻止 worker 领取新轮次；调用方等待已启动 worker
@@ -966,7 +974,7 @@ asyncio.create_task(run_canvas_video_task(task_id, resume=True))
 | --- | --- | --- |
 | 提交函数 | `createCanvasVideoTask()` | `createSmartCanvasVideoTask()` |
 | 查询接口 | `/api/canvas-video-tasks/{taskId}` | `/api/canvas-video-tasks/{taskId}` |
-| pending 存储 | 输出节点 `_pending` | 节点 `pendingTasks` |
+| pending 存储 | Output 或中间视频节点 `_pending` | 节点 `pendingTasks` |
 | 视频轮询函数 | `pollCanvasVideoTask()` | `pollSmartCanvasVideoTask()` |
 | 轮询间隔 | 5 秒 | 5 秒 |
 | 防重复轮询 | `activeCanvasTaskPolls` | `activeSmartTaskPolls` |
@@ -1215,10 +1223,13 @@ GET /v1/videos/generations/{task_id}
 
 1. 普通画布创建视频生成节点。
 2. 运行视频生成。
-3. 确认输出节点出现 pending。
+3. 确认 Output 或中间视频节点出现 pending。
 4. 立刻刷新页面。
 5. 确认 pending 仍存在。
 6. 等待任务完成，确认视频自动落到输出节点。
+
+对于直接连接下游生成器的中间视频节点，还应确认刷新后任务继续查询，完成后写入
+`generatedOutputs` 并可供下游节点使用，不会创建额外 Output。
 
 ### 17.3 智能画布刷新恢复测试
 

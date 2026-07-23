@@ -816,24 +816,18 @@ if(task.status === 'succeeded') return task.result || task;
 
 ```javascript
 if(task.status === 'failed'){
-    const recoverTaskId = task.upstream_task_id || task.submit_id || '';
-    if(recoverTaskId && !isSmartTerminalTaskError(task.error)){
-        throw new ImageTaskRecoverSignal({
-            taskId,
-            recoverTaskId,
-            providerId: task.provider_id,
-            kind: 'video',
-            message: task.error || tr('smart.errRunFailed')
-        });
-    }
-    throw new Error(task.error || tr('smart.errRunFailed'));
+    const error = new Error(task.error || tr('smart.errRunFailed'));
+    error.requestDetails = task.request_details || null;
+    error.canvasTaskFailed = true;
+    throw error;
 }
 ```
 
-也就是说：
-
-- 普通可恢复错误：保留任务 ID，可稍后查询。
-- 余额不足等终态错误：直接失败，不保留可恢复 pending。
+后端查询接口会先恢复旧版本误写为失败、且已确认属于查询网络异常的任务，因此前端收到的
+`failed` 是权威终态。智能画布收到该状态后必须立即停止轮询、移除对应 `pendingTasks` 并释放
+节点运行状态；不能再根据错误文案把审核失败、参数失败等业务失败重新标记为“任务未丢失”。
+手动查询若确认视频任务失败，也执行相同清理，使节点可以再次运行。图片任务仍保留原有的
+可恢复任务逻辑。
 
 ### 10.4 智能画布恢复 pending
 
@@ -860,6 +854,9 @@ const media = taskKind === 'video'
 finalizeSmartPendingTask(node, task.taskId, resultMediaUrls(media), taskKind);
 ```
 
+旧画布若保存过带 `failed` 标记的视频 pending，加载时仍会查询一次本地任务；若后端确认失败，
+立即移除该 pending，避免节点永久保持不可运行。图片的可恢复失败记录继续等待用户手动查询。
+
 ### 10.5 智能画布手动查询
 
 函数：
@@ -882,7 +879,7 @@ if(task.kind === 'video'){
 - 视频手动查询使用本地任务 ID。
 - 成功后调用 `finalizeSmartPendingTask(..., 'video')`。
 - 仍在生成时重新启动 `pollSmartCanvasVideoTask()`。
-- 失败时显示错误并保存状态。
+- 失败时显示错误、移除对应 pending，并释放节点运行状态。
 
 ## 11. 后端持久化与重启恢复
 

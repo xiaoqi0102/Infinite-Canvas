@@ -15647,6 +15647,7 @@ async function querySmartImageTaskNow(nodeId, localTaskId){
             }
             if(data.status === 'failed'){
                 task.error = data.error || tr('smart.errRunFailed');
+                removeSmartPendingTask(node, task.taskId || localTaskId);
                 toast(task.error.slice(0, 160));
             } else {
                 task.failed = false;
@@ -15656,7 +15657,12 @@ async function querySmartImageTaskNow(nodeId, localTaskId){
                     finalizeSmartPendingTask(node, task.taskId || localTaskId, resultMediaUrls(result?.videos?.length ? result.videos : (result?.result || result)), 'video');
                     render();
                     scheduleSave();
-                }).catch(err => toast((err.message || tr('smart.errRunFailed')).slice(0, 160)));
+                }).catch(err => {
+                    if(err?.canvasTaskFailed) removeSmartPendingTask(node, task.taskId || localTaskId);
+                    toast((err.message || tr('smart.errRunFailed')).slice(0, 160));
+                    render();
+                    scheduleSave();
+                });
             }
             return;
         }
@@ -15782,14 +15788,9 @@ async function pollSmartCanvasVideoTask(taskId, onProgress=null){
                     : result;
             }
             if(task.status === 'failed'){
-                const recoverTaskId = task.upstream_task_id || task.submit_id || '';
-                if(recoverTaskId && !isSmartTerminalTaskError(task.error)){
-                    const signal = new ImageTaskRecoverSignal({taskId, recoverTaskId, providerId:task.provider_id, kind:'video', message:task.error || tr('smart.errRunFailed')});
-                    signal.requestDetails = task.request_details || null;
-                    throw signal;
-                }
                 const error = new Error(task.error || tr('smart.errRunFailed'));
                 error.requestDetails = task.request_details || null;
+                error.canvasTaskFailed = true;
                 throw error;
             }
             await sleep(5000);
@@ -15801,6 +15802,21 @@ async function pollSmartCanvasVideoTask(taskId, onProgress=null){
         return await promise;
     } finally {
         activeSmartTaskPolls.delete(taskId);
+    }
+}
+function removeSmartPendingTask(node, taskId){
+    if(!node || !taskId) return;
+    const remaining = smartPendingTasks(node).filter(task => task.taskId !== taskId);
+    if(remaining.length) node.pendingTasks = remaining;
+    else delete node.pendingTasks;
+    node.pending = remaining.length;
+    if(!remaining.length){
+        node.running = false;
+        node.queued = false;
+        if(!(node.images || []).length){
+            delete node.w;
+            delete node.h;
+        }
     }
 }
 function finalizeSmartPendingTask(node, taskId, images, kind='image'){
@@ -15856,7 +15872,7 @@ async function resumeSmartPendingNode(node, logContext={}){
     render();
     const failures = [];
     await Promise.all(tasks.map(async task => {
-        if(task.failed && task.recoverTaskId) return;
+        if(task.failed && task.recoverTaskId && task.kind !== 'video') return;
         const taskLogContext = logContext?.run
             ? logContext
             : (task.logRun ? {run:task.logRun, startedAt:task.logStartedAt || node.runStartedAt} : {});
@@ -15904,16 +15920,7 @@ async function resumeSmartPendingNode(node, logContext={}){
                 scheduleSave();
                 return;
             }
-            node.pendingTasks = smartPendingTasks(node).filter(item => item.taskId !== task.taskId);
-            node.pending = Math.max(0, Number(node.pending || 0) - 1);
-            if(!node.pending && smartPendingTasks(node).length === 0){
-                delete node.pendingTasks;
-                node.running = false;
-                if(!(node.images || []).length){
-                    delete node.w;
-                    delete node.h;
-                }
-            }
+            removeSmartPendingTask(node, task.taskId);
             failures.push(e);
             logTaskFailure(e.message || tr('smart.errRunFailed'), task, taskLogContext);
             if(e && typeof e === 'object') e.smartGenerationLogged = true;

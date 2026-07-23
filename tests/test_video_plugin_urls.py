@@ -212,6 +212,14 @@ class VideoApiRootTests(unittest.TestCase):
         with patch.object(main, "get_api_provider_exact", return_value=provider):
             self.assertFalse(main.canvas_video_failed_task_resumable(task))
 
+        task["error"] = "视频生成任务失败：MODERATION_ERROR；task_failed"
+        task["raw_last"] = {
+            "status": "failed",
+            "error": {"code": "task_failed", "message": "MODERATION_ERROR"},
+        }
+        with patch.object(main, "get_api_provider_exact", return_value=provider):
+            self.assertFalse(main.canvas_video_failed_task_resumable(task))
+
 
 class VideoDownloadUrlTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):

@@ -349,6 +349,7 @@
         "canvas.needPromptOrImage": { zh: "请先连接提示词或图片", en: "Connect a prompt or image first" },
         "canvas.needImage": { zh: "请先连接图片", en: "Connect an image first" },
         "canvas.videoNeedsPrompt": { zh: "请先连接提示词", en: "Connect a prompt first" },
+        "canvas.videoPendingExists": { zh: "该视频节点仍有待处理任务，请等待完成，或查询/删除任务后再运行", en: "This video node still has a pending task. Wait for it to finish or query/remove it before running again." },
         "canvas.videoImageRequired": { zh: "当前模型至少需要 {count} 张参考图片", en: "This model requires at least {count} reference image(s)" },
         "canvas.videoReferenceUnsupported": { zh: "当前模型不支持参考{kind}", en: "This model does not support {kind} references" },
         "canvas.videoReferenceLimit": { zh: "当前模型最多支持 {count} 个{kind}素材", en: "This model supports at most {count} {kind} reference(s)" },

@@ -32,6 +32,17 @@ _FAILURE_STATUSES = {
     "CANCELED", "CANCELLED", "TIMEOUT", "TIMEDOUT", "REJECTED", "EXPIRED",
 }
 _TRANSIENT_QUERY_HTTP_STATUSES = {408, 425, 429}
+_BUSINESS_FAILURE_CODES = {
+    "TASK_FAILED",
+    "GENERATION_FAILED",
+    "MODERATION_ERROR",
+    "CONTENT_FILTER",
+    "CONTENT_FILTERED",
+    "SAFETY_ERROR",
+    "SAFETY_FILTER",
+    "POLICY_VIOLATION",
+    "PROMINENT_PEOPLE_FILTER",
+}
 _URL_KEYS = {
     "url", "video_url", "videoUrl", "mp4_url", "mp4Url",
     "output", "result", "content", "video",
@@ -273,6 +284,62 @@ def _is_terminal_error(value: Any) -> bool:
     return bool(text) and any(re.search(pattern, text, re.IGNORECASE) for pattern in _TERMINAL_ERROR_PATTERNS)
 
 
+def _is_business_failure_marker(value: Any, *, code_field: bool = False) -> bool:
+    marker = re.sub(r"[^A-Z0-9]+", "_", str(value or "").strip().upper()).strip("_")
+    if not marker:
+        return False
+    if marker in _BUSINESS_FAILURE_CODES:
+        return True
+    if code_field and marker.endswith(("_TASK_FAILED", "_GENERATION_FAILED")):
+        return True
+    return any(
+        token in marker
+        for token in (
+            "MODERATION_ERROR",
+            "CONTENT_FILTER",
+            "SAFETY_FILTER",
+            "POLICY_VIOLATION",
+            "PROMINENT_PEOPLE_FILTER",
+        )
+    )
+
+
+def _business_failure(value: Any, depth: int = 0) -> bool:
+    """识别结构化响应中明确的生成业务终态，避免把网关错误误判为任务失败。"""
+    if value is None or depth > 8:
+        return False
+    if isinstance(value, str):
+        text = value.strip()
+        if text[:1] in {"{", "["}:
+            try:
+                return _business_failure(json.loads(text), depth + 1)
+            except Exception:
+                pass
+        return _is_business_failure_marker(text)
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return any(_business_failure(item, depth + 1) for item in value)
+    if not isinstance(value, Mapping):
+        return False
+
+    state = _status(value)
+    if state in _FAILURE_STATUSES or _is_business_failure_marker(state, code_field=True):
+        return True
+    for key in ("code", "error_code", "errorCode", "err_code", "errCode"):
+        if _is_business_failure_marker(value.get(key), code_field=True):
+            return True
+    for key in ("fail_reason", "failure_reason", "failReason"):
+        if str(value.get(key) or "").strip():
+            return True
+    for key in ("message", "msg", "reason"):
+        if _is_business_failure_marker(value.get(key)):
+            return True
+    return any(
+        _business_failure(value.get(key), depth + 1)
+        for key in ("error", "data", "detail", "result", "response")
+        if key in value
+    )
+
+
 def megabyai_video_task_retryable(task: Any) -> bool:
     """识别被旧轮询逻辑误写为失败、但仍可安全恢复查询的任务。"""
     if not isinstance(task, Mapping):
@@ -288,8 +355,7 @@ def megabyai_video_task_retryable(task: Any) -> bool:
         return False
     raw_last = task.get("raw_last")
     if isinstance(raw_last, Mapping):
-        state = _status(raw_last)
-        if state in _FAILURE_STATUSES or _is_terminal_error(raw_last):
+        if _business_failure(raw_last) or _is_terminal_error(raw_last):
             return False
     return True
 
@@ -445,7 +511,7 @@ async def _poll_video(
                 error_payload: Any = response.json()
             except Exception:
                 error_payload = {"error": response.text}
-            if _is_terminal_error(error_payload):
+            if _business_failure(error_payload) or _is_terminal_error(error_payload):
                 raise MegabyAIProtocolError(
                     response.status_code,
                     humanize_video_task_failure(_failure_reason(error_payload)),
@@ -466,7 +532,7 @@ async def _poll_video(
         last_payload = raw
         state = _status(raw)
         _report(progress, {"status": "polling", "raw_last": raw})
-        if state in _FAILURE_STATUSES or _is_terminal_error(raw):
+        if _business_failure(raw) or _is_terminal_error(raw):
             raise MegabyAIProtocolError(502, humanize_video_task_failure(_failure_reason(raw)))
         urls = _video_urls(raw, base_url)
         if state in _SUCCESS_STATUSES or (state not in _FAILURE_STATUSES and urls):
@@ -528,8 +594,7 @@ async def generate_megabyai_video(
     if response.status_code >= 400:
         raise MegabyAIProtocolError(response.status_code, f"MegabyAI 视频创建失败：{response.text[:500]}")
     raw = _json_response(response, "视频创建")
-    state = _status(raw)
-    if state in _FAILURE_STATUSES or _is_terminal_error(raw):
+    if _business_failure(raw) or _is_terminal_error(raw):
         raise MegabyAIProtocolError(502, humanize_video_task_failure(_failure_reason(raw)))
     task_id = _task_id(raw)
     if not task_id:

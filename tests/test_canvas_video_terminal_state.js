@@ -3,17 +3,22 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 
 const source = fs.readFileSync('static/js/canvas.js', 'utf8');
+const helpersStart = source.indexOf('function canvasVideoPendingTasksForNode');
+const helpersEnd = source.indexOf('async function createCanvasImageTask', helpersStart);
 const failureStart = source.indexOf('function failCanvasVideoTask');
 const failureEnd = source.indexOf('function completeCanvasImageTask', failureStart);
 
-assert.ok(failureStart >= 0 && failureEnd > failureStart, '无法定位普通画布视频失败处理函数');
+assert.ok(
+    helpersStart >= 0 && helpersEnd > helpersStart && failureStart >= 0 && failureEnd > failureStart,
+    '无法定位普通画布视频状态处理函数',
+);
 
 const logs = [];
 const refreshed = [];
-const output = {id:'output-1', _pending:[]};
+const output = {id:'output-1', type:'output', _pending:[]};
 const generator = {id:'video-1', type:'video', running:true};
 const sandbox = {
-    nodes:[generator],
+    nodes:[generator, output],
     findPendingTask:taskId => {
         const pending = output._pending.find(item => item.canvasTaskId === taskId);
         return pending ? {out:output, pending} : null;
@@ -27,6 +32,7 @@ const sandbox = {
     tr:key => key,
 };
 
+vm.runInNewContext(source.slice(helpersStart, helpersEnd), sandbox);
 vm.runInNewContext(source.slice(failureStart, failureEnd), sandbox);
 
 function pendingTask(overrides={}) {
@@ -66,7 +72,7 @@ sandbox.failCanvasVideoTask('canvas_video_failed', '临时网络错误');
 assert.equal(output._pending.length, 1);
 assert.equal(output._pending[0].failed, true);
 assert.equal(output._pending[0].recoverTaskId, 'canvas_video_failed');
-assert.equal(generator.running, false);
+assert.equal(generator.running, true);
 
 assert.match(
     source,

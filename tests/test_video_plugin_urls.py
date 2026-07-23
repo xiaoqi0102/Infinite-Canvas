@@ -681,26 +681,119 @@ class VideoDownloadUrlTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_megabyai_retries_503_without_retry_after(self):
         client = _SequenceClient([
-            httpx.Response(503, json={"error": "gateway unavailable"}),
+            httpx.Response(503, json={
+                "success": False,
+                "error": {
+                    "code": "gateway_unavailable",
+                    "message": "upstream timeout",
+                },
+            }),
             httpx.Response(200, json={
                 "status": "completed",
                 "metadata": {"content_url": "https://api.example.com/v1/videos/task-id/content"},
             }),
         ])
 
-        result = await megabyai.resume_megabyai_video(
+        result = await megabyai._poll_video(
             client,
             "task-id",
-            base_url="https://api.example.com",
-            headers={},
-            progress=None,
-            save_video=self._save_video,
-            poll_timeout=1,
-            poll_interval=0,
+            "https://api.example.com",
+            {},
+            None,
+            self._save_video,
+            1,
+            0,
         )
 
         self.assertEqual(result["videos"], ["/output/video.mp4"])
         self.assertEqual(len(client.gets), 2)
+
+    async def test_megabyai_http_business_failure_stops_polling_immediately(self):
+        cases = (
+            (
+                503,
+                {
+                    "status": "failed",
+                    "error": {"code": "task_failed", "message": "MODERATION_ERROR"},
+                },
+                "MODERATION_ERROR",
+            ),
+            (
+                500,
+                {
+                    "error": {
+                        "code": "generation_failed",
+                        "message": "CONTENT_FILTER",
+                    },
+                },
+                "内容安全策略",
+            ),
+            (
+                422,
+                {
+                    "data": {
+                        "state": "failed",
+                        "error": {"message": "generation rejected"},
+                    },
+                },
+                "generation rejected",
+            ),
+        )
+        for status_code, payload, expected_detail in cases:
+            with self.subTest(status_code=status_code, payload=payload):
+                client = _SequenceClient([
+                    httpx.Response(status_code, json=payload),
+                    httpx.Response(200, json={
+                        "status": "completed",
+                        "video_url": "https://api.example.com/v1/videos/task-id/content",
+                    }),
+                ])
+
+                with self.assertRaises(megabyai.MegabyAIProtocolError) as captured:
+                    await megabyai._poll_video(
+                        client,
+                        "task-id",
+                        "https://api.example.com",
+                        {},
+                        None,
+                        self._save_video,
+                        1,
+                        0,
+                    )
+
+                self.assertEqual(captured.exception.status_code, status_code)
+                self.assertIn(expected_detail, captured.exception.detail)
+                self.assertEqual(len(client.gets), 1)
+
+    async def test_megabyai_transient_503_can_timeout(self):
+        client = _SequenceClient([
+            httpx.Response(503, json={
+                "success": False,
+                "error": {
+                    "code": "gateway_unavailable",
+                    "message": "upstream timeout",
+                },
+            }),
+        ])
+
+        with (
+            patch.object(megabyai.time, "monotonic", side_effect=[0.0, 0.0, 1.0]),
+            self.assertRaises(megabyai.MegabyAIProtocolError) as captured,
+        ):
+            await megabyai._poll_video(
+                client,
+                "task-id",
+                "https://api.example.com",
+                {},
+                None,
+                self._save_video,
+                1,
+                0,
+            )
+
+        self.assertEqual(captured.exception.status_code, 504)
+        self.assertIn("gateway_unavailable", captured.exception.detail)
+        self.assertEqual(len(client.gets), 1)
 
     async def test_megabyai_does_not_retry_unauthorized_query(self):
         client = _SequenceClient([

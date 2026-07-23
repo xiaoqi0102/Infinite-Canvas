@@ -233,6 +233,7 @@
         "smart.loopParallelTip": { zh: "智能画布会按轮落盘，避免覆盖同一目标节点", en: "Smart Canvas saves each round separately to avoid overwriting the same target node" },
         "smart.loopDefaultPrompt": { zh: "现在生成第《计数》张卖点图片", en: "Generate selling-point image 《计数》" },
         "smart.loopRunAll": { zh: "一键运行", en: "Run chain" },
+        "smart.cascadeStopDetached": { zh: "已请求停止，已提交任务将继续后台查询", en: "Stop requested. Submitted tasks will continue in the background." },
         "smart.loopNoChain": { zh: "没有可一键运行的上游链路", en: "No upstream chain to run" },
         "smart.loopRunDone": { zh: "一键运行完成", en: "Chain run complete" },
         "smart.loopRunRoundsDone": { zh: "循环运行完成：{n} 轮", en: "Loop complete: {n} rounds" },

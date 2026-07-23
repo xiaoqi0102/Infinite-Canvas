@@ -14307,12 +14307,51 @@ async function generateUrlsForCurrentSettings(node, prompt, refs, runSettings=se
         const taskResult = await runApiVideoGeneration(prompt, refs, activeSettings, logContext);
         const taskIds = Array.isArray(taskResult?.taskIds) ? taskResult.taskIds : [];
         if(taskIds.length){
-            const settled = await Promise.all(taskIds.map(taskId => pollSmartCanvasVideoTask(
-                taskId,
-                task => updateSmartTaskGenerationLog(logContext, taskId, task, 'video')
-            )));
-            const urls = settled.flatMap(result => resultMediaUrls(result?.videos?.length ? result.videos : (result?.result || result))).filter(Boolean);
-            return {urls, kind:'video', taskIds, requestDetails:settled.find(result => result?.request_details)?.request_details || null};
+            node = liveSmartNode(node);
+            const existingUrls = new Set((node.images || []).map(item => item?.url).filter(Boolean));
+            const existingTasks = smartPendingTasks(node);
+            const existingTaskIds = new Set(existingTasks.map(task => task.taskId));
+            const additions = taskIds
+                .filter(taskId => !existingTaskIds.has(taskId))
+                .map(taskId => ({
+                    taskId,
+                    kind:'video',
+                    providerId:taskResult.providerId,
+                    model:taskResult.model,
+                    logRun:logContext?.run,
+                    logStartedAt:logContext?.startedAt,
+                }));
+            node.pendingTasks = [...existingTasks, ...additions];
+            node.pending = Math.max(node.pendingTasks.length, Number(node.pending || 0) || node.pendingTasks.length);
+            node.running = false;
+            render();
+            scheduleSave();
+            await saveCanvas();
+            const resumePromise = resumeSmartPendingNode(node, logContext);
+            const outcomePromise = resumePromise.then(
+                value => ({status:'completed', value}),
+                error => ({status:'failed', error})
+            );
+            const runState = logContext?.runState || null;
+            const outcome = runState
+                ? await Promise.race([
+                    outcomePromise,
+                    ensureSmartCascadeStopSignal(runState).then(() => ({status:'stopped'}))
+                ])
+                : await outcomePromise;
+            if(outcome.status === 'stopped'){
+                throw smartCascadeAbortError();
+            }
+            if(outcome.status === 'failed') throw outcome.error;
+            node = liveSmartNode(outcome.value || node);
+            const urls = (node.images || []).filter(item => item?.url && !existingUrls.has(item.url));
+            return {
+                urls,
+                kind:'video',
+                taskIds,
+                alreadyApplied:true,
+                requestDetails:logContext?.run?.requestDetails || null
+            };
         }
         const urls = resultMediaUrls(taskResult);
         return {urls, kind:'video'};
@@ -14463,7 +14502,7 @@ async function runCascadeStepIntoNode(sourceNode, targetNode, inputRefs, ctx=sma
     try {
         const result = await generateUrlsForCurrentSettings(
             outputNode, prompt, request.refs || [], runSettings,
-            {run:runLog, startedAt:runLogStart}
+            {run:runLog, startedAt:runLogStart, runState:ctx?.runState}
         );
         if(!result.urls?.length) throw new Error(result.kind === 'video' ? tr('smart.errNoOutVideos') : tr('smart.errNoOutImages'));
         if(outpaintSize) delete requestNode.outpaintSize;
@@ -14473,7 +14512,9 @@ async function runCascadeStepIntoNode(sourceNode, targetNode, inputRefs, ctx=sma
             const url = typeof item === 'string' ? item : item?.url || '';
             return stripImageGenerationMeta(copyMediaSizeFields(item, {url, name:(typeof item === 'object' && item.name) || `output-${i + 1}.${ext}`, kind:(typeof item === 'object' && item.kind) || result.kind, generatedResult:true}));
         }).filter(item => item.url);
-        if(ctx?.appendLoopOutputs) {
+        if(result.alreadyApplied) {
+            outputNode = liveSmartNode(outputNode);
+        } else if(ctx?.appendLoopOutputs) {
             appendLoopOutputsToNode(outputNode, additions, result.kind, ctx);
         } else {
             replaceOutputsToNodeWithHistory(outputNode, additions, result.kind, null, {skipShift:Boolean(ctx?.nodeId)});
@@ -14580,7 +14621,7 @@ async function runLoopRoundIntoSlot(loopNode, rootNode, outputSlot, loopIndex, c
         } else {
             result = await generateUrlsForCurrentSettings(
                 outputSlot, prompt, request.refs || [], runSettings,
-                {run:runLog, startedAt:runLogStart}
+                {run:runLog, startedAt:runLogStart, runState:ctx?.runState}
             );
         }
         if(!result.urls?.length) throw new Error(result.kind === 'video' ? tr('smart.errNoOutVideos') : tr('smart.errNoOutImages'));
@@ -14595,8 +14636,12 @@ async function runLoopRoundIntoSlot(loopNode, rootNode, outputSlot, loopIndex, c
                 return stripImageGenerationMeta(copyMediaSizeFields(item, {url, name:(typeof item === 'object' && item.name) || `output-${i + 1}.${ext}`, kind:(typeof item === 'object' && item.kind) || result.kind, generatedResult:true}));
             }).filter(item => item.url);
             outputSlot = liveSmartNode(outputSlot);
-            outputSlot.images = nonPreviewOutputImages(outputSlot.images);
-            replaceOutputsToNodeWithHistory(outputSlot, additions, result.kind, meta, {skipShift:Boolean(ctx?.nodeId)});
+            if(result.alreadyApplied) {
+                attachRunMeta(outputSlot, meta);
+            } else {
+                outputSlot.images = nonPreviewOutputImages(outputSlot.images);
+                replaceOutputsToNodeWithHistory(outputSlot, additions, result.kind, meta, {skipShift:Boolean(ctx?.nodeId)});
+            }
         }
         outputSlot = liveSmartNode(outputSlot);
         markSmartNodeComplete(outputSlot, meta);
@@ -14613,7 +14658,8 @@ async function runLoopRoundIntoSlot(loopNode, rootNode, outputSlot, loopIndex, c
             return [];
         }
         outputSlot.queued = false;
-        outputSlot.pending = 0;
+        const pendingTasks = smartPendingTasks(outputSlot);
+        outputSlot.pending = pendingTasks.length;
         outputSlot.running = false;
         throw e;
     } finally {
@@ -14655,17 +14701,35 @@ function smartCascadeAbortError(){
 function throwIfSmartCascadeStopRequested(runState=null){
     if(runState?.stopRequested || (!runState && smartCascadeStopRequested)) throw smartCascadeAbortError();
 }
+function ensureSmartCascadeStopSignal(runState){
+    if(!runState) return null;
+    if(!runState.stopPromise){
+        runState.stopPromise = new Promise(resolve => {
+            runState.resolveStop = resolve;
+        });
+    }
+    return runState.stopPromise;
+}
+function signalSmartCascadeStop(runState){
+    if(!runState) return;
+    runState.stopRequested = true;
+    ensureSmartCascadeStopSignal(runState);
+    if(runState.resolveStop){
+        runState.resolveStop();
+        runState.resolveStop = null;
+    }
+}
 function requestSmartCascadeStop(loopId=''){
     const runState = loopId ? smartCascadeRunForLoop(loopId) : (smartCascadeRuns.get(smartCascadeActiveLoopId) || [...smartCascadeRuns.values()][0] || null);
     if(runState){
         if(runState.stopRequested) return;
-        runState.stopRequested = true;
+        signalSmartCascadeStop(runState);
         syncSmartCascadeLegacyState(runState.runKey || runState.loopId || loopId);
     } else {
         if(!smartCascadeRunning || smartCascadeStopRequested) return;
         smartCascadeStopRequested = true;
     }
-    toast('已请求停止，当前任务完成后停止');
+    toast(tr('smart.cascadeStopDetached'));
     render();
 }
 function smartCascadeParallelLimit(chain=[]){
@@ -14674,6 +14738,7 @@ function smartCascadeParallelLimit(chain=[]){
 }
 async function runSmartCascadeRoundsWithLimit(roundIndexes, limit, runner, runState=null){
     let next = 0;
+    let firstError = null;
     const workerCount = Math.max(1, Math.min(Number(limit) || 1, roundIndexes.length));
     const workers = Array.from({length:workerCount}, async () => {
         while(next < roundIndexes.length){
@@ -14684,11 +14749,15 @@ async function runSmartCascadeRoundsWithLimit(roundIndexes, limit, runner, runSt
                 await runner(current, roundOffset);
             } catch(e) {
                 if(e?.smartCascadeStopped) break;
-                throw e;
+                if(!firstError) firstError = e;
+                if(runState) signalSmartCascadeStop(runState);
+                else smartCascadeStopRequested = true;
+                break;
             }
         }
     });
-    await Promise.all(workers);
+    await Promise.allSettled(workers);
+    if(firstError) throw firstError;
 }
 async function runSmartCascade(targetNode=null){
     const tail = targetNode || selectedNode();
@@ -14708,6 +14777,7 @@ async function runSmartCascade(targetNode=null){
     const originalPromptHtml = promptInput.innerHTML;
     const runKey = loopId || `cascade-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const runState = {runKey, loopId, stopRequested:false, runPath:null};
+    ensureSmartCascadeStopSignal(runState);
     smartCascadeRuns.set(runKey, runState);
     syncSmartCascadeLegacyState(runKey);
     smartCascadeSilentSelection = true;
@@ -15658,7 +15728,11 @@ async function querySmartImageTaskNow(nodeId, localTaskId){
                     render();
                     scheduleSave();
                 }).catch(err => {
-                    if(err?.canvasTaskFailed) removeSmartPendingTask(node, task.taskId || localTaskId);
+                    if(err?.canvasTaskFailed) {
+                        removeSmartPendingTask(node, task.taskId || localTaskId);
+                    } else {
+                        preserveSmartVideoPendingTask(node, task.taskId || localTaskId, err);
+                    }
                     toast((err.message || tr('smart.errRunFailed')).slice(0, 160));
                     render();
                     scheduleSave();
@@ -15821,6 +15895,19 @@ function removeSmartPendingTask(node, taskId){
     }
     return node;
 }
+function preserveSmartVideoPendingTask(node, taskId, error){
+    node = liveSmartNode(node);
+    const task = smartPendingTasks(node).find(item => item.taskId === taskId);
+    if(!node || !task) return node;
+    task.failed = true;
+    task.querying = false;
+    task.recoverTaskId = task.recoverTaskId || task.taskId;
+    task.error = error?.message || String(error || tr('smart.errRunFailed'));
+    node.pending = Math.max(1, smartPendingTasks(node).length);
+    node.running = false;
+    node.queued = false;
+    return node;
+}
 function finalizeSmartPendingTask(node, taskId, images, kind='image'){
     if(!node || !taskId) return;
     node = liveSmartNode(node);
@@ -15931,6 +16018,15 @@ async function resumeSmartPendingNode(node, logContext={}){
                 scheduleSave();
                 return;
             }
+            if(currentTask.kind === 'video' && !e?.canvasTaskFailed){
+                node = preserveSmartVideoPendingTask(node, task.taskId, e) || node;
+                e.smartPendingPreserved = true;
+                failures.push(e);
+                toast('任务未丢失，可稍后手动查询结果');
+                render();
+                scheduleSave();
+                return;
+            }
             removeSmartPendingTask(node, task.taskId);
             failures.push(e);
             logTaskFailure(e.message || tr('smart.errRunFailed'), task, taskLogContext);
@@ -15946,9 +16042,14 @@ async function resumeSmartPendingNode(node, logContext={}){
     return liveSmartNode(node);
 }
 function resumeSmartPendingTasks(){
-    nodes.filter(node => smartPendingTasks(node).length).forEach(node => {
-        resumeSmartPendingNode(node);
-    });
+    return nodes.filter(node => smartPendingTasks(node).length).map(node => (
+        resumeSmartPendingNode(node).catch(error => {
+            if(!error?.smartPendingPreserved){
+                console.warn('恢复智能画布任务失败', error);
+            }
+            return liveSmartNode(node);
+        })
+    ));
 }
 function updateSelectionBox(event){
     if(!selectionState) return;

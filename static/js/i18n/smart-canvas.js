@@ -263,6 +263,7 @@
         "smart.errEditNeedRefs": { zh: "图片编辑需要参考图", en: "Edit requires reference images" },
         "smart.errRunFailed": { zh: "生成失败", en: "Generation failed" },
         "smart.errRunTimeout": { zh: "生成超时", en: "Generation timed out" },
+        "smart.videoConcurrentConfirm": { zh: "该节点还有 {count} 个视频任务正在生成。继续生成会创建新任务，已有任务仍会继续轮询。确认继续吗？", en: "This node still has {count} video task(s) running. Continuing will create a new task while existing tasks keep polling. Continue?" },
         "smart.refMapHeader": { zh: "下面是参考图编号：", en: "Reference image map:" },
         "smart.refUserNeed": { zh: "用户需求：", en: "User request:" },
         "smart.runPromptPrefix": { zh: "提示词：", en: "Prompt: " },

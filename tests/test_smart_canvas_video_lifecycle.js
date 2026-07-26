@@ -270,11 +270,77 @@ async function testParallelFailureStopsNewRounds() {
     assert.equal(runState.stopRequested, true);
 }
 
+function testConcurrentVideoRunUsesIndependentOutput() {
+    const node = {
+        id:'smart-video-concurrent',
+        pending:1,
+        pendingTasks:[{taskId:'video-existing', kind:'video'}],
+        images:[],
+    };
+    const sandbox = {
+        smartPendingTasks:value => Array.isArray(value?.pendingTasks) ? value.pendingTasks : [],
+        smartSettingsForNode:() => ({engine:'api', apiKind:'video'}),
+        isApiLikeEngine:engine => engine === 'api',
+    };
+    vm.createContext(sandbox);
+    vm.runInContext(
+        sourceBetween('function smartActiveVideoPendingTasks', 'function smartNodeHasDisplayResult'),
+        sandbox,
+    );
+
+    assert.equal(sandbox.smartActiveVideoPendingTasks(node).length, 1);
+    assert.equal(sandbox.smartNodeAllowsConcurrentVideoRun(node), true);
+
+    node.pendingTasks[0].failed = true;
+    assert.equal(sandbox.smartNodeAllowsConcurrentVideoRun(node), false, '失败待查询任务不能冒充活动轮询');
+    node.pendingTasks.push({taskId:'video-active', kind:'video'});
+    assert.equal(sandbox.smartNodeAllowsConcurrentVideoRun(node), false, '活动与失败任务混合时不能放开二次生成');
+
+    const runSource = sourceBetween('async function runGeneration', 'async function runPromptLLMNode');
+    assert.match(
+        runSource,
+        /!window\.confirm\(trf\('smart\.videoConcurrentConfirm', \{count:activeVideoTasks\.length\}\)\)/,
+        '智能画布二次视频生成必须先确认',
+    );
+    assert.match(
+        runSource,
+        /const shouldCreateBranchOutput = allowConcurrentVideoRun \|\|/,
+        '智能画布二次任务必须使用独立输出节点，不能覆盖旧 pendingTasks',
+    );
+}
+
+function testConcurrentVideoKeepsSmartRunButtonEnabled() {
+    const runBtn = {};
+    const sandbox = {
+        runBtn,
+        selectedNode:() => ({id:'smart-video'}),
+        isSmartRunnableNode:() => true,
+        smartPendingTasks:() => [{taskId:'video-active', kind:'video'}],
+        smartNodeInFlight:() => true,
+        smartNodeAllowsConcurrentVideoRun:() => true,
+        smartCascadeIsLoopRunning:() => false,
+    };
+    vm.createContext(sandbox);
+    vm.runInContext(
+        sourceBetween('function syncRunButtonState', 'function mergeSmartNode'),
+        sandbox,
+    );
+
+    sandbox.syncRunButtonState();
+    assert.equal(runBtn.disabled, false, '活动视频轮询期间运行按钮应保持可点击');
+
+    sandbox.smartNodeAllowsConcurrentVideoRun = () => false;
+    sandbox.syncRunButtonState();
+    assert.equal(runBtn.disabled, true, '其它进行中任务仍应禁用运行按钮');
+}
+
 (async () => {
     await testPendingFailureSemantics();
     await testManualQueryMissingVideoClearsPending();
     await testCascadeStopKeepsSubmittedVideo();
     await testParallelFailureStopsNewRounds();
+    testConcurrentVideoRunUsesIndependentOutput();
+    testConcurrentVideoKeepsSmartRunButtonEnabled();
     console.log('smart canvas video lifecycle ok');
 })().catch(error => {
     console.error(error);

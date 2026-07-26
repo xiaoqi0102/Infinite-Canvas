@@ -196,6 +196,154 @@ async function testCascadeRejectsBlockingPending() {
     assert.equal(createCalls, 0, '已有未分离任务时级联不能重复提交');
 }
 
+async function testManualConcurrentVideoRunKeepsExistingPoll() {
+    const node = {
+        id:'video-concurrent',
+        type:'video',
+        running:true,
+        apiProvider:'comfly',
+        model:'video-model',
+        duration:5,
+        aspectRatio:'16:9',
+    };
+    const existingPending = {
+        id:'pending-existing',
+        canvasTaskId:'existing-task',
+        canvasTaskType:'online-video',
+        run:{node:{id:node.id}},
+    };
+    node._pending = [existingPending];
+    let confirmResult = false;
+    let createCalls = 0;
+    let pollCalls = 0;
+    const confirmMessages = [];
+    const sandbox = {
+        nodes:[node],
+        window:{
+            confirm:message => {
+                confirmMessages.push(message);
+                return confirmResult;
+            },
+        },
+        tr:key => key,
+        trf:(key, params) => `${key}:${params.count}`,
+        canvasVideoBlockingTasksForNode:() => node._pending
+            .filter(item => item.canvasTaskType === 'online-video' && !item.detachedFromCascade)
+            .map(pending => ({host:node, pending})),
+        syncCanvasVideoNodeState:() => {
+            node.running = node._pending.length > 0;
+        },
+        normalizeMegabyVideoNodeSettings:() => {},
+        cascadeTargetIdFromOptions:() => '',
+        resolveGeneratorRequestInputs:() => ({
+            modelPrompt:'生成视频',
+            displayPrompt:'生成视频',
+            refs:[],
+            promptParts:[],
+        }),
+        validateMentionRequestInputs:() => {},
+        applyUploadedUrlToRefs:value => value,
+        preflightCanvasVideoMedia:async (_node, refs) => ({refs, manualVideoUrl:''}),
+        imageRefsOnly:() => [],
+        videoRefsOnly:() => [],
+        audioRefsOnly:() => [],
+        outputForNode:() => null,
+        uid:() => 'pending-new',
+        runSnapshot:videoNode => ({node:{id:videoNode.id}, refs:[]}),
+        manualVideoUrlForNode:() => '',
+        resolveVideoProviderId:value => value,
+        videoProviderConfig:() => ({}),
+        validateCanvasSudashuiVideoRequest:() => ({
+            duration:5,
+            aspectRatio:'16:9',
+            officialAssetIndexes:[],
+        }),
+        nowMs:() => 1000,
+        createCanvasVideoTask:async () => {
+            createCalls += 1;
+            return {task_id:'new-task', status:'queued'};
+        },
+        addGenerationLog:() => {},
+        makePendingForRun:(id, run, videoNode, context, extra) => ({
+            id,
+            run,
+            ...context,
+            ...extra,
+        }),
+        refreshRunNodes:() => {},
+        scheduleSave:() => {},
+        saveCanvas:async () => {},
+        pollCanvasVideoTask:async taskId => {
+            pollCalls += 1;
+            assert.equal(taskId, 'new-task');
+            assert.equal(node._pending.length, 2, '第二个任务开始轮询时旧任务必须仍在队列中');
+            assert.ok(node._pending.includes(existingPending), '旧任务对象不能被覆盖');
+            node._pending = node._pending.filter(item => item.canvasTaskId !== taskId);
+            return 'succeeded';
+        },
+        pendingById:(host, id) => (host?._pending || []).find(item => item.id === id),
+        collectRunMeta:() => ({runMs:0, run:{}}),
+        shouldKeepCanvasVideoPending:() => false,
+        isCascadeAbortError:() => false,
+        cascadeAbortError:message => new Error(message),
+        cascadeStopMessage:() => 'stopped',
+        showErrorModal:() => {},
+        alert:() => {},
+        setTimeout:callback => callback(),
+    };
+    vm.runInNewContext(
+        sourceBetween('async function runVideoNode', 'async function uploadCanvasUrlToComfy'),
+        sandbox,
+    );
+
+    await sandbox.runVideoNode(node.id);
+    assert.equal(createCalls, 0, '取消确认后不能创建第二个任务');
+    assert.equal(node._pending.length, 1);
+    assert.equal(node._pending[0], existingPending);
+
+    confirmResult = true;
+    await sandbox.runVideoNode(node.id);
+    assert.equal(createCalls, 1);
+    assert.equal(pollCalls, 1);
+    assert.equal(node._pending.length, 1, '第二个任务完成后旧任务仍应继续保留');
+    assert.equal(node._pending[0], existingPending, '旧任务对象不能被替换');
+    assert.deepEqual(confirmMessages, [
+        'canvas.videoConcurrentConfirm:1',
+        'canvas.videoConcurrentConfirm:1',
+    ]);
+}
+
+async function testRunningVideoNodeCanReachConcurrentGuard() {
+    const node = {id:'video-running-entry', type:'video', running:true};
+    let runCalls = 0;
+    const sandbox = {
+        nodes:[node],
+        cascadeRunningIds:new Set(),
+        canvasVideoBlockingTasksForNode:() => [{pending:{failed:false}}],
+        runCascadeNodeByType:async () => {
+            runCalls += 1;
+        },
+    };
+    vm.runInNewContext(
+        sourceBetween('async function runCanvasGenerate', 'function computeCascadeOrder'),
+        sandbox,
+    );
+
+    await sandbox.runCanvasGenerate(node.id);
+    assert.equal(runCalls, 1, '活动视频任务轮询时仍应进入二次生成确认流程');
+
+    sandbox.canvasVideoBlockingTasksForNode = () => [
+        {pending:{failed:false}},
+        {pending:{failed:true}},
+    ];
+    await sandbox.runCanvasGenerate(node.id);
+    assert.equal(runCalls, 1, '活动与失败任务混合时不能放开二次生成');
+
+    sandbox.canvasVideoBlockingTasksForNode = () => [{pending:{failed:true}}];
+    await sandbox.runCanvasGenerate(node.id);
+    assert.equal(runCalls, 1, '仅有失败待查询任务时仍应阻止直接二次生成');
+}
+
 function testNodeHostedVideoTaskCompletesAndResumes() {
     const pending = {
         id:'pending-node-hosted',
@@ -531,6 +679,8 @@ function testPendingDeletePersists() {
     testParallelFailureContextKeepsOriginalNode();
     await testIntermediateVideoTaskIsPersistedOnGenerator();
     await testCascadeRejectsBlockingPending();
+    await testManualConcurrentVideoRunKeepsExistingPoll();
+    await testRunningVideoNodeCanReachConcurrentGuard();
     testNodeHostedVideoTaskCompletesAndResumes();
     await testNodeHostedVideoTaskCanBeQueried();
     testDetachedTaskRemainsTracked();

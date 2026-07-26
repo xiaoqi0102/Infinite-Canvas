@@ -5299,6 +5299,18 @@ function smartNodeInFlight(node){
     if(smartNodeHasCompletedResult(node)) return false;
     return Boolean(node && (node.running || node.pending || node.queued || node.jimengPending || smartPendingTasks(node).length));
 }
+function smartActiveVideoPendingTasks(node){
+    return smartPendingTasks(node).filter(task => task.kind === 'video' && !task.failed);
+}
+function smartNodeAllowsConcurrentVideoRun(node, runSettings=smartSettingsForNode(node)){
+    const pendingTasks = smartPendingTasks(node);
+    return Boolean(
+        pendingTasks.length
+        && pendingTasks.every(task => task.kind === 'video' && !task.failed)
+        && isApiLikeEngine(runSettings?.engine)
+        && runSettings?.apiKind === 'video'
+    );
+}
 function smartNodeHasDisplayResult(node){
     return Boolean((node?.images || []).some(img => img?.url && !img.loopInputPreview));
 }
@@ -5434,7 +5446,10 @@ function syncRunButtonState(node=selectedNode()){
     if(!runBtn) return;
     // 只在“当前选中节点自己”忙时禁用运行：节点正在生成/排队，或它本身是正在跑的循环。
     // 不再因为“画布上有任意循环/级联在跑”就全局禁用——跑循环时仍可对其他节点点生成。
-    runBtn.disabled = !isSmartRunnableNode(node) || smartNodeInFlight(node) || smartCascadeIsLoopRunning(node?.id);
+    const allowsConcurrentVideoRun = smartNodeAllowsConcurrentVideoRun(node);
+    const blocksConcurrentRun = !allowsConcurrentVideoRun
+        && Boolean(smartPendingTasks(node).length || smartNodeInFlight(node));
+    runBtn.disabled = !isSmartRunnableNode(node) || blocksConcurrentRun || smartCascadeIsLoopRunning(node?.id);
 }
 function mergeSmartNode(local, remote){
     const images = mergeSmartImageLists(local.images, remote.images);
@@ -15121,13 +15136,17 @@ function runSmartCascadeFromLoop(loopId){
 }
 async function runGeneration(){
     const node = selectedNode();
+    if(!node) return;
+    const runSettings = smartSettingsForNode(node);
+    const activeVideoTasks = smartActiveVideoPendingTasks(node);
+    const allowConcurrentVideoRun = smartNodeAllowsConcurrentVideoRun(node, runSettings);
+    if(activeVideoTasks.length && allowConcurrentVideoRun
+        && !window.confirm(trf('smart.videoConcurrentConfirm', {count:activeVideoTasks.length}))) return;
+    if(!allowConcurrentVideoRun && (smartPendingTasks(node).length || smartNodeInFlight(node))) return;
     const request = buildPromptRequest(node, null, true, smartLoopContext);
     const prompt = request.prompt.trim();
-    if(!node) return;
-    if(smartNodeInFlight(node)) return;
     const refs = request.refs;
     const previousSettings = cloneSmartSettings(settings);
-    const runSettings = smartSettingsForNode(node);
     settings = {...settings, ...cloneSmartSettings(runSettings || {})};
     if(!prompt && smartRunNeedsPrompt(settings)){
         settings = previousSettings;
@@ -15174,7 +15193,7 @@ async function runGeneration(){
     let extracted = null;
     let branchNode = null;
     const groupRun = isSmartGroupNode(node);
-    const shouldCreateBranchOutput = groupRun || (nodeHasImages && !workflowModeRun);
+    const shouldCreateBranchOutput = allowConcurrentVideoRun || groupRun || (nodeHasImages && !workflowModeRun);
     const pendingMeta = shouldCreateBranchOutput ? stripRunInputMeta(meta) : meta;
     undoSuppressed = true;
     if(shouldCreateBranchOutput) branchNode = createPendingOutputFromSource(node, expectedCount, pendingMeta, {connectSource:false, selectOutput:true, refs});

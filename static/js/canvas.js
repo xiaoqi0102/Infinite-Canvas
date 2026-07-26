@@ -9373,6 +9373,9 @@ function renderVideoBody(node){
     normalizeMegabyVideoNodeSettings(node, {resetInvalidGroup:true});
     node.model = node.model || 'veo3-fast';
     const profile = canvasVideoProtocolProfile(node);
+    const currentVideoTasks = canvasVideoBlockingTasksForNode(node.id);
+    const hasActiveVideoTasks = currentVideoTasks.length > 0
+        && currentVideoTasks.every(item => !item.pending.failed);
     if(window.StudioVideoApi?.normalizeVideoProtocolValues){
         const normalized = window.StudioVideoApi.normalizeVideoProtocolValues(profile, {
             duration:node.duration,
@@ -9461,7 +9464,7 @@ function renderVideoBody(node){
             ${profile.isSudashui ? `<div class="text-[10px] text-gray-400">${escapeHtml(tr('canvas.sudashuiAutoUploadTip'))}</div>` : ''}
         </div>
         <div class="gen-run-row">
-            <button class="gen-btn ${node.running ? 'running' : ''}" ${node.running ? 'disabled' : ''}><i data-lucide="clapperboard" class="w-4 h-4"></i>${node.running ? tr('canvas.generating') : tr('canvas.videoGenerate')}</button>
+            <button class="gen-btn ${node.running ? 'running' : ''}" ${node.running && !hasActiveVideoTasks ? 'disabled' : ''}><i data-lucide="clapperboard" class="w-4 h-4"></i>${hasActiveVideoTasks ? tr('canvas.videoGenerateAgain') : (node.running ? tr('canvas.generating') : tr('canvas.videoGenerate'))}</button>
             ${cascadeBtnHtml(node)}
         </div>
         ${nodePendingHtml ? `<div class="video-node-pending">${nodePendingHtml}</div>` : ''}
@@ -11763,15 +11766,21 @@ async function runVideoNode(nodeId, opts={}){
     const node = nodes.find(n => n.id === nodeId);
     if(!node) return;
     const existingVideoTasks = canvasVideoBlockingTasksForNode(nodeId);
+    let allowConcurrentVideoRun = false;
     if(existingVideoTasks.length){
         syncCanvasVideoNodeState(node);
         const message = tr('canvas.videoPendingExists');
         if(opts.cascade) throw new Error(message);
-        setStatus(message);
-        showErrorModal(message, tr('canvas.apiFailed'));
-        return;
+        const activeVideoTasks = existingVideoTasks.filter(item => !item.pending.failed);
+        if(!activeVideoTasks.length || activeVideoTasks.length !== existingVideoTasks.length){
+            setStatus(message);
+            showErrorModal(message, tr('canvas.apiFailed'));
+            return;
+        }
+        if(!window.confirm(trf('canvas.videoConcurrentConfirm', {count:activeVideoTasks.length}))) return;
+        allowConcurrentVideoRun = true;
     }
-    if(node.running && !opts.cascade) return;
+    if(node.running && !opts.cascade && !allowConcurrentVideoRun) return;
     delete node._videoTaskFailure;
     normalizeMegabyVideoNodeSettings(node, {resetInvalidGroup:true});
     const cascadeTargetId = cascadeTargetIdFromOptions(opts);
@@ -13002,7 +13011,11 @@ function computeConnectedWorkflowOrder(anchorId){
 }
 async function runCanvasGenerate(nodeId){
     const node = nodes.find(n => n.id === nodeId);
-    if(!node || node.running || cascadeRunningIds.has(nodeId)) return;
+    if(!node || cascadeRunningIds.has(nodeId)) return;
+    const currentVideoTasks = node.type === 'video' ? canvasVideoBlockingTasksForNode(node.id) : [];
+    const canStartParallelVideo = currentVideoTasks.length > 0
+        && currentVideoTasks.every(item => !item.pending.failed);
+    if(node.running && !canStartParallelVideo) return;
     return runCascadeNodeByType(node, {cascade:false});
 }
 function computeCascadeOrder(targetId){

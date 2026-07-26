@@ -233,4 +233,41 @@ const smartSource = fs.readFileSync(path.join(__dirname, '..', 'static', 'js', '
   assert.doesNotMatch(request.prompt, /图2/);
 }
 
+{
+  let nextId = 0;
+  const sandbox = {
+    nodes: [
+      {id: 'image-a', type: 'image', url: '/assets/a.png'},
+      {id: 'image-b', type: 'image', url: '/assets/b.png'},
+      {id: 'generator', type: 'generator'},
+    ],
+    selected: new Set(['image-a', 'image-b']),
+    connections: [
+      {id: 'direct-a', from: 'image-a', to: 'generator'},
+      {id: 'direct-b', from: 'image-b', to: 'generator'},
+    ],
+    nodeBounds: () => ({x: 10, y: 20, w: 300, h: 200}),
+    uid: prefix => `${prefix}-${++nextId}`,
+    CANVAS_GENERATOR_TYPES: ['generator'],
+    canConnect: (fromId, toId) => fromId.startsWith('grp-') && toId === 'generator',
+    syncGeneratorInputs() {},
+  };
+  vm.createContext(sandbox);
+  vm.runInContext(
+    [
+      sourceBetween(canvasSource, 'function handoffExistingInputsToGroup', 'function updateGroupMembership'),
+      sourceBetween(canvasSource, 'function connectSelectionToGenerator', 'function pushUndo'),
+    ].join('\n'),
+    sandbox,
+  );
+  sandbox.connectSelectionToGenerator('images', 'generator');
+  const group = sandbox.nodes.find(node => node.type === 'group');
+  assert.ok(group);
+  assert.deepEqual(Array.from(group.items), ['image-a', 'image-b']);
+  assert.deepEqual(
+    Array.from(sandbox.connections, connection => [connection.from, connection.to]),
+    [[group.id, 'generator']],
+  );
+}
+
 console.log('canvas reference labels and batch connect tests passed');

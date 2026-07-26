@@ -15588,11 +15588,12 @@ function startSelectionLink(e, kind){
 function connectSelectionToGenerator(kind, genId){
     const ids = [...selected];
     let source = null;
+    let imageNodes = [];
     if(kind === 'images'){
-        const imgs = ids.map(id => nodes.find(n => n.id === id)).filter(n => n?.type === 'image' && n.url);
-        if(!imgs.length) return;
-        const box = nodeBounds(imgs.map(n => n.id));
-        source = {id:uid('grp'), type:'group', x:box.x - 24, y:box.y - 58, w:box.w + 48, h:box.h + 90, items:imgs.map(n => n.id)};
+        imageNodes = ids.map(id => nodes.find(n => n.id === id)).filter(n => n?.type === 'image' && n.url);
+        if(!imageNodes.length) return;
+        const box = nodeBounds(imageNodes.map(n => n.id));
+        source = {id:uid('grp'), type:'group', x:box.x - 24, y:box.y - 58, w:box.w + 48, h:box.h + 90, items:imageNodes.map(n => n.id)};
     } else {
         const prompts = ids.map(id => nodes.find(n => n.id === id)).filter(n => n?.type === 'prompt');
         if(!prompts.length) return;
@@ -15600,7 +15601,14 @@ function connectSelectionToGenerator(kind, genId){
         source = {id:uid('pg'), type:'promptGroup', x:box.x - 24, y:box.y - 58, w:box.w + 48, h:box.h + 90, items:prompts.map(n => n.id)};
     }
     nodes.push(source);
-    connections.push({id:uid('c'), from:source.id, to:genId});
+    if(kind === 'images'){
+        // 选区连接会新建分组；把已有的素材直连迁移到分组，避免同一素材
+        // 同时从图片节点和分组进入生成器而重复展示。
+        handoffExistingInputsToGroup(source, imageNodes);
+    }
+    if(canConnect(source.id, genId) && !connections.some(c => c.from === source.id && c.to === genId)){
+        connections.push({id:uid('c'), from:source.id, to:genId});
+    }
     selected.clear();
     selected.add(source.id);
     syncGeneratorInputs();

@@ -6487,7 +6487,10 @@ function renderNode(node){
         const label = { queued:'排队中', running:'运行中', done:'完成', failed:'失败' }[node.runStatus] || '';
         return `<span class="node-run-status ${node.runStatus}"><span class="dot"></span>${escapeHtml(label)}${node._cascadeIdx?' '+node._cascadeIdx:''}</span>`;
     })() : '';
-    el.innerHTML = `<div class="node-head"><span class="node-title">${displayTitle}</span><div style="display:flex;align-items:center;gap:8px">${statusHtml}<button onclick="deleteNodeFromButton('${node.id}', event)" class="text-gray-300 hover:text-red-500"><i data-lucide="x" class="w-4 h-4"></i></button></div></div>`;
+    const groupActionsHtml = node.type === 'group'
+        ? `<button type="button" class="group-action-btn" onclick="arrangeCanvasGroup('${escapeAttr(node.id)}', event)" title="${escapeAttr(tr('canvas.arrangeGroup'))}" aria-label="${escapeAttr(tr('canvas.arrangeGroup'))}"><i data-lucide="layout-grid"></i></button><button type="button" class="group-action-btn" onclick="ungroupCanvasGroup('${escapeAttr(node.id)}', event)" title="${escapeAttr(tr('canvas.ungroup'))}" aria-label="${escapeAttr(tr('canvas.ungroup'))}"><i data-lucide="ungroup"></i></button>`
+        : '';
+    el.innerHTML = `<div class="node-head"><span class="node-title">${displayTitle}</span><div style="display:flex;align-items:center;gap:8px">${statusHtml}${groupActionsHtml}<button onclick="deleteNodeFromButton('${node.id}', event)" class="text-gray-300 hover:text-red-500"><i data-lucide="x" class="w-4 h-4"></i></button></div></div>`;
     const body = document.createElement('div');
     body.className = 'node-body';
     if(node.type === 'image') {
@@ -15497,6 +15500,181 @@ function closeOutputLightbox(){
     currentOutputLightboxUrl = '';
     setupOutputPromptPanel(null);
 }
+const CANVAS_GROUP_LAYOUT = Object.freeze({
+    paddingX:24,
+    paddingTop:58,
+    paddingBottom:24,
+    gapX:24,
+    gapY:24,
+    minWidth:300,
+    minHeight:220
+});
+function canvasGroupMembers(group){
+    const seen = new Set();
+    return (group?.items || []).map(id => nodes.find(node => node.id === id))
+        .filter(node => {
+            if(!node || seen.has(node.id) || (node.type !== 'image' && node.type !== 'prompt')) return false;
+            seen.add(node.id);
+            return true;
+        });
+}
+function canvasGroupGridPlan(group, members){
+    const entries = (members || []).map(node => ({node, rect:nodeRect(node)}));
+    if(!entries.length) return null;
+    const cols = Math.min(4, Math.max(1, Math.ceil(Math.sqrt(entries.length))));
+    const rows = Math.ceil(entries.length / cols);
+    const columnWidths = Array(cols).fill(0);
+    const rowHeights = Array(rows).fill(0);
+    entries.forEach((entry, index) => {
+        const col = index % cols;
+        const row = Math.floor(index / cols);
+        columnWidths[col] = Math.max(columnWidths[col], Math.max(1, entry.rect.w));
+        rowHeights[row] = Math.max(rowHeights[row], Math.max(1, entry.rect.h));
+    });
+    const columnOffsets = [];
+    const rowOffsets = [];
+    columnWidths.reduce((offset, width, index) => {
+        columnOffsets[index] = offset;
+        return offset + width + CANVAS_GROUP_LAYOUT.gapX;
+    }, 0);
+    rowHeights.reduce((offset, height, index) => {
+        rowOffsets[index] = offset;
+        return offset + height + CANVAS_GROUP_LAYOUT.gapY;
+    }, 0);
+    const contentWidth = columnWidths.reduce((sum, width) => sum + width, 0) + CANVAS_GROUP_LAYOUT.gapX * Math.max(0, cols - 1);
+    const contentHeight = rowHeights.reduce((sum, height) => sum + height, 0) + CANVAS_GROUP_LAYOUT.gapY * Math.max(0, rows - 1);
+    return {
+        placements:entries.map((entry, index) => ({
+            node:entry.node,
+            x:Math.round(Number(group.x || 0) + CANVAS_GROUP_LAYOUT.paddingX + columnOffsets[index % cols]),
+            y:Math.round(Number(group.y || 0) + CANVAS_GROUP_LAYOUT.paddingTop + rowOffsets[Math.floor(index / cols)])
+        })),
+        w:Math.max(CANVAS_GROUP_LAYOUT.minWidth, Math.round(contentWidth + CANVAS_GROUP_LAYOUT.paddingX * 2)),
+        h:Math.max(CANVAS_GROUP_LAYOUT.minHeight, Math.round(contentHeight + CANVAS_GROUP_LAYOUT.paddingTop + CANVAS_GROUP_LAYOUT.paddingBottom))
+    };
+}
+function arrangeCanvasGroupMembers(group){
+    if(!group || group.type !== 'group') return false;
+    const plan = canvasGroupGridPlan(group, canvasGroupMembers(group));
+    if(!plan) return false;
+    group.w = plan.w;
+    group.h = plan.h;
+    plan.placements.forEach(({node, x, y}) => {
+        node.x = x;
+        node.y = y;
+    });
+    return true;
+}
+function arrangeCanvasGroup(groupId, event){
+    event?.preventDefault();
+    event?.stopPropagation();
+    const group = nodes.find(node => node.id === groupId && node.type === 'group');
+    if(!group || !canvasGroupMembers(group).length) return false;
+    pushUndo();
+    arrangeCanvasGroupMembers(group);
+    selected.clear();
+    selected.add(group.id);
+    render();
+    scheduleSave();
+    return true;
+}
+function ungroupCanvasConnectionMembers(members, targetId){
+    const target = nodes.find(node => node.id === targetId);
+    if(!target) return [];
+    if(target.type === 'loop' || target.type === 'llm') return (members || []).filter(member => member.type === 'image');
+    return members || [];
+}
+function remapUngroupedLtxTimelineSources(groupId, members, targetId){
+    const target = nodes.find(node => node.id === targetId && node.type === 'ltxDirector');
+    if(!target?.ltxTimelineData) return false;
+    const sourceIds = new Map((members || []).filter(member => member.type === 'image').map(member => [`${groupId}:${member.id}`, member.id]));
+    if(!sourceIds.size) return false;
+    try {
+        const timeline = JSON.parse(target.ltxTimelineData);
+        let changed = false;
+        (timeline.segments || []).forEach(segment => {
+            const nextId = sourceIds.get(segment?.canvasSourceId);
+            if(!nextId) return;
+            segment.canvasSourceId = nextId;
+            changed = true;
+        });
+        if(changed) target.ltxTimelineData = JSON.stringify(timeline);
+        return changed;
+    } catch(_) {
+        return false;
+    }
+}
+function ungroupCanvasGroups(groupIds){
+    const ids = new Set(groupIds || []);
+    const groups = nodes.filter(node => ids.has(node.id) && node.type === 'group');
+    if(!groups.length) return false;
+    const groupIdSet = new Set(groups.map(group => group.id));
+    const plans = groups.map(group => ({
+        groupId:group.id,
+        members:canvasGroupMembers(group),
+        outgoing:connections.filter(connection => connection.from === group.id).map(connection => ({...connection}))
+    }));
+    const planByGroupId = new Map(plans.map(plan => [plan.groupId, plan]));
+    pushUndo();
+    plans.forEach(plan => {
+        plan.outgoing.forEach(connection => remapUngroupedLtxTimelineSources(plan.groupId, plan.members, connection.to));
+    });
+    const existingByKey = new Map();
+    connections.filter(connection => !groupIdSet.has(connection.from) && !groupIdSet.has(connection.to)).forEach(connection => {
+        const key = `${connection.from}\u0000${connection.to}`;
+        if(!existingByKey.has(key)) existingByKey.set(key, connection);
+    });
+    const generatedKeys = new Set();
+    const appendedConnectionIds = new Set();
+    const nextConnections = [];
+    connections.forEach(connection => {
+        if(groupIdSet.has(connection.to)) return;
+        const plan = planByGroupId.get(connection.from);
+        if(!plan){
+            if(appendedConnectionIds.has(connection.id)) return;
+            appendedConnectionIds.add(connection.id);
+            nextConnections.push(connection);
+            return;
+        }
+        ungroupCanvasConnectionMembers(plan.members, connection.to).forEach(member => {
+            const key = `${member.id}\u0000${connection.to}`;
+            const existing = existingByKey.get(key);
+            if(existing){
+                if(!appendedConnectionIds.has(existing.id)){
+                    appendedConnectionIds.add(existing.id);
+                    nextConnections.push(existing);
+                }
+                return;
+            }
+            if(generatedKeys.has(key) || !canConnect(member.id, connection.to)) return;
+            generatedKeys.add(key);
+            nextConnections.push({id:uid('c'), from:member.id, to:connection.to});
+        });
+    });
+    nodes = nodes.filter(node => !groupIdSet.has(node.id));
+    connections = nextConnections;
+    nodes.forEach(node => {
+        if((node.type === 'group' || node.type === 'promptGroup') && Array.isArray(node.items)){
+            node.items = node.items.filter(id => !groupIdSet.has(id));
+        }
+    });
+    selected.clear();
+    plans.flatMap(plan => plan.members).forEach(member => {
+        if(nodes.some(node => node.id === member.id)) selected.add(member.id);
+    });
+    syncGeneratorInputs();
+    render();
+    scheduleSave();
+    return true;
+}
+function ungroupCanvasGroup(groupId, event){
+    event?.preventDefault();
+    event?.stopPropagation();
+    return ungroupCanvasGroups([groupId]);
+}
+function ungroupSelectedCanvasGroups(){
+    return ungroupCanvasGroups([...selected]);
+}
 function groupSelectedImages(){
     if(!ensureCanvas()) return;
     const targets = [...selected].map(id => nodes.find(n => n.id === id)).filter(n => n?.type === 'image' || n?.type === 'prompt');
@@ -15510,7 +15688,10 @@ function groupSelectedImages(){
         group = {id:uid('grp'), type:'group', x:p.x, y:p.y, w:300, h:220, items:[]};
     }
     nodes.push(group);
-    if(targets.length) handoffExistingInputsToGroup(group, targets);
+    if(targets.length){
+        handoffExistingInputsToGroup(group, targets);
+        arrangeCanvasGroupMembers(group);
+    }
     selected.clear();
     selected.add(group.id);
     syncGeneratorInputs();
@@ -16928,7 +17109,12 @@ window.addEventListener('keydown', e => {
         toggleZoomPreview();
         return;
     }
-    if((e.ctrlKey || e.metaKey) && key === 'g' && !isEditableTarget(e.target)) { e.preventDefault(); groupSelectedImages(); }
+    if((e.ctrlKey || e.metaKey) && e.shiftKey && key === 'g' && !isEditableTarget(e.target)) {
+        e.preventDefault();
+        ungroupSelectedCanvasGroups();
+        return;
+    }
+    if((e.ctrlKey || e.metaKey) && !e.shiftKey && key === 'g' && !isEditableTarget(e.target)) { e.preventDefault(); groupSelectedImages(); }
     if((e.ctrlKey || e.metaKey) && !e.altKey && key === 'a'
         && !isEditableTarget(e.target) && !isEditableTarget(document.activeElement)
         && !canvasKeyboardShortcutBlocked()){

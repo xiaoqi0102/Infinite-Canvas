@@ -695,6 +695,10 @@ input[type=range].canvas-range::-webkit-slider-runnable-track { height:3px; bord
 .ltx-director-node > .port { top:50%; }
 .group-node,.promptGroup-node { min-width:260px; background:rgba(255,255,255,.96); border:1px solid #e8edf3; box-shadow:0 16px 42px rgba(15,23,42,.08); z-index:0; }
 .group-node .node-head,.promptGroup-node .node-head { background:#fff; border-bottom:1px solid #f1f5f9; }
+.group-action-btn { width:28px; height:28px; flex:0 0 28px; display:inline-flex; align-items:center; justify-content:center; border-radius:8px; border:1px solid transparent; background:transparent; color:var(--faint); transition:color .16s var(--ease),background .16s var(--ease),border-color .16s var(--ease); }
+.group-action-btn i,.group-action-btn svg { width:14px; height:14px; }
+.group-action-btn:hover { color:var(--text); background:var(--soft); border-color:var(--line); }
+.group-action-btn:focus-visible { outline:2px solid var(--text); outline-offset:2px; }
 .llm-node { width:420px; }
 .llm-body { display:flex; flex-direction:column; gap:10px; min-height:0; }
 .node.sized.llm-node .llm-body { height:100%; }

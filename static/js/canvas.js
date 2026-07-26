@@ -12,8 +12,18 @@ function actionFailed(labelKey, detail=''){
     return langIsEn() ? `${label} failed${detail ? `: ${detail}` : ''}` : `${label}失败${detail ? `：${detail}` : ''}`;
 }
 function noReturnedImage(labelKey){ return langIsEn() ? `${tr(labelKey)} failed: no image returned` : `${tr(labelKey)}失败：未返回图片`; }
+function canvasPreferredMediaUrl(value){
+    if(!value || typeof value !== 'object') return String(value || '');
+    const candidates = [value.originalLocalUrl, value.localUrl, value.sourceUrl, value.local_url, value.source_url, value.url];
+    return candidates.find(item => item && !isCloudHostedMediaUrl(item)) || String(value.url || '');
+}
+function canvasRemoteMediaUrl(value){
+    if(!value || typeof value !== 'object') return '';
+    const candidates = [value.remoteUrl, value.remote_url, value.cloudUrl, value.cloud_url, value.url, value.sourceUrl, value.source_url];
+    return candidates.map(item => String(item || '').trim()).find(item => item && isCloudHostedMediaUrl(item)) || '';
+}
 function canvasOriginalMediaUrl(url){
-    const raw = String(url || '');
+    const raw = canvasPreferredMediaUrl(url);
     if(!raw) return '';
     try {
         const parsed = new URL(raw, window.location.origin);
@@ -34,7 +44,7 @@ function canvasFileNameFromUrl(url=''){
 }
 function canvasProxiedMediaUrl(url, name=''){
     const raw = canvasOriginalMediaUrl(url);
-    if(!raw || raw.startsWith('/assets/') || raw.startsWith('/output/') || raw.startsWith('data:') || raw.startsWith('blob:')) return raw;
+    if(!raw || raw.startsWith('/assets/') || raw.startsWith('/output/') || raw.startsWith('/api/storage-files/') || raw.startsWith('data:') || raw.startsWith('blob:')) return raw;
     if(!/^https?:\/\//i.test(raw)) return raw;
     const filename = name || canvasFileNameFromUrl(raw) || 'preview';
     return `/api/download-output?inline=1&url=${encodeURIComponent(raw)}&name=${encodeURIComponent(filename)}`;
@@ -46,7 +56,7 @@ function canvasDisplayMediaUrl(url, name=''){
 function canvasMediaPreviewUrl(url, size=512){
     const raw = canvasOriginalMediaUrl(url);
     if(!raw || raw.startsWith('data:') || raw.startsWith('blob:')) return raw;
-    if(!raw.startsWith('/output/') && !raw.startsWith('/assets/')) return canvasDisplayMediaUrl(raw);
+    if(!raw.startsWith('/output/') && !raw.startsWith('/assets/') && !raw.startsWith('/api/storage-files/')) return canvasDisplayMediaUrl(raw);
     if(!/\.(png|jpe?g|webp|gif|bmp|avif|tiff?|mp4|webm|mov|m4v|avi|mkv|flv)(\?|#|$)/i.test(raw)) return raw;
     const width = Math.max(64, Math.min(2048, Math.round(Number(size) || 512)));
     return `/api/media-preview?w=${width}&url=${encodeURIComponent(raw)}`;
@@ -54,9 +64,10 @@ function canvasMediaPreviewUrl(url, size=512){
 function canvasPreviewImgHtml(url, size=512, attrs=''){
     const original = canvasOriginalMediaUrl(url);
     const preview = canvasMediaPreviewUrl(original, size);
+    const remote = canvasRemoteMediaUrl(url);
     // loading=lazy：画布内容多时，视口外的缩略图不加载/不解码，避免一次性解码上百张图卡顿；
     // decoding=async：解码放到主线程外，渲染时不阻塞。
-    return `<img loading="lazy" decoding="async" src="${escapeAttr(preview)}" data-preview-src="${escapeAttr(preview)}" data-original-src="${escapeAttr(original)}" data-url="${escapeAttr(original)}"${attrs ? ` ${attrs}` : ''}>`;
+    return `<img loading="lazy" decoding="async" src="${escapeAttr(preview)}" data-preview-src="${escapeAttr(preview)}" data-original-src="${escapeAttr(original)}" data-remote-src="${escapeAttr(remote)}" data-url="${escapeAttr(original)}"${attrs ? ` ${attrs}` : ''}>`;
 }
 function loadCanvasOriginalImageDimensions(url){
     const src = String(url || '');
@@ -71,17 +82,35 @@ function loadCanvasOriginalImageDimensions(url){
 function canvasVideoPreviewHtml(url, size=512, attrs=''){
     const original = canvasOriginalMediaUrl(url);
     const preview = canvasMediaPreviewUrl(original, size);
-    return `<img loading="lazy" decoding="async" src="${escapeAttr(preview)}" data-preview-src="${escapeAttr(preview)}" data-original-src="${escapeAttr(original)}" data-url="${escapeAttr(original)}" data-preview-kind="video"${attrs ? ` ${attrs}` : ''}>`;
+    const remote = canvasRemoteMediaUrl(url);
+    return `<img loading="lazy" decoding="async" src="${escapeAttr(preview)}" data-preview-src="${escapeAttr(preview)}" data-original-src="${escapeAttr(original)}" data-remote-src="${escapeAttr(remote)}" data-url="${escapeAttr(original)}" data-preview-kind="video"${attrs ? ` ${attrs}` : ''}>`;
 }
-function canvasVideoFallbackHtml(url, attrs=''){
-    const original = canvasOriginalMediaUrl(url);
-    const src = canvasDisplayMediaUrl(original);
-    return `<video src="${escapeAttr(src)}" data-url="${escapeAttr(original)}" muted preload="metadata" playsinline disablepictureinpicture controlslist="nodownload noplaybackrate noremoteplayback"${attrs ? ` ${attrs}` : ''}></video>`;
+function canvasCreateVideoElement(itemOrUrl, player=false, attrs=''){
+    const original = canvasOriginalMediaUrl(itemOrUrl);
+    const video = document.createElement('video');
+    video.src = canvasDisplayMediaUrl(original);
+    video.dataset.url = original;
+    video.dataset.remoteSrc = canvasRemoteMediaUrl(itemOrUrl);
+    video.controls = player || /\bcontrols\b/i.test(attrs);
+    video.autoplay = player;
+    video.muted = !player;
+    video.playsInline = true;
+    video.preload = 'metadata';
+    video.disablePictureInPicture = true;
+    video.setAttribute('controlslist', 'nodownload noplaybackrate noremoteplayback');
+    if(/data-output-video-fallback/i.test(attrs)) video.dataset.outputVideoFallback = '1';
+    return video;
 }
-function canvasVideoPlayerHtml(url, attrs=''){
-    const original = canvasOriginalMediaUrl(url);
-    const src = canvasDisplayMediaUrl(original);
-    return `<video src="${escapeAttr(src)}" data-url="${escapeAttr(original)}" controls autoplay playsinline preload="metadata" disablepictureinpicture controlslist="nodownload noplaybackrate noremoteplayback"${attrs ? ` ${attrs}` : ''}></video>`;
+function bindCanvasVideoSourceFallback(video){
+    if(!video || video.dataset.remoteFallbackBound === '1') return;
+    video.dataset.remoteFallbackBound = '1';
+    video.addEventListener('error', () => {
+        const remote = canvasDisplayMediaUrl(video.dataset.remoteSrc || '');
+        if(remote && video.getAttribute('src') !== remote){
+            video.src = remote;
+            video.load?.();
+        }
+    });
 }
 function canvasActivateVideoPreview(img){
     if(!img) return false;
@@ -97,12 +126,15 @@ function canvasActivateVideoPreview(img){
         return false;
     }
     const original = canvasOriginalMediaUrl(target.dataset.originalSrc || target.dataset.url || target.getAttribute('src') || '');
+    const remote = target.dataset.remoteSrc || '';
     if(!original) return false;
-    const tpl = document.createElement('template');
-    tpl.innerHTML = canvasVideoPlayerHtml(original, target.dataset.videoPlayerAttrs || '');
-    const video = tpl.content.firstElementChild;
-    if(!video) return false;
+    const video = canvasCreateVideoElement(
+        {url:remote || original, originalLocalUrl:original},
+        true,
+        target.dataset.videoPlayerAttrs || '',
+    );
     target.replaceWith(video);
+    bindCanvasVideoSourceFallback(video);
     video.parentElement?.querySelector?.('.canvas-video-play')?.style?.setProperty('display', 'none');
     video.play?.().catch(() => {});
     return true;
@@ -119,15 +151,27 @@ function bindCanvasPreviewImageFallbacks(root=document){
         img.dataset.previewFallbackBound = '1';
         img.addEventListener('error', () => {
             const original = img.dataset.originalSrc || img.dataset.url || '';
+            const remote = img.dataset.remoteSrc || '';
             if(img.dataset.previewKind === 'video'){
-                const video = document.createElement('template');
-                video.innerHTML = canvasVideoFallbackHtml(original, img.dataset.videoFallbackAttrs || '');
-                img.replaceWith(video.content.firstElementChild);
+                const video = canvasCreateVideoElement(
+                    {url:remote || original, originalLocalUrl:original},
+                    false,
+                    img.dataset.videoFallbackAttrs || '',
+                );
+                img.replaceWith(video);
+                bindCanvasVideoSourceFallback(video);
                 return;
             }
-            if(original && img.getAttribute('src') !== original) img.src = original;
+            const current = img.getAttribute('src') || '';
+            if(original && current !== original){
+                img.src = original;
+                return;
+            }
+            const remoteDisplay = canvasDisplayMediaUrl(remote);
+            if(remoteDisplay && current !== remoteDisplay) img.src = remoteDisplay;
         });
     });
+    root.querySelectorAll?.('video[data-remote-src]:not([data-remote-fallback-bound])').forEach(bindCanvasVideoSourceFallback);
 }
 const CANVAS_SELECTED_HIGH_RES_DELAY = 320;
 let canvasSelectedHighResTimer = 0;
@@ -366,12 +410,19 @@ let canvasSortMode = (() => { try { return localStorage.getItem('canvasSortMode'
 const CANVAS_LIST_PROJECT_KEY = 'canvasListCurrentProjectId';
 const CANVAS_COLOR_OPTIONS = ['red','orange','amber','green','teal','blue','violet','pink','slate'];
 // 先绑定返回，避免编辑器后续初始化较慢时丢失来源项目。
-backToManagerBtn?.addEventListener('click', () => {
+backToManagerBtn?.addEventListener('click', async event => {
+    event.preventDefault();
+    if(typeof flushCanvasSave === 'function' && !(await flushCanvasSave())){
+        setStatus(tr('canvas.saveBlocked') || '尚未保存，暂不能离开');
+        return;
+    }
     window.location.href = canvasListUrlForProject(canvas?.project || requestedCanvasListProject() || rememberedCanvasListProject());
 });
 let localCanvasDirty = false;
 let savingCanvasNow = false;
 let saveCanvasAgain = false;
+let saveRetryTimer = null;
+let saveRetryDelay = 1000;
 let applyingRemoteCanvas = false;
 let remoteSyncTimer = null;
 let remoteSyncInterval = null;
@@ -1552,7 +1603,7 @@ async function saveCanvas(){
             setStatus('Synced');
             return;
         }
-        if(!res.ok) throw new Error('save failed');
+        if(!res.ok) throw new Error(`save failed (${res.status})`);
         const data = await res.json().catch(() => ({}));
         const localViewport = {...viewport};
         if(data.canvas) canvas = {...canvas, ...data.canvas, viewport:localViewport};
@@ -1560,12 +1611,23 @@ async function saveCanvas(){
         canvas.updated_at = Number(canvas.updated_at || Date.now());
         lastCanvasUpdatedAt = canvas.updated_at;
         localCanvasDirty = Boolean(saveCanvasAgain);
+        saveRetryDelay = 1000;
+        clearTimeout(saveRetryTimer);
+        saveRetryTimer = null;
         if(currentCanvasTime) currentCanvasTime.textContent = formatCanvasTime(canvas.updated_at);
         setStatus('Saved');
         loadCanvasList(false);
     } catch(e) {
-        setStatus('Save failed');
+        localCanvasDirty = true;
+        setStatus(tr('canvas.saveRetrying') || '保存失败，正在重试');
+        clearTimeout(saveRetryTimer);
+        saveRetryTimer = setTimeout(() => {
+            saveRetryTimer = null;
+            saveRetryDelay = Math.min(saveRetryDelay * 2, 15000);
+            saveCanvas();
+        }, saveRetryDelay);
         console.error(e);
+        return false;
     } finally {
         savingCanvasNow = false;
         if(saveCanvasAgain && canvas && !applyingRemoteCanvas){
@@ -1574,6 +1636,25 @@ async function saveCanvas(){
             setTimeout(saveCanvas, 0);
         }
     }
+    return !localCanvasDirty && !saveCanvasAgain;
+}
+
+async function flushCanvasSave(maxAttempts=4){
+    clearTimeout(saveTimer);
+    saveTimer = null;
+    clearTimeout(saveRetryTimer);
+    saveRetryTimer = null;
+    for(let attempt=0; attempt<maxAttempts; attempt++){
+        if(!canvas || (!localCanvasDirty && !savingCanvasNow && !saveCanvasAgain)) return true;
+        if(savingCanvasNow){
+            await new Promise(resolve => setTimeout(resolve, 80));
+            continue;
+        }
+        const saved = await saveCanvas();
+        if(saved && !localCanvasDirty && !saveCanvasAgain) return true;
+        await new Promise(resolve => setTimeout(resolve, Math.min(250 * (attempt + 1), 1000)));
+    }
+    return !localCanvasDirty && !savingCanvasNow && !saveCanvasAgain;
 }
 
 async function loadConfig(){
@@ -2206,7 +2287,7 @@ function canvasLocalAssetUrls(){
     const urls = new Set();
     const add = value => {
         const url = outputUrlValue(value);
-        if(url && (url.startsWith('/output/') || url.startsWith('/assets/'))) urls.add(url);
+        if(url && (url.startsWith('/output/') || url.startsWith('/assets/') || url.startsWith('/api/storage-files/'))) urls.add(url);
     };
     nodes.forEach(node => {
         if(node.url) add(node.url);
@@ -2296,16 +2377,23 @@ function handleCanvasUpdatedMessage(data){
     if(data.canvas_id !== canvas.id) return;
     const remoteUpdatedAt = Number(data.updated_at || 0);
     if(remoteUpdatedAt && remoteUpdatedAt <= Number(lastCanvasUpdatedAt || 0)) return;
+    if(localCanvasDirty || savingCanvasNow || saveCanvasAgain){
+        setStatus(tr('canvas.saveRetrying') || '保存中，正在合并远端更新');
+        clearTimeout(remoteSyncTimer);
+        remoteSyncTimer = setTimeout(syncRemoteCanvasNow, 700);
+        return;
+    }
     clearTimeout(saveTimer);
     saveTimer = null;
-    localCanvasDirty = false;
     clearTimeout(remoteSyncTimer);
     remoteSyncTimer = setTimeout(syncRemoteCanvasNow, savingCanvasNow ? 700 : 120);
     setStatus('Syncing...');
 }
 async function returnToCanvasManager(){
-    clearTimeout(saveTimer);
-    if(canvas && localCanvasDirty) await saveCanvas();
+    if(canvas && !(await flushCanvasSave())){
+        setStatus(tr('canvas.saveBlocked') || '尚未保存，暂不能离开');
+        return false;
+    }
     stopCanvasRemotePolling();
     canvas = null;
     nodes = [];
@@ -2318,6 +2406,7 @@ async function returnToCanvasManager(){
     refreshGateViewControls();
     await loadCanvasList(false);
     setCreateMode(false);
+    return true;
 }
 function requestDeleteCanvas(id, event){
     event?.preventDefault();
@@ -3469,7 +3558,7 @@ function outputImageUrls(node){
     return (node?.images || []).filter(item => mediaKindForOutputItem(item) === 'image').map(outputUrlValue).filter(Boolean);
 }
 function outputDownloadableImageUrls(node){
-    return (node?.images || []).map(outputUrlValue).filter(url => url && !isMissingAssetUrl(url) && (url.startsWith('/output/') || url.startsWith('/assets/')));
+    return (node?.images || []).map(outputUrlValue).filter(url => url && !isMissingAssetUrl(url) && (url.startsWith('/output/') || url.startsWith('/assets/') || url.startsWith('/api/storage-files/')));
 }
 function groupImageItems(group){
     if(!group || group.type !== 'group') return [];
@@ -4187,7 +4276,9 @@ async function uploadMediaFiles(files, point, onlyImages=false, opts={}){
     if(!supported.length) return [];
     const form = new FormData();
     supported.forEach(file => form.append('files', file));
-    const data = await fetch('/api/ai/upload', {method:'POST', body:form}).then(r=>r.json());
+    const response = await fetch('/api/ai/upload', {method:'POST', body:form});
+    if(!response.ok) throw new Error(await responseErrorMessage(response, langIsEn() ? 'Media upload failed' : '素材上传失败'));
+    const data = await response.json();
     const base = point || screenToWorld(window.innerWidth / 2, window.innerHeight / 2);
     const created = [];
     (data.files || []).forEach((file, i) => {
@@ -4247,6 +4338,33 @@ async function createImageCardsFromLocalPaths(paths, point){
         throw err;
     }
 }
+async function persistDroppedImageUrl(url, name='image'){
+    const raw = String(url || '').trim();
+    if(!raw) throw new Error(langIsEn() ? 'Dropped media URL is empty' : '拖入的素材地址为空');
+    if(/^blob:|^data:/i.test(raw)){
+        const response = await fetch(raw);
+        if(!response.ok) throw new Error(langIsEn() ? 'Dropped media cannot be read' : '无法读取拖入的素材');
+        const blob = await response.blob();
+        const file = new File([blob], name || 'dropped-media', {type:blob.type || 'image/png'});
+        const form = new FormData();
+        form.append('files', file, file.name);
+        const uploaded = await fetch('/api/ai/upload', {method:'POST', body:form});
+        if(!uploaded.ok) throw new Error(await responseErrorMessage(uploaded, langIsEn() ? 'Media upload failed' : '素材上传失败'));
+        const data = await uploaded.json();
+        return data.files?.[0] || null;
+    }
+    if(/^https?:\/\//i.test(raw)){
+        const response = await fetch('/api/local-assets/import-urls', {
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({items:[{url:raw, name:name || outputImageName(raw)}]})
+        });
+        if(!response.ok) throw new Error(await responseErrorMessage(response, langIsEn() ? 'Media import failed' : '素材导入失败'));
+        const data = await response.json();
+        return data.files?.[0] || null;
+    }
+    return {url:raw, name:name || outputImageName(raw), kind:'image'};
+}
 async function applyImageDropPayloadToBoard(payload, point){
     if(payload.type === 'files'){
         if(payload.files.length > 1) return uploadImageGroup(payload.files, point);
@@ -4254,7 +4372,8 @@ async function applyImageDropPayloadToBoard(payload, point){
     }
     if(payload.type === 'localPaths') return createImageCardsFromLocalPaths(payload.localPaths, point);
     if(payload.type === 'url') {
-        createImageCardFromUrl(payload.url, point, outputImageName(payload.url));
+        const item = await persistDroppedImageUrl(payload.url, outputImageName(payload.url));
+        if(item?.url) createImageCardFromUrl(item.url, point, item.name || outputImageName(item.url));
         return [];
     }
     return [];
@@ -4280,10 +4399,12 @@ async function applyImageDropPayloadToNode(nodeId, payload){
         return;
     }
     if(payload.type === 'url' && payload.url){
+        const persisted = await persistDroppedImageUrl(payload.url, outputImageName(payload.url));
+        if(!persisted?.url) return;
         pushUndo();
-        node.url = payload.url;
-        node.name = outputImageName(payload.url);
-        node.mediaKind = isVideoUrl(payload.url) ? 'video' : isAudioUrl(payload.url) ? 'audio' : 'image';
+        node.url = persisted.url;
+        node.name = persisted.name || outputImageName(persisted.url);
+        node.mediaKind = persisted.kind || (isVideoUrl(persisted.url) ? 'video' : isAudioUrl(persisted.url) ? 'audio' : 'image');
         render();
         scheduleSave();
     }
@@ -6345,12 +6466,21 @@ function renderNode(node){
             body.innerHTML = `<div class="image-preview-wrap">${missing ? missingAssetHtml(node.url) : canvasPreviewImgHtml(node.url, 768, 'draggable="false"')}</div><div class="image-caption text-[11px] text-gray-400 truncate">${escapeHtml(node.name || 'image')}${missing ? ` · ${langIsEn() ? 'missing' : '文件缺失'}` : ''}</div>`;
             if(!missing && mediaKind !== 'image'){
                 const mediaHtml = mediaKind === 'video'
-                    ? `<div class="media-card video-card">${canvasVideoPreviewHtml(node.url, 768, 'draggable="false" data-video-fallback-attrs="controls"')}<button class="canvas-video-play" type="button" title="播放"><i data-lucide="play"></i></button></div>`
-                    : `<div class="media-card audio-card"><i data-lucide="file-audio" class="w-8 h-8"></i><div class="audio-title">${escapeHtml(node.name || 'Audio')}</div><div class="audio-sub">AUDIO</div><audio src="${escapeAttr(node.url)}" data-url="${escapeAttr(node.url)}" controls preload="metadata"></audio></div>`;
+                    ? `<div class="media-card video-card">${canvasVideoPreviewHtml(node, 768, 'draggable="false" data-video-fallback-attrs="controls"')}<button class="canvas-video-play" type="button" title="播放"><i data-lucide="play"></i></button></div>`
+                    : `<div class="media-card audio-card"><i data-lucide="file-audio" class="w-8 h-8"></i><div class="audio-title">${escapeHtml(node.name || 'Audio')}</div><div class="audio-sub">AUDIO</div><audio src="${escapeAttr(canvasDisplayMediaUrl(node))}" data-url="${escapeAttr(node.url)}" controls preload="metadata"></audio></div>`;
                 body.innerHTML = `<div class="image-preview-wrap">${mediaHtml}</div><div class="image-caption text-[11px] text-gray-400 truncate">${escapeHtml(node.name || nodeTitleForMedia(node))}</div>`;
             }
             const previewWrap = body.querySelector('.image-preview-wrap');
             const loadedImg = body.querySelector('img');
+            if(loadedImg && !missing && mediaKind === 'image'){
+                const original = canvasOriginalMediaUrl(node);
+                const preview = canvasMediaPreviewUrl(node, 768);
+                loadedImg.src = preview;
+                loadedImg.dataset.previewSrc = preview;
+                loadedImg.dataset.originalSrc = original;
+                loadedImg.dataset.remoteSrc = canvasRemoteMediaUrl(node);
+                loadedImg.dataset.url = original;
+            }
             const videoPlayBtn = body.querySelector('.canvas-video-play');
             const openPreview = e => {
                 if(!node.url || missing) return;
@@ -10778,7 +10908,7 @@ async function rhImportWorkflowJson(nodeId, file){
 async function rhUploadValueIfNeeded(value, node=null){
     const text = String(value || '').trim();
     if(!text) return '';
-    if(!/^https?:\/\//i.test(text) && !text.startsWith('/output/') && !text.startsWith('/assets/')) return text;
+    if(!/^https?:\/\//i.test(text) && !text.startsWith('/output/') && !text.startsWith('/assets/') && !text.startsWith('/api/storage-files/')) return text;
     const res = await fetch('/api/runninghub/upload-asset', {
         method:'POST',
         headers:{'Content-Type':'application/json'},
@@ -11974,7 +12104,14 @@ function resultMediaUrls(result){
         if(typeof value === 'object'){
             if(value.url || value.path || value.src || value.uri){
                 const url = value.url || value.path || value.src || value.uri;
-                if(url) urls.push({url, kind:value.kind || value.type || value.mediaKind || '', name:value.name || value.filename || ''});
+                if(url) urls.push({
+                    url,
+                    kind:value.kind || value.type || value.mediaKind || '',
+                    name:value.name || value.filename || '',
+                    ...Object.fromEntries(['originalLocalUrl','localUrl','sourceUrl','local_url','source_url','natural_w','natural_h','width','height','w','h','layout_w','layout_h']
+                        .filter(key => value[key] !== undefined && value[key] !== null && value[key] !== '')
+                        .map(key => [key, value[key]]))
+                });
             }
             ['outputs','videos','images','urls','data','result'].forEach(key => add(value[key]));
             ['url','path','src','uri','output','output_url','outputUrl','video','video_url','videoUrl','mp4_url','mp4Url','download_url','downloadUrl','preview_url','previewUrl'].forEach(key => add(value[key]));
@@ -13349,6 +13486,7 @@ function mediaKindForOutputItem(item){
     const explicit = String(item?.kind || item?.mediaKind || '').toLowerCase();
     if(['image','video','audio','text','file'].includes(explicit)) return explicit;
     const url = outputUrlValue(item);
+    const displayItem = item && typeof item === 'object' ? item : {url};
     if(isVideoUrl(url)) return 'video';
     if(isAudioUrl(url)) return 'audio';
     if(isTextUrl(url)) return 'text';
@@ -13579,7 +13717,7 @@ function renderCanvasLog(){
             const safe = escapeAttr(url);
             if(isMissingAssetUrl(url)) return `<div class="missing-asset compact" data-url="${safe}"><i data-lucide="image-off" class="w-4 h-4"></i></div>`;
             const kind = mediaKindForOutputItem(item);
-            return kind === 'video' ? canvasVideoPreviewHtml(url, 256, 'alt="output"') : canvasPreviewImgHtml(url, 256, 'alt="output"');
+            return kind === 'video' ? canvasVideoPreviewHtml(item, 256, 'alt="output"') : canvasPreviewImgHtml(item, 256, 'alt="output"');
         }).join('');
         const date = new Date(log.createdAt || Date.now()).toLocaleString(window.StudioI18n?.lang() === 'en' ? 'en-US' : 'zh-CN');
         const req = log.request || {};
@@ -14379,17 +14517,17 @@ function renderOutputMedia(item, useGridLayout=false){
         return `<div class="output-img-wrap" data-output-url="${safe}" data-missing-url="${safe}"${gridStyle}>${missingAssetHtml(url, true)}${timePill}<button class="output-del" title="${tr('common.delete')}">×</button></div>`;
     }
     if(kind === 'video'){
-        return `<div class="output-img-wrap" data-output-url="${safe}"${gridStyle}>${canvasVideoPreviewHtml(url, useGridLayout ? 512 : 768, 'alt="video output" data-video-fallback-attrs="controls data-output-video-fallback=&quot;1&quot;"')}${timePill}<button class="canvas-video-play output-video-play" type="button" title="播放"><i data-lucide="play"></i></button><div class="output-video-badge"><i data-lucide="play" class="w-3 h-3"></i>VIDEO</div><button class="output-del" title="${tr('common.delete')}">×</button></div>`;
+        return `<div class="output-img-wrap" data-output-url="${safe}"${gridStyle}>${canvasVideoPreviewHtml(displayItem, useGridLayout ? 512 : 768, 'alt="video output" data-video-fallback-attrs="controls data-output-video-fallback=&quot;1&quot;"')}${timePill}<button class="canvas-video-play output-video-play" type="button" title="播放"><i data-lucide="play"></i></button><div class="output-video-badge"><i data-lucide="play" class="w-3 h-3"></i>VIDEO</div><button class="output-del" title="${tr('common.delete')}">×</button></div>`;
     }
     if(kind === 'audio'){
-        return `<div class="output-img-wrap output-audio-wrap" data-output-url="${safe}"${gridStyle}><div class="output-audio-card"><i data-lucide="file-audio" class="w-7 h-7"></i><span>${escapeHtml(outputImageName(url))}</span><audio src="${safe}" data-url="${safe}" controls preload="metadata"></audio></div>${timePill}<button class="output-del" title="${tr('common.delete')}">×</button></div>`;
+        return `<div class="output-img-wrap output-audio-wrap" data-output-url="${safe}"${gridStyle}><div class="output-audio-card"><i data-lucide="file-audio" class="w-7 h-7"></i><span>${escapeHtml(outputImageName(url))}</span><audio src="${escapeAttr(canvasDisplayMediaUrl(displayItem))}" data-url="${safe}" controls preload="metadata"></audio></div>${timePill}<button class="output-del" title="${tr('common.delete')}">×</button></div>`;
     }
     if(kind === 'text' || kind === 'file'){
         const icon = kind === 'text' ? 'file-text' : 'file';
         const label = kind === 'text' ? 'TEXT' : 'FILE';
         return `<div class="output-img-wrap output-file-wrap" data-output-url="${safe}"${gridStyle}><div class="output-file-card"><i data-lucide="${icon}" class="w-7 h-7"></i><span>${escapeHtml(meta.name || outputImageName(url))}</span><small>${label}</small></div>${timePill}<button class="output-del" title="${tr('common.delete')}">×</button></div>`;
     }
-    return `<div class="output-img-wrap" data-output-url="${safe}"${gridStyle}>${canvasPreviewImgHtml(url, useGridLayout ? 512 : 768, 'alt="generated output"')}${timePill}<button class="output-del" title="${tr('common.delete')}">×</button></div>`;
+    return `<div class="output-img-wrap" data-output-url="${safe}"${gridStyle}>${canvasPreviewImgHtml(displayItem, useGridLayout ? 512 : 768, 'alt="generated output"')}${timePill}<button class="output-del" title="${tr('common.delete')}">×</button></div>`;
 }
 function outputGridLayout(node){
     const images = node?.images || [];
@@ -14435,8 +14573,9 @@ function appendOutputImages(out, images, compareRef, metas=[], layout=null){
         const meta = metas[i] || metas[0] || {};
         const source = url && typeof url === 'object' ? url : {};
         const item = {url:outputUrlValue(url), viewed:false, runMs:meta.runMs || 0, run:meta.run || null};
-        if(source.name) item.name = source.name;
-        if(source.kind || source.mediaKind) item.kind = source.kind || source.mediaKind;
+        ['name','kind','mediaKind','originalLocalUrl','localUrl','sourceUrl','local_url','source_url','natural_w','natural_h','width','height','w','h','layout_w','layout_h'].forEach(key => {
+            if(source[key] !== undefined && source[key] !== null && source[key] !== '') item[key] = source[key];
+        });
         if(meta.kind) item.kind = meta.kind;
         if(meta.grid) item.grid = meta.grid;
         return item;
@@ -15160,7 +15299,7 @@ function openOutputLightbox(url, out){
                 ? `${outputLightboxVideo.videoWidth} x ${outputLightboxVideo.videoHeight}`
                 : 'Video', meta);
         };
-        outputLightboxVideo.src = canvasDisplayMediaUrl(url, outputDownloadName(url));
+        outputLightboxVideo.src = canvasDisplayMediaUrl(meta && Object.keys(meta).length ? {...meta, url} : url, outputDownloadName(url));
         outputPreview.ondblclick = null;
         outputDownloadBtn.onclick = e => {
             e.stopPropagation();
@@ -15178,8 +15317,8 @@ function openOutputLightbox(url, out){
     outputLightboxImg.onload = () => {
         outputResolutionText(`${outputLightboxImg.naturalWidth} x ${outputLightboxImg.naturalHeight}`, meta);
     };
-    outputLightboxImg.src = canvasDisplayMediaUrl(url, outputDownloadName(url));
-    outputCompareResult.src = canvasDisplayMediaUrl(url, outputDownloadName(url));
+    outputLightboxImg.src = canvasDisplayMediaUrl(meta && Object.keys(meta).length ? {...meta, url} : url, outputDownloadName(url));
+    outputCompareResult.src = canvasDisplayMediaUrl(meta && Object.keys(meta).length ? {...meta, url} : url, outputDownloadName(url));
     outputCompareOriginal.src = currentOutputCompareUrl ? canvasDisplayMediaUrl(currentOutputCompareUrl, outputDownloadName(currentOutputCompareUrl)) : '';
     outputPreview.ondblclick = e => {
         e.stopPropagation();

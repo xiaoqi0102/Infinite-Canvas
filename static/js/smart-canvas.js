@@ -94,6 +94,10 @@ let didPan = false;
 let portDragState = null;
 let connectionEraseState = null;
 let saveTimer = null;
+let smartCanvasDirty = false;
+let smartSaveAgain = false;
+let smartSaveRetryTimer = null;
+let smartSaveRetryDelay = 1000;
 let apiProviders = [];
 let comfyWorkflows = [];
 let comfyInstanceCount = 1;
@@ -449,6 +453,31 @@ function refreshIcons(){ if(window.lucide) lucide.createIcons(); }
 function uid(prefix){ return `${prefix}_${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36).slice(-4)}`; }
 function escapeHtml(str){ return String(str == null ? '' : str).replace(/[&<>"']/g, s => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[s])); }
 const escapeAttr = escapeHtml;
+function smartPreferredMediaUrl(itemOrUrl){
+    if(!itemOrUrl || typeof itemOrUrl !== 'object') return String(itemOrUrl || '');
+    const candidates = [
+        itemOrUrl.originalLocalUrl,
+        itemOrUrl.localUrl,
+        itemOrUrl.sourceUrl,
+        itemOrUrl.local_url,
+        itemOrUrl.source_url,
+        itemOrUrl.url
+    ];
+    return candidates.find(url => url && !isCloudHostedMediaUrl(url)) || String(itemOrUrl.url || '');
+}
+function smartRemoteMediaUrl(itemOrUrl){
+    if(!itemOrUrl || typeof itemOrUrl !== 'object') return '';
+    const candidates = [
+        itemOrUrl.remoteUrl,
+        itemOrUrl.remote_url,
+        itemOrUrl.cloudUrl,
+        itemOrUrl.cloud_url,
+        itemOrUrl.url,
+        itemOrUrl.sourceUrl,
+        itemOrUrl.source_url
+    ];
+    return candidates.map(url => String(url || '').trim()).find(url => url && isCloudHostedMediaUrl(url)) || '';
+}
 function smartOriginalMediaUrl(itemOrUrl){
     const raw = typeof itemOrUrl === 'string' ? itemOrUrl : (itemOrUrl?.url || '');
     const text = String(raw || '');
@@ -463,19 +492,20 @@ function smartOriginalMediaUrl(itemOrUrl){
     return text;
 }
 function smartMediaPreviewUrl(itemOrUrl, size=512){
-    const raw = smartOriginalMediaUrl(itemOrUrl);
+    const raw = smartOriginalMediaUrl(smartPreferredMediaUrl(itemOrUrl));
     const displayItem = typeof itemOrUrl === 'object' && itemOrUrl ? {...itemOrUrl, url:raw} : raw;
     const displayUrl = displayMediaUrl(displayItem);
     if(!raw || raw.startsWith('data:') || raw.startsWith('blob:')) return displayUrl;
-    if(!raw.startsWith('/output/') && !raw.startsWith('/assets/')) return displayUrl;
+    if(!raw.startsWith('/output/') && !raw.startsWith('/assets/') && !raw.startsWith('/api/storage-files/')) return displayUrl;
     if(!/\.(png|jpe?g|webp|gif|bmp|avif|tiff?|mp4|webm|mov|m4v|avi|mkv)(\?|#|$)/i.test(raw)) return displayUrl;
     const width = Math.max(64, Math.min(2048, Math.round(Number(size) || 512)));
     return `/api/media-preview?w=${width}&url=${encodeURIComponent(raw)}`;
 }
 function smartPreviewImgHtml(itemOrUrl, size=512, attrs=''){
-    const original = smartOriginalMediaUrl(itemOrUrl);
+    const original = smartOriginalMediaUrl(smartPreferredMediaUrl(itemOrUrl));
+    const remote = smartRemoteMediaUrl(itemOrUrl);
     const preview = smartMediaPreviewUrl(itemOrUrl, size);
-    return `<img src="${escapeHtml(preview)}" data-preview-src="${escapeAttr(preview)}" data-original-src="${escapeAttr(original)}"${attrs ? ` ${attrs}` : ''}>`;
+    return `<img src="${escapeHtml(preview)}" data-preview-src="${escapeAttr(preview)}" data-original-src="${escapeAttr(original)}" data-remote-src="${escapeAttr(remote)}"${attrs ? ` ${attrs}` : ''}>`;
 }
 function loadSmartOriginalImageDimensions(url){
     const src = displayMediaUrl({url:smartOriginalMediaUrl(url)});
@@ -488,19 +518,43 @@ function loadSmartOriginalImageDimensions(url){
     });
 }
 function smartVideoPreviewHtml(itemOrUrl, size=512, attrs=''){
-    const original = smartOriginalMediaUrl(itemOrUrl);
+    const original = smartOriginalMediaUrl(smartPreferredMediaUrl(itemOrUrl));
+    const remote = smartRemoteMediaUrl(itemOrUrl);
     const preview = smartMediaPreviewUrl(itemOrUrl, size);
-    return `<img src="${escapeHtml(preview)}" data-preview-src="${escapeAttr(preview)}" data-original-src="${escapeAttr(original)}" data-url="${escapeAttr(original)}" data-preview-kind="video"${attrs ? ` ${attrs}` : ''}>`;
+    return `<img src="${escapeHtml(preview)}" data-preview-src="${escapeAttr(preview)}" data-original-src="${escapeAttr(original)}" data-remote-src="${escapeAttr(remote)}" data-url="${escapeAttr(original)}" data-preview-kind="video"${attrs ? ` ${attrs}` : ''}>`;
 }
-function smartVideoFallbackHtml(url, attrs=''){
-    const original = smartOriginalMediaUrl(url);
-    const src = displayMediaUrl({url:original});
-    return `<video src="${escapeHtml(src)}" data-url="${escapeAttr(original)}" muted preload="metadata" playsinline disablepictureinpicture controlslist="nodownload noplaybackrate noremoteplayback"${attrs ? ` ${attrs}` : ''}></video>`;
+function smartVideoPlayerHtml(itemOrUrl, attrs=''){
+    const original = smartOriginalMediaUrl(smartPreferredMediaUrl(itemOrUrl));
+    const remote = smartRemoteMediaUrl(itemOrUrl);
+    const safe = escapeHtml(displayMediaUrl(original));
+    return `<video src="${safe}" data-url="${escapeAttr(original)}" data-remote-src="${escapeAttr(remote)}" data-inline-video-active="1" controls autoplay playsinline preload="metadata" disablepictureinpicture controlslist="nodownload noplaybackrate noremoteplayback"${attrs ? ` ${attrs}` : ''}></video>`;
 }
-function smartVideoPlayerHtml(url, attrs=''){
-    const original = smartOriginalMediaUrl(url);
-    const safe = escapeHtml(displayMediaUrl({url:original}));
-    return `<video src="${safe}" data-url="${escapeAttr(original)}" data-inline-video-active="1" controls autoplay playsinline preload="metadata" disablepictureinpicture controlslist="nodownload noplaybackrate noremoteplayback"${attrs ? ` ${attrs}` : ''}></video>`;
+function smartCreateVideoElement(itemOrUrl, player=false, attrs=''){
+    const original = smartOriginalMediaUrl(smartPreferredMediaUrl(itemOrUrl));
+    const video = document.createElement('video');
+    video.src = displayMediaUrl(original);
+    video.dataset.url = original;
+    video.dataset.remoteSrc = smartRemoteMediaUrl(itemOrUrl);
+    video.controls = player || /\bcontrols\b/i.test(attrs);
+    video.autoplay = player;
+    video.muted = !player;
+    video.playsInline = true;
+    video.preload = 'metadata';
+    video.disablePictureInPicture = true;
+    video.setAttribute('controlslist', 'nodownload noplaybackrate noremoteplayback');
+    if(player) video.dataset.inlineVideoActive = '1';
+    return video;
+}
+function bindSmartVideoSourceFallback(video){
+    if(!video || video.dataset.remoteFallbackBound === '1') return;
+    video.dataset.remoteFallbackBound = '1';
+    video.addEventListener('error', () => {
+        const remote = displayMediaUrl(video.dataset.remoteSrc || '');
+        if(remote && video.getAttribute('src') !== remote){
+            video.src = remote;
+            video.load?.();
+        }
+    });
 }
 function smartActivateVideoPreview(target){
     const root = target?.closest?.('.media-video-card,.video-thumb,.image-wrap,.thumb-item') || target?.parentElement || null;
@@ -516,6 +570,7 @@ function smartActivateVideoPreview(target){
         return false;
     }
     const original = smartOriginalMediaUrl(img.dataset.originalSrc || img.dataset.url || img.getAttribute('src') || '');
+    const remote = img.dataset.remoteSrc || '';
     if(!original) return false;
     const itemEl = target?.closest?.('[data-image-index]') || root?.closest?.('[data-image-index]') || root;
     const nodeEl = target?.closest?.('.image-node') || root?.closest?.('.image-node');
@@ -523,11 +578,9 @@ function smartActivateVideoPreview(target){
     const imageIndex = Number(itemEl?.dataset?.imageIndex ?? 0);
     const image = node?.images?.[imageIndex];
     if(image) image._inlineVideoActive = true;
-    const tpl = document.createElement('template');
-    tpl.innerHTML = smartVideoPlayerHtml(original);
-    const video = tpl.content.firstElementChild;
-    if(!video) return false;
+    const video = smartCreateVideoElement({url:remote || original, originalLocalUrl:original}, true);
     img.replaceWith(video);
+    bindSmartVideoSourceFallback(video);
     video.parentElement?.querySelector?.('.smart-video-play')?.style?.setProperty('display', 'none');
     video.addEventListener('ended', () => {
         if(image) image._inlineVideoActive = true;
@@ -548,15 +601,27 @@ function bindSmartPreviewImageFallbacks(root=document){
         img.dataset.previewFallbackBound = '1';
         img.addEventListener('error', () => {
             const original = img.dataset.originalSrc || '';
+            const remote = img.dataset.remoteSrc || '';
             if(img.dataset.previewKind === 'video'){
-                const tpl = document.createElement('template');
-                tpl.innerHTML = smartVideoFallbackHtml(original, img.dataset.videoFallbackAttrs || '');
-                img.replaceWith(tpl.content.firstElementChild);
+                const video = smartCreateVideoElement(
+                    {url:remote || original, originalLocalUrl:original},
+                    false,
+                    img.dataset.videoFallbackAttrs || '',
+                );
+                img.replaceWith(video);
+                bindSmartVideoSourceFallback(video);
                 return;
             }
-            if(original && img.getAttribute('src') !== original) img.src = original;
+            const current = img.getAttribute('src') || '';
+            if(original && current !== original){
+                img.src = original;
+                return;
+            }
+            const remoteDisplay = displayMediaUrl(remote);
+            if(remoteDisplay && current !== remoteDisplay) img.src = remoteDisplay;
         });
     });
+    root.querySelectorAll?.('video[data-remote-src]:not([data-remote-fallback-bound])').forEach(bindSmartVideoSourceFallback);
 }
 const SMART_SELECTED_HIGH_RES_DELAY = 320;
 let smartSelectedHighResTimer = 0;
@@ -1163,9 +1228,14 @@ function canvasListUrlForProject(projectId){
     const pid = rememberCanvasListProject(projectId);
     return `/static/canvas-list.html?project=${encodeURIComponent(pid)}`;
 }
-function backToCanvasList(){
+async function backToCanvasList(){
     savePromptDraftForCurrent();
+    if(typeof flushSmartCanvasSave === 'function' && !(await flushSmartCanvasSave())){
+        toast(tr('smart.saveBlocked') || '尚未保存，暂不能离开');
+        return false;
+    }
     window.location.href = canvasListUrlForProject(canvas?.project || sourceProjectId || 'default');
+    return true;
 }
 function promptPlainText(){
     return originalPromptTextFromParts(collectPromptParts());
@@ -4042,7 +4112,7 @@ async function rhBuildWorkflowRequestExtras(media, nodeInfoList, sourceSettings=
 async function rhUploadValueIfNeeded(value, sourceSettings=settings){
     const text = String(value || '').trim();
     if(!text) return '';
-    if(!/^https?:\/\//i.test(text) && !text.startsWith('/output/') && !text.startsWith('/assets/')) return text;
+    if(!/^https?:\/\//i.test(text) && !text.startsWith('/output/') && !text.startsWith('/assets/') && !text.startsWith('/api/storage-files/')) return text;
     const res = await fetch('/api/runninghub/upload-asset', {
         method:'POST',
         headers:{'Content-Type':'application/json'},
@@ -5408,7 +5478,10 @@ function successfulRecentComfyLogOutputs(sourceNodeId='', withinMs=30 * 60 * 100
         .sort((a, b) => Number(a.createdAt || 0) - Number(b.createdAt || 0));
     const scoped = sourceNodeId ? logs.filter(log => log.nodeId === sourceNodeId) : logs;
     const usable = scoped.length ? scoped : logs.filter(log => !log.nodeId);
-    return usable.flatMap(log => (log.outputs || []).map(url => ({url, createdAt:log.createdAt, nodeId:log.nodeId}))).filter(item => item.url);
+    return usable.flatMap(log => (log.outputs || []).map(raw => {
+        const item = raw && typeof raw === 'object' ? {...raw} : {url:raw};
+        return {...item, url:item.url || item.path || item.src || item.uri || '', createdAt:log.createdAt, nodeId:log.nodeId};
+    })).filter(item => item.url);
 }
 function recoverStuckLoopOutputsFromLogs(){
     const used = usedCanvasOutputUrls();
@@ -5422,9 +5495,9 @@ function recoverStuckLoopOutputsFromLogs(){
         const sourceId = slot.loopRootId || slot.sourceNodeId || '';
         const output = successfulRecentComfyLogOutputs(sourceId).find(item => !used.has(item.url));
         if(!output) return;
-        const kind = mediaKindForUrls([output.url], 'image');
+        const kind = mediaKindForUrls([output], 'image');
         const ext = kind === 'video' ? 'mp4' : kind === 'audio' ? 'mp3' : kind === 'text' ? 'txt' : 'png';
-        slot.images = [stripImageGenerationMeta({url:output.url, name:`comfy-recovered-${Number(slot.loopSlotIndex || 0) + 1}.${ext}`, kind, generatedResult:true})];
+        slot.images = [stripImageGenerationMeta({...output, url:output.url, name:output.name || `comfy-recovered-${Number(slot.loopSlotIndex || 0) + 1}.${ext}`, kind, generatedResult:true})];
         markSmartNodeComplete(slot);
         if(kind) slot.outputKind = kind;
         slot.title = slot.title || 'Image';
@@ -6051,7 +6124,11 @@ async function deleteLocalAssetFromPanel(itemId){
         const localData = await fetch('/api/local-assets').then(r => r.ok ? r.json() : {items:[], tree:null});
         setLocalAssetLibraryFromResponse(localData);
         renderAssetLibrary();
-        toast(data.deleted?.length ? '已删除本地素材' : '未找到要删除的本地素材');
+        if(data.skipped_referenced?.length){
+            toast(tr('canvas.logMediaReferenced').replace('{n}', data.skipped_referenced.length));
+        } else {
+            toast(data.deleted?.length ? '已删除本地素材' : '未找到要删除的本地素材');
+        }
     } catch(err){
         toast(err.message || '删除失败');
     }
@@ -6128,10 +6205,22 @@ async function loadCanvas(){
 }
 function scheduleSave(){
     clearTimeout(saveTimer);
+    smartCanvasDirty = true;
+    if(canvasSyncInFlight){
+        smartSaveAgain = true;
+        return;
+    }
     saveTimer = setTimeout(saveCanvas, 450);
 }
 async function saveCanvas(){
     if(!canvasId || !canvas) return;
+    if(canvasSyncInFlight){
+        smartSaveAgain = true;
+        return false;
+    }
+    clearTimeout(saveTimer);
+    saveTimer = null;
+    smartSaveAgain = false;
     savePromptDraftForCurrent();
     nodes.forEach(node => {
         node.images = (node.images || []).map(img => mediaItemForStorage(stripImageGenerationMeta(img)));
@@ -6161,6 +6250,10 @@ async function saveCanvas(){
         if(res.ok){
             const data = await res.json();
             if(data.canvas && data.canvas.updated_at) canvas.updated_at = data.canvas.updated_at;
+            smartCanvasDirty = Boolean(smartSaveAgain);
+            smartSaveRetryDelay = 1000;
+            clearTimeout(smartSaveRetryTimer);
+            smartSaveRetryTimer = null;
         } else if(res.status === 409) {
             // 冲突：别人先保存了。合并对方的状态（节点 id 合并、图片取并集，谁都不丢），
             // 然后用对方最新的 updated_at 作为基底重存，把合并结果落盘——而不是直接覆盖对方。
@@ -6178,10 +6271,47 @@ async function saveCanvas(){
             }
             clearTimeout(saveTimer);
             saveTimer = setTimeout(saveCanvas, 300);
+            smartCanvasDirty = true;
+            smartSaveAgain = true;
+        } else {
+            const errorData = await res.json().catch(() => ({}));
+            throw new Error(errorData.detail || `save failed (${res.status})`);
         }
-    } catch(e) {} finally {
+        return !smartCanvasDirty && !smartSaveAgain;
+    } catch(e) {
+        smartCanvasDirty = true;
+        toast(tr('smart.saveRetrying') || '保存失败，正在重试');
+        clearTimeout(smartSaveRetryTimer);
+        smartSaveRetryTimer = setTimeout(() => {
+            smartSaveRetryTimer = null;
+            smartSaveRetryDelay = Math.min(smartSaveRetryDelay * 2, 15000);
+            saveCanvas();
+        }, smartSaveRetryDelay);
+        return false;
+    } finally {
         canvasSyncInFlight = false;
+        if(smartSaveAgain && canvas && !smartSaveRetryTimer){
+            clearTimeout(saveTimer);
+            saveTimer = setTimeout(saveCanvas, 0);
+        }
     }
+}
+async function flushSmartCanvasSave(maxAttempts=4){
+    clearTimeout(saveTimer);
+    saveTimer = null;
+    clearTimeout(smartSaveRetryTimer);
+    smartSaveRetryTimer = null;
+    for(let attempt=0; attempt<maxAttempts; attempt++){
+        if(!canvas || (!smartCanvasDirty && !canvasSyncInFlight && !smartSaveAgain)) return true;
+        if(canvasSyncInFlight){
+            await new Promise(resolve => setTimeout(resolve, 80));
+            continue;
+        }
+        const saved = await saveCanvas();
+        if(saved && !smartCanvasDirty && !smartSaveAgain) return true;
+        await new Promise(resolve => setTimeout(resolve, Math.min(250 * (attempt + 1), 1000)));
+    }
+    return !smartCanvasDirty && !canvasSyncInFlight && !smartSaveAgain;
 }
 function imageMetaFromNode(node){
     return {};
@@ -6670,7 +6800,8 @@ function imageForDisplay(img){
     return {
         ...img,
         url:localUrl,
-        originalLocalUrl:img.originalLocalUrl || localUrl
+        originalLocalUrl:img.originalLocalUrl || localUrl,
+        ...(isCloudHostedMediaUrl(img.url) ? {remoteUrl:img.url} : {})
     };
 }
 function resultMediaUrls(result){
@@ -6689,7 +6820,14 @@ function resultMediaUrls(result){
             if(value.url || value.path || value.src || value.uri){
                 const url = value.url || value.path || value.src || value.uri;
                 if(url){
-                    const item = {url, kind:value.kind || value.type || value.mediaKind || '', name:value.name || value.filename || ''};
+                    const item = {
+                        url,
+                        kind:value.kind || value.type || value.mediaKind || '',
+                        name:value.name || value.filename || '',
+                        ...Object.fromEntries(['originalLocalUrl','localUrl','sourceUrl','local_url','source_url']
+                            .filter(key => value[key] !== undefined && value[key] !== null && value[key] !== '')
+                            .map(key => [key, value[key]]))
+                    };
                     ['natural_w','natural_h','width','height','w','h','layout_w','layout_h'].forEach(key => {
                         const n = Number(value[key]);
                         if(Number.isFinite(n) && n > 0) item[key] = n;
@@ -6747,7 +6885,7 @@ function audioRefsOnly(refs){
 function thumbMediaHtml(img){
     if(isFileMediaItem(img) || isTextMediaItem(img)) return `<div class="media-thumb file-thumb" data-media-url="${escapeAttr(img.url || '')}" data-media-kind="${escapeAttr(mediaKindForItem(img))}"><i data-lucide="${isTextMediaItem(img) ? 'file-text' : 'file'}"></i><span>${escapeHtml(img.name || (isTextMediaItem(img) ? 'Text' : 'File'))}</span></div>`;
     if(isAudioMediaItem(img)) return `<div class="media-thumb audio-thumb" data-media-url="${escapeAttr(img.url || '')}" data-media-kind="audio"><i data-lucide="file-audio"></i><span>${escapeHtml(img.name || 'Audio')}</span></div>`;
-    if(isVideoMediaItem(img)) return `<div class="media-thumb video-thumb">${isInlineVideoActive(img) ? smartVideoPlayerHtml(img.url || '') : `${smartVideoPreviewHtml(img, 512, 'alt=""')}<button class="smart-video-play thumb-video-play" type="button" title="播放"><i data-lucide="play"></i></button>`}</div>`;
+    if(isVideoMediaItem(img)) return `<div class="media-thumb video-thumb">${isInlineVideoActive(img) ? smartVideoPlayerHtml(img) : `${smartVideoPreviewHtml(img, 512, 'alt=""')}<button class="smart-video-play thumb-video-play" type="button" title="播放"><i data-lucide="play"></i></button>`}</div>`;
     return smartPreviewImgHtml(img, 512, 'draggable="false"');
 }
 function imageResolutionLabel(img){
@@ -6818,7 +6956,7 @@ function updateImageResolutionBadgeElement(itemEl, img){
 function singleMediaHtml(img, w, h){
     if(isFileMediaItem(img) || isTextMediaItem(img)) return `<div class="node-img media-card media-file-card" style="width:${w}px;height:${h}px"><div class="media-card-icon"><i data-lucide="${isTextMediaItem(img) ? 'file-text' : 'file'}"></i></div><div class="media-card-title">${escapeHtml(img.name || (isTextMediaItem(img) ? 'Text' : 'File'))}</div><div class="media-card-sub">${isTextMediaItem(img) ? 'TEXT' : 'FILE'}</div></div>`;
     if(isAudioMediaItem(img)) return `<div class="node-img media-card media-audio-card" style="width:${w}px;height:${h}px"><div class="media-card-icon"><i data-lucide="file-audio"></i></div><div class="media-card-title">${escapeHtml(img.name || 'Audio')}</div><div class="media-card-sub">AUDIO</div><audio src="${escapeAttr(img.url || '')}" data-url="${escapeAttr(img.url || '')}" controls preload="metadata"></audio></div>`;
-    if(isVideoMediaItem(img)) return `<div class="node-img media-card media-video-card" style="width:${w}px;height:${h}px">${isInlineVideoActive(img) ? smartVideoPlayerHtml(img.url || '') : `${smartVideoPreviewHtml(img, 768, 'alt=""')}<button class="smart-video-play" type="button" title="播放"><i data-lucide="play"></i></button>`}</div>`;
+    if(isVideoMediaItem(img)) return `<div class="node-img media-card media-video-card" style="width:${w}px;height:${h}px">${isInlineVideoActive(img) ? smartVideoPlayerHtml(img) : `${smartVideoPreviewHtml(img, 768, 'alt=""')}<button class="smart-video-play" type="button" title="播放"><i data-lucide="play"></i></button>`}</div>`;
     return smartPreviewImgHtml(img, 768, `class="node-img" draggable="false" style="width:${w}px;height:${h}px"`);
 }
 function smartNodeHasLiveMedia(node){
@@ -6930,13 +7068,13 @@ function outputUrlLooksVideo(url){
     return /\.(mp4|webm|mov|m4v|avi|mkv)(\?|$)/.test(smartOriginalMediaUrl(url).toLowerCase());
 }
 function proxiedMediaUrl(itemOrUrl, name=''){
-    const url = smartOriginalMediaUrl(itemOrUrl);
-    if(!url || String(url).startsWith('/assets/') || String(url).startsWith('/output/') || String(url).startsWith('data:') || String(url).startsWith('blob:')) return url;
+    const url = smartOriginalMediaUrl(smartPreferredMediaUrl(itemOrUrl));
+    if(!url || String(url).startsWith('/assets/') || String(url).startsWith('/output/') || String(url).startsWith('/api/storage-files/') || String(url).startsWith('data:') || String(url).startsWith('blob:')) return url;
     const filename = name || (typeof itemOrUrl === 'object' ? (itemOrUrl.name || '') : '') || fileNameFromUrl(url) || 'preview';
     return `/api/download-output?inline=1&url=${encodeURIComponent(url)}&name=${encodeURIComponent(filename)}`;
 }
 function displayMediaUrl(itemOrUrl, name=''){
-    const url = smartOriginalMediaUrl(itemOrUrl);
+    const url = smartOriginalMediaUrl(smartPreferredMediaUrl(itemOrUrl));
     if(/^https?:\/\//i.test(String(url || ''))) return proxiedMediaUrl(itemOrUrl, name);
     return url;
 }
@@ -6945,7 +7083,7 @@ function bindImageProxyFallback(imgEl, itemOrUrl){
     imgEl.dataset.proxyFallbackBound = '1';
     imgEl.addEventListener('error', () => {
         if(imgEl.dataset.proxyFallbackTried === '1') return;
-        const fallback = proxiedMediaUrl(itemOrUrl);
+        const fallback = proxiedMediaUrl(smartRemoteMediaUrl(itemOrUrl) || itemOrUrl);
         if(!fallback || fallback === imgEl.getAttribute('src')) return;
         imgEl.dataset.proxyFallbackTried = '1';
         imgEl.src = fallback;
@@ -12512,6 +12650,28 @@ async function importSmartLocalImages(paths){
     const data = await response.json();
     return data.files || [];
 }
+async function persistSmartDroppedImageUrl(url, name='image'){
+    const raw = String(url || '').trim();
+    if(!raw) throw new Error(tr('smart.toastUploadFail'));
+    if(/^blob:|^data:/i.test(raw)){
+        const response = await fetch(raw);
+        if(!response.ok) throw new Error(tr('smart.toastUploadFail'));
+        const blob = await response.blob();
+        const file = new File([blob], name || 'dropped-media', {type:blob.type || 'image/png'});
+        return (await uploadFiles([file]))[0] || null;
+    }
+    if(/^https?:\/\//i.test(raw)){
+        const response = await fetch('/api/local-assets/import-urls', {
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({items:[{url:raw, name:name || smartImageNameFromUrl(raw)}]})
+        });
+        if(!response.ok) throw new Error(await smartResponseErrorMessage(response, tr('smart.toastUploadFail')));
+        const data = await response.json();
+        return data.files?.[0] || null;
+    }
+    return {url:raw, name:name || smartImageNameFromUrl(raw), kind:'image'};
+}
 async function handleSmartImageDropPayload(payload, targetId='', opts={}){
     try {
         if(payload.type === 'files') await handleFiles(payload.files, targetId, opts);
@@ -12520,7 +12680,8 @@ async function handleSmartImageDropPayload(payload, targetId='', opts={}){
             appendImagesToSmartNode(await importSmartLocalImages(payload.localPaths), targetId, opts);
         } else if(payload.type === 'url') {
             if(!opts.skipUndo) pushUndo();
-            appendImagesToSmartNode([{url:payload.url, name:smartImageNameFromUrl(payload.url), kind:'image'}], targetId, opts);
+            const item = await persistSmartDroppedImageUrl(payload.url, smartImageNameFromUrl(payload.url));
+            if(item?.url) appendImagesToSmartNode([item], targetId, opts);
         }
     } catch(e) {
         toast(e.message || tr('smart.toastUploadFail'));

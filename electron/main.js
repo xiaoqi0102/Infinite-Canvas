@@ -360,6 +360,15 @@ function samePath(left, right) {
   return path.resolve(left).toLowerCase() === path.resolve(right).toLowerCase();
 }
 
+function nestedPath(parent, candidate) {
+  const relative = path.relative(path.resolve(parent), path.resolve(candidate));
+  return relative !== '' && relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+}
+
+function unsafeMigrationPaths(source, target) {
+  return samePath(source, target) || nestedPath(source, target) || nestedPath(target, source);
+}
+
 function canWriteDirectory(dir) {
   try {
     fs.mkdirSync(dir, { recursive: true });
@@ -372,11 +381,38 @@ function canWriteDirectory(dir) {
   }
 }
 
+function copyFileAtomic(source, target) {
+  const targetDir = path.dirname(target);
+  fs.mkdirSync(targetDir, { recursive: true });
+  const temp = path.join(
+    targetDir,
+    `.${path.basename(target)}.${Date.now()}-${Math.random().toString(16).slice(2)}.tmp`,
+  );
+  let handle = null;
+  try {
+    fs.copyFileSync(source, temp, fs.constants.COPYFILE_EXCL);
+    handle = fs.openSync(temp, 'r+');
+    fs.fsyncSync(handle);
+    fs.closeSync(handle);
+    handle = null;
+    if (!fs.existsSync(target)) fs.renameSync(temp, target);
+  } finally {
+    if (handle !== null) {
+      try { fs.closeSync(handle); } catch (_) {}
+    }
+    try {
+      if (fs.existsSync(temp)) fs.unlinkSync(temp);
+    } catch (_) {}
+  }
+}
+
 function copyMissingRecursive(source, target) {
   if (!fs.existsSync(source)) return;
-  const stat = fs.statSync(source);
+  const stat = fs.lstatSync(source);
+  if (stat.isSymbolicLink()) return;
+  if (fs.existsSync(target) && fs.lstatSync(target).isSymbolicLink()) return;
   if (stat.isDirectory()) {
-    if (fs.existsSync(target) && !fs.statSync(target).isDirectory()) return;
+    if (fs.existsSync(target) && !fs.lstatSync(target).isDirectory()) return;
     fs.mkdirSync(target, { recursive: true });
     for (const entry of fs.readdirSync(source, { withFileTypes: true })) {
       copyMissingRecursive(path.join(source, entry.name), path.join(target, entry.name));
@@ -385,18 +421,26 @@ function copyMissingRecursive(source, target) {
   }
   if (stat.isFile() && !fs.existsSync(target)) {
     fs.mkdirSync(path.dirname(target), { recursive: true });
-    fs.copyFileSync(source, target);
+    copyFileAtomic(source, target);
+  }
+}
+
+function migrateDataDirectory(sourceDir, targetDir, sourceType) {
+  if (!fs.existsSync(sourceDir) || unsafeMigrationPaths(sourceDir, targetDir)) return;
+  try {
+    copyMissingRecursive(sourceDir, targetDir);
+  } catch (error) {
+    appendRuntimeLog(targetDir, 'user-data-migration-failed', {
+      sourceType,
+      sourceDir,
+      targetDir,
+      error: error && error.message ? error.message : String(error),
+    });
   }
 }
 
 function migrateLegacyInstallData(targetDir) {
-  const legacyDir = path.join(installRoot(), USER_DATA_DIR_NAME);
-  if (samePath(legacyDir, targetDir) || !fs.existsSync(legacyDir)) return;
-  try {
-    copyMissingRecursive(legacyDir, targetDir);
-  } catch (_) {
-    // 数据目录迁移失败不应阻断应用启动；后端仍会使用新的可写目录。
-  }
+  migrateDataDirectory(path.join(installRoot(), USER_DATA_DIR_NAME), targetDir, 'legacy-install');
 }
 
 function appendRuntimeLog(dataRoot, event, details = {}) {
@@ -765,11 +809,12 @@ function userDataRoot() {
     return appRoot();
   }
   const installSiblingDataDir = path.join(path.dirname(installRoot()), USER_DATA_DIR_NAME);
+  const fallbackDir = path.join(app.getPath('userData'), USER_DATA_DIR_NAME);
   if (canWriteDirectory(installSiblingDataDir)) {
+    migrateDataDirectory(fallbackDir, installSiblingDataDir, 'system-user-data-fallback');
     migrateLegacyInstallData(installSiblingDataDir);
     return installSiblingDataDir;
   }
-  const fallbackDir = path.join(app.getPath('userData'), USER_DATA_DIR_NAME);
   fs.mkdirSync(fallbackDir, { recursive: true });
   migrateLegacyInstallData(fallbackDir);
   return fallbackDir;

@@ -4,6 +4,10 @@ const refreshBtn = document.getElementById('refreshBtn');
 const storageSettingsBtn = document.getElementById('storageSettingsBtn');
 const uploadInput = document.getElementById('assetUploadInput');
 
+function assetManagerMessage(zh, en){
+    return window.StudioI18n?.lang?.() === 'en' ? en : zh;
+}
+
 const LOCAL_CAPTION_SETTINGS_KEY = 'asset_manager_local_caption_settings_v1';
 function readLocalCaptionSettings(){
     try {
@@ -422,7 +426,14 @@ async function deleteSelectedStorageFiles(){
     });
     storageSettingsState.selected.clear();
     await loadStorageFiles(storageSettingsState.kind);
-    setStatus(`已删除 ${data.removed || 0} 个文件`);
+    const skipped = data.skipped_referenced?.length || 0;
+    const removed = data.removed || 0;
+    setStatus(skipped
+        ? assetManagerMessage(
+            `已删除 ${removed} 个文件，另有 ${skipped} 个仍被画布或任务引用，已保留`,
+            `Deleted ${removed} files; kept ${skipped} files still referenced by canvases or tasks`,
+        )
+        : assetManagerMessage(`已删除 ${removed} 个文件`, `Deleted ${removed} files`));
 }
 function formatDate(value){
     const num = Number(value || 0);
@@ -2833,7 +2844,7 @@ async function deleteLocalAssets(ids){
     if(!names.length) return;
     setStatus('正在删除...');
     try {
-        await apiJson('/api/local-assets/delete', {
+        const data = await apiJson('/api/local-assets/delete', {
             method:'POST',
             headers:{'Content-Type':'application/json'},
             body:JSON.stringify({names})
@@ -2843,7 +2854,14 @@ async function deleteLocalAssets(ids){
         selectedLocalUploadIds.clear();
         if(selectedLocalUploadId && !findLocalUpload(selectedLocalUploadId)) selectedLocalUploadId = '';
         render();
-        setStatus(`已删除 ${names.length} 个素材`);
+        const removed = data.deleted?.length || 0;
+        const skipped = data.skipped_referenced?.length || 0;
+        setStatus(skipped
+            ? assetManagerMessage(
+                `已删除 ${removed} 个素材，另有 ${skipped} 个仍被画布或任务引用，已保留`,
+                `Deleted ${removed} assets; kept ${skipped} assets still referenced by canvases or tasks`,
+            )
+            : assetManagerMessage(`已删除 ${removed} 个素材`, `Deleted ${removed} assets`));
     } catch(err) {
         setStatus(err.message || '删除失败');
     }

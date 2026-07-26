@@ -266,6 +266,8 @@
         "canvas.editMeta": { zh: "编辑图标 / 颜色 / 负责人", en: "Edit icon / color / owner" },
         "canvas.pinned": { zh: "已置顶", en: "Pinned" },
         "canvas.metaSaveFailed": { zh: "保存失败", en: "Save failed" },
+        "canvas.saveRetrying": { zh: "保存失败，正在重试", en: "Save failed; retrying" },
+        "canvas.saveBlocked": { zh: "尚未保存，暂不能离开", en: "Changes are not saved yet; cannot leave" },
         "canvas.deletedAt": { zh: "删除于", en: "Deleted" },
         "canvas.purgeConfirm": { zh: "彻底删除？无法恢复", en: "Delete forever? This cannot be undone." },
         "canvas.moveToTrashConfirm": { zh: "移入回收站？", en: "Move to Trash?" },

@@ -377,7 +377,7 @@ Electron passes this path to the backend through `INFINITE_CANVAS_USER_DATA_DIR`
 
 If the parent directory of the installation directory cannot create or write to the sibling data folder, Electron falls back to an `InfiniteCanvas_Data` folder under Electron's system user data directory.
 
-On startup, Electron copies missing files from the old in-install `InfiniteCanvas_Data` folder into the new sibling folder when that old folder exists. The backend keeps static files and built-in workflows read-only from the packaged app. User data such as API settings, canvases, uploads, custom workflows, history, and outputs are written under `InfiniteCanvas_Data`.
+On a later startup, if the sibling folder becomes writable again, Electron copies missing files from the system-user-data fallback folder back into the sibling folder before selecting it. Electron then supplements it with missing files from the old in-install `InfiniteCanvas_Data` folder when that old folder exists. Existing destination files are never overwritten, and source/target directory overlap is rejected to prevent recursive copying. A migration failure is written to the active folder's `desktop.log` when possible and does not block startup. The backend keeps static files and built-in workflows read-only from the packaged app. User data such as API settings, canvases, uploads, custom workflows, history, and outputs are written under `InfiniteCanvas_Data`.
 
 The desktop launcher appends startup diagnostics to `desktop.log` inside the active `InfiniteCanvas_Data` folder. The log records the selected data directory, install/resource paths, backend command, port, backend exit code, and startup errors.
 

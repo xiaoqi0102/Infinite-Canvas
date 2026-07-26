@@ -295,6 +295,97 @@ def app_path(*parts: str) -> str:
 def user_data_path(*parts: str) -> str:
     return os.path.join(USER_DATA_ROOT, *parts)
 
+def write_json_atomic(path: str, value: Any, *, indent: int = 2) -> None:
+    """在同目录写临时文件后原子替换，避免中断时留下半截 JSON。"""
+    target = os.path.abspath(path)
+    directory = os.path.dirname(target)
+    os.makedirs(directory, exist_ok=True)
+    fd, temp_path = tempfile.mkstemp(
+        prefix=f".{os.path.basename(target)}.",
+        suffix=".tmp",
+        dir=directory,
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            json.dump(value, handle, ensure_ascii=False, indent=indent)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, target)
+    except Exception:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        try:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+        except OSError:
+            pass
+        raise
+
+def write_bytes_atomic(path: str, value: bytes) -> None:
+    """先完整写入临时文件，再替换目标文件。"""
+    if not value:
+        raise ValueError("文件内容为空")
+    target = os.path.abspath(path)
+    directory = os.path.dirname(target)
+    os.makedirs(directory, exist_ok=True)
+    fd, temp_path = tempfile.mkstemp(
+        prefix=f".{os.path.basename(target)}.",
+        suffix=".tmp",
+        dir=directory,
+    )
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(value)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, target)
+    except Exception:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        try:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+        except OSError:
+            pass
+        raise
+
+def copy_file_atomic(source: str, target: str) -> None:
+    """把现有文件复制到同目录临时文件，完整落盘后再原子替换目标。"""
+    source_path = os.path.abspath(source)
+    target_path = os.path.abspath(target)
+    directory = os.path.dirname(target_path)
+    os.makedirs(directory, exist_ok=True)
+    fd, temp_path = tempfile.mkstemp(
+        prefix=f".{os.path.basename(target_path)}.",
+        suffix=".tmp",
+        dir=directory,
+    )
+    try:
+        with open(source_path, "rb") as source_file, os.fdopen(fd, "wb") as target_file:
+            shutil.copyfileobj(source_file, target_file, length=1024 * 1024)
+            target_file.flush()
+            os.fsync(target_file.fileno())
+        try:
+            shutil.copystat(source_path, temp_path)
+        except OSError:
+            pass
+        os.replace(temp_path, target_path)
+    except Exception:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        try:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+        except OSError:
+            pass
+        raise
+
 WORKFLOW_DIR = app_path("workflows")
 USER_WORKFLOW_DIR = user_data_path("workflows")
 CUSTOM_WORKFLOW_DIR = os.path.join(USER_WORKFLOW_DIR, "custom")
@@ -358,29 +449,25 @@ def migrate_user_data_from_app_root():
             if os.path.exists(target) and not os.path.isdir(target):
                 report["skipped"].append({"path": label, "reason": "target_exists"})
                 return
-            if os.path.isdir(target):
-                copied_count = 0
-                skipped_count = 0
-                for root, _, files in os.walk(source):
-                    rel_dir = os.path.relpath(root, source)
-                    target_dir = target if rel_dir == "." else os.path.join(target, rel_dir)
-                    os.makedirs(target_dir, exist_ok=True)
-                    for filename in files:
-                        source_file = os.path.join(root, filename)
-                        target_file = os.path.join(target_dir, filename)
-                        if os.path.exists(target_file):
-                            skipped_count += 1
-                            continue
-                        shutil.copy2(source_file, target_file)
-                        copied_count += 1
-                if copied_count:
-                    report["copied"].append({"path": label, "missing_files": copied_count})
-                else:
-                    report["skipped"].append({"path": label, "reason": "target_exists", "files": skipped_count})
-                return
-            os.makedirs(os.path.dirname(target), exist_ok=True)
-            shutil.copytree(source, target)
-            report["copied"].append(label)
+            copied_count = 0
+            skipped_count = 0
+            os.makedirs(target, exist_ok=True)
+            for root, _, files in os.walk(source):
+                rel_dir = os.path.relpath(root, source)
+                target_dir = target if rel_dir == "." else os.path.join(target, rel_dir)
+                os.makedirs(target_dir, exist_ok=True)
+                for filename in files:
+                    source_file = os.path.join(root, filename)
+                    target_file = os.path.join(target_dir, filename)
+                    if os.path.exists(target_file):
+                        skipped_count += 1
+                        continue
+                    copy_file_atomic(source_file, target_file)
+                    copied_count += 1
+            if copied_count:
+                report["copied"].append({"path": label, "missing_files": copied_count})
+            else:
+                report["skipped"].append({"path": label, "reason": "target_exists", "files": skipped_count})
         except Exception as exc:
             report["errors"].append({"path": label, "error": str(exc)})
 
@@ -392,8 +479,7 @@ def migrate_user_data_from_app_root():
             report["skipped"].append({"path": label, "reason": "target_exists"})
             return
         try:
-            os.makedirs(os.path.dirname(target), exist_ok=True)
-            shutil.copy2(source, target)
+            copy_file_atomic(source, target)
             report["copied"].append(label)
         except Exception as exc:
             report["errors"].append({"path": label, "error": str(exc)})
@@ -411,8 +497,7 @@ def migrate_user_data_from_app_root():
 
     record_path = USER_DATA_MIGRATION_MARKER if not report["errors"] else user_data_path(".migration_failed.json")
     try:
-        with open(record_path, "w", encoding="utf-8") as f:
-            json.dump(report, f, ensure_ascii=False, indent=2)
+        write_json_atomic(record_path, report)
     except Exception as exc:
         print(f"写入用户数据迁移记录失败: {exc}")
     if report["errors"]:
@@ -448,16 +533,127 @@ def load_storage_settings():
     return {"dirs": dirs}
 
 def save_storage_settings(payload):
+    current_dirs = load_storage_settings().get("dirs") or {}
     dirs = {}
     for key, fallback in DEFAULT_STORAGE_DIRS.items():
         dirs[key] = _storage_abs_path((payload or {}).get(key), fallback)
-    for path in dirs.values():
-        os.makedirs(path, exist_ok=True)
-    os.makedirs(DATA_DIR, exist_ok=True)
-    with open(STORAGE_SETTINGS_FILE, "w", encoding="utf-8") as f:
-        json.dump(dirs, f, ensure_ascii=False, indent=2)
-    apply_storage_settings(dirs)
-    return {"dirs": dirs}
+    roots = [(key, os.path.realpath(path)) for key, path in dirs.items()]
+    for index, (left_key, left) in enumerate(roots):
+        for right_key, right in roots[index + 1:]:
+            try:
+                nested = os.path.commonpath([left, right]) in {left, right}
+            except ValueError:
+                nested = False
+            if nested:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"存储目录不能相同或互相嵌套：{left_key} / {right_key}",
+                )
+    migrated = {}
+    copied_paths = []
+    try:
+        for key, target in dirs.items():
+            migrated[key] = copy_storage_directory_files(
+                current_dirs.get(key),
+                target,
+                copied_paths=copied_paths,
+            )
+        rewrite_legacy_storage_urls()
+        write_json_atomic(STORAGE_SETTINGS_FILE, dirs)
+        apply_storage_settings(dirs)
+        return {"dirs": dirs, "migrated": migrated}
+    except Exception:
+        for path in reversed(copied_paths):
+            try:
+                if os.path.isfile(path):
+                    os.remove(path)
+            except OSError:
+                pass
+        raise
+
+def files_have_same_content(left: str, right: str) -> bool:
+    try:
+        if os.path.getsize(left) != os.path.getsize(right):
+            return False
+        left_digest = hashlib.sha256()
+        right_digest = hashlib.sha256()
+        with open(left, "rb") as left_file, open(right, "rb") as right_file:
+            for chunk in iter(lambda: left_file.read(1024 * 1024), b""):
+                left_digest.update(chunk)
+            for chunk in iter(lambda: right_file.read(1024 * 1024), b""):
+                right_digest.update(chunk)
+        return hmac.compare_digest(left_digest.digest(), right_digest.digest())
+    except OSError:
+        return False
+
+def copy_storage_directory_files(
+    source: str,
+    target: str,
+    *,
+    copied_paths: Optional[List[str]] = None,
+) -> int:
+    """切换存储目录前复制旧文件；冲突时拒绝切换并保留原目录。"""
+    source_root = os.path.abspath(source or target)
+    target_root = os.path.abspath(target)
+    if same_path(source_root, target_root) or not os.path.isdir(source_root):
+        os.makedirs(target_root, exist_ok=True)
+        return 0
+    try:
+        if os.path.commonpath([source_root, target_root]) in {source_root, target_root}:
+            raise HTTPException(status_code=400, detail="新旧存储目录不能互相嵌套")
+    except ValueError:
+        pass
+    os.makedirs(target_root, exist_ok=True)
+    source_files = []
+    for current, dirs, files in os.walk(source_root):
+        dirs[:] = [name for name in dirs if not os.path.islink(os.path.join(current, name))]
+        for name in files:
+            source_path = os.path.join(current, name)
+            if os.path.islink(source_path):
+                continue
+            rel = os.path.relpath(source_path, source_root)
+            source_files.append((source_path, rel))
+    copied = []
+    try:
+        for source_path, rel in source_files:
+            target_path = os.path.abspath(os.path.join(target_root, rel))
+            try:
+                if os.path.commonpath([target_root, target_path]) != target_root:
+                    raise HTTPException(status_code=400, detail="存储目录包含非法路径")
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail="存储目录跨磁盘路径无效") from exc
+            parent_path = target_root
+            rel_parent = os.path.dirname(rel)
+            for part in [item for item in rel_parent.replace("\\", "/").split("/") if item and item != "."]:
+                parent_path = os.path.join(parent_path, part)
+                if os.path.lexists(parent_path):
+                    if os.path.islink(parent_path) or not os.path.isdir(parent_path):
+                        raise HTTPException(status_code=400, detail=f"目标目录包含不安全的链接或文件：{rel}")
+                else:
+                    os.mkdir(parent_path)
+            if os.path.lexists(target_path) and os.path.islink(target_path):
+                raise HTTPException(status_code=400, detail=f"目标文件不能是符号链接：{rel}")
+            if os.path.exists(target_path):
+                if files_have_same_content(source_path, target_path):
+                    continue
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"新存储目录存在同名但内容不同的文件：{rel}",
+                )
+            copy_file_atomic(source_path, target_path)
+            if not files_have_same_content(source_path, target_path):
+                raise HTTPException(status_code=500, detail=f"复制后校验失败：{rel}")
+            copied.append(target_path)
+        if copied_paths is not None:
+            copied_paths.extend(copied)
+        return len(copied)
+    except Exception:
+        for path in reversed(copied):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+        raise
 
 def apply_storage_settings(dirs=None):
     global OUTPUT_INPUT_DIR, OUTPUT_OUTPUT_DIR, LOCAL_UPLOAD_DIR
@@ -1545,10 +1741,8 @@ def load_api_providers():
         return defaults
 
 def save_api_providers(providers):
-    os.makedirs(DATA_DIR, exist_ok=True)
     with GLOBAL_CONFIG_LOCK:
-        with open(API_PROVIDERS_FILE, "w", encoding="utf-8") as f:
-            json.dump(providers, f, ensure_ascii=False, indent=2)
+        write_json_atomic(API_PROVIDERS_FILE, providers)
 
 def public_provider(provider):
     if provider.get("id") == "runninghub":
@@ -1759,10 +1953,8 @@ def load_cloud_sync_config():
 
 def save_cloud_sync_config(config):
     config = normalize_cloud_sync_config(config, load_cloud_sync_config())
-    os.makedirs(DATA_DIR, exist_ok=True)
     with GLOBAL_CONFIG_LOCK:
-        with open(CLOUD_SYNC_CONFIG_FILE, "w", encoding="utf-8") as f:
-            json.dump(config, f, ensure_ascii=False, indent=2)
+        write_json_atomic(CLOUD_SYNC_CONFIG_FILE, config)
     return config
 
 def public_cloud_sync_config(config=None):
@@ -3002,11 +3194,7 @@ def canvas_video_task_snapshot_unlocked():
     }
 
 def write_canvas_video_tasks_snapshot(snapshot):
-    os.makedirs(DATA_DIR, exist_ok=True)
-    tmp_path = f"{CANVAS_VIDEO_TASKS_FILE}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        json.dump(snapshot, f, ensure_ascii=False, indent=2)
-    os.replace(tmp_path, CANVAS_VIDEO_TASKS_FILE)
+    write_json_atomic(CANVAS_VIDEO_TASKS_FILE, snapshot)
 
 def persist_canvas_video_tasks():
     with CANVAS_TASK_LOCK:
@@ -3819,18 +4007,18 @@ def reserve_best_backend(required_images: List[str] = None):
 # --- 辅助工具 ---
 
 def download_image(comfy_address, comfy_url_path, prefix="studio_"):
-    filename = f"{prefix}{uuid.uuid4().hex[:10]}.png"
-    local_path = output_path_for(filename, "output")
-    full_url = f"http://{comfy_address}{comfy_url_path}"
+    endpoint = f"http://{comfy_address}{comfy_url_path}"
     try:
-        with urllib.request.urlopen(full_url, timeout=COMFYUI_DOWNLOAD_TIMEOUT) as response, open(local_path, 'wb') as out_file:
-            shutil.copyfileobj(response, out_file)
+        with urllib.request.urlopen(endpoint, timeout=COMFYUI_DOWNLOAD_TIMEOUT) as response:
+            content = response.read()
+        ext = validated_image_extension(content)
+        filename = f"{prefix}{uuid.uuid4().hex[:10]}{ext}"
+        local_path = output_path_for(filename, "output")
+        write_bytes_atomic(local_path, content)
         return output_url_for(filename, "output")
     except Exception as e:
         print(f"下载图片失败: {e}")
-        if comfy_url_path.startswith("/view"):
-            return comfy_url_path.replace("/view", "/api/view", 1)
-        return full_url
+        raise HTTPException(status_code=502, detail=f"ComfyUI 图片下载或校验失败：{e}") from e
 
 def comfy_output_extension(item):
     filename = str((item or {}).get("filename") or "")
@@ -3888,16 +4076,26 @@ def download_comfy_output(comfy_address, item, prefix="studio_"):
     subfolder = urllib.parse.quote(str(item.get("subfolder") or ""))
     file_type = urllib.parse.quote(str(item.get("type") or "output"))
     comfy_url_path = f"/view?filename={urllib.parse.quote(str(item['filename']))}&subfolder={subfolder}&type={file_type}"
-    full_url = f"http://{comfy_address}{comfy_url_path}"
+    endpoint = f"http://{comfy_address}{comfy_url_path}"
     try:
-        with urllib.request.urlopen(full_url, timeout=COMFYUI_DOWNLOAD_TIMEOUT) as response, open(local_path, 'wb') as out_file:
-            shutil.copyfileobj(response, out_file)
+        with urllib.request.urlopen(endpoint, timeout=COMFYUI_DOWNLOAD_TIMEOUT) as response:
+            content = response.read()
+        kind = comfy_output_kind(item)
+        if kind == "image":
+            ext = validated_image_extension(content)
+            filename = f"{prefix}{uuid.uuid4().hex[:10]}{ext}"
+            local_path = output_path_for(filename, "output")
+        elif kind == "video":
+            detected_ext = validated_video_extension(content)
+            filename = f"{prefix}{uuid.uuid4().hex[:10]}{detected_ext}"
+            local_path = output_path_for(filename, "output")
+        elif not content:
+            raise ValueError("输出内容为空")
+        write_bytes_atomic(local_path, content)
         return output_url_for(filename, "output")
     except Exception as e:
         print(f"下载 ComfyUI 输出失败: {e}")
-        if comfy_url_path.startswith("/view"):
-            return comfy_url_path.replace("/view", "/api/view", 1)
-        return full_url
+        raise HTTPException(status_code=502, detail=f"ComfyUI 输出下载或校验失败：{e}") from e
 
 def save_comfy_text_output(value, prefix="studio_", name=""):
     text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, indent=2)
@@ -3975,8 +4173,7 @@ def save_to_history(record):
         if "timestamp" not in record:
             record["timestamp"] = time.time()
         history.insert(0, record)
-        with open(HISTORY_FILE, 'w', encoding='utf-8') as f:
-            json.dump(history[:5000], f, ensure_ascii=False, indent=4)
+        write_json_atomic(HISTORY_FILE, history[:5000], indent=4)
 
 def get_comfy_history(comfy_address, prompt_id):
     try:
@@ -4011,8 +4208,7 @@ def now_ms():
 def save_conversation(user_id, conversation):
     with CANVAS_LOCK, CONVERSATION_LOCK:
         path = conversation_path(user_id, conversation["id"])
-        with open(path, 'w', encoding='utf-8') as f:
-            json.dump(conversation, f, ensure_ascii=False, indent=2)
+        write_json_atomic(path, conversation)
 
 def new_conversation(user_id, title="新对话"):
     timestamp = now_ms()
@@ -4064,8 +4260,7 @@ def canvas_path(canvas_id):
 def save_canvas(canvas):
     with CANVAS_LOCK:
         canvas["updated_at"] = max(now_ms(), int(canvas.get("updated_at") or 0) + 1)
-        with open(canvas_path(canvas["id"]), 'w', encoding='utf-8') as f:
-            json.dump(canvas, f, ensure_ascii=False, indent=2)
+        write_json_atomic(canvas_path(canvas["id"]), canvas)
 
 def normalize_canvas_kind(kind="classic"):
     return "smart" if str(kind or "").strip().lower() == "smart" else "classic"
@@ -4087,8 +4282,7 @@ def load_projects():
 
 def save_projects(projects):
     with CANVAS_LOCK:
-        with open(PROJECTS_PATH, 'w', encoding='utf-8') as f:
-            json.dump({"projects": projects}, f, ensure_ascii=False, indent=2)
+        write_json_atomic(PROJECTS_PATH, {"projects": projects})
 
 def project_record(p):
     return {
@@ -7146,14 +7340,7 @@ def output_storage(category="output"):
     return (OUTPUT_INPUT_DIR, "input") if category == "input" else (OUTPUT_OUTPUT_DIR, "output")
 
 def output_url_for(filename, category="output"):
-    folder, subdir = output_storage(category)
     rel = str(filename or "").replace("\\", "/").lstrip("/")
-    try:
-        asset_rel = os.path.relpath(os.path.join(folder, rel), ASSETS_DIR).replace("\\", "/")
-        if not asset_rel.startswith("../") and asset_rel != "..":
-            return f"/assets/{urllib.parse.quote(asset_rel, safe='/')}"
-    except Exception:
-        pass
     kind = "upload" if category == "input" else "generated"
     return f"/api/storage-files/{kind}/{urllib.parse.quote(rel, safe='/')}"
 
@@ -7309,6 +7496,135 @@ def collect_local_media_urls(value: Any) -> List[str]:
             urls.extend(collect_local_media_urls(item))
     return urls
 
+def persisted_media_json_paths(include_history: bool = True) -> List[str]:
+    candidates = [ASSET_LIBRARY_PATH, CANVAS_VIDEO_TASKS_FILE]
+    if include_history:
+        candidates.append(HISTORY_FILE)
+    for root in (CANVAS_DIR, CONVERSATION_DIR):
+        if not os.path.isdir(root):
+            continue
+        for current, _, files in os.walk(root):
+            candidates.extend(
+                os.path.join(current, name)
+                for name in files
+                if name.lower().endswith(".json")
+            )
+    seen = set()
+    result = []
+    for candidate in candidates:
+        path = os.path.abspath(candidate)
+        key = os.path.normcase(path)
+        if key not in seen and os.path.isfile(path):
+            seen.add(key)
+            result.append(path)
+    return result
+
+def replace_media_urls_in_json(value: Any, replacements: Dict[str, str]) -> Tuple[Any, int]:
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return value, 0
+        base, separator, suffix = raw.partition("?")
+        fragment = ""
+        if not separator:
+            base, fragment_separator, fragment_value = raw.partition("#")
+            suffix = f"#{fragment_value}" if fragment_separator else ""
+        else:
+            suffix = f"?{suffix}"
+        replacement = replacements.get(base)
+        if replacement is None:
+            return value, 0
+        leading = value[:len(value) - len(value.lstrip())]
+        trailing = value[len(value.rstrip()):]
+        return f"{leading}{replacement}{suffix}{fragment}{trailing}", 1
+    if isinstance(value, list):
+        changed = 0
+        result = []
+        for item in value:
+            updated, count = replace_media_urls_in_json(item, replacements)
+            result.append(updated)
+            changed += count
+        return result, changed
+    if isinstance(value, tuple):
+        updated, count = replace_media_urls_in_json(list(value), replacements)
+        return tuple(updated), count
+    if isinstance(value, dict):
+        changed = 0
+        result = {}
+        for key, item in value.items():
+            updated, count = replace_media_urls_in_json(item, replacements)
+            result[key] = updated
+            changed += count
+        return result, changed
+    return value, 0
+
+def rewrite_persisted_media_urls(replacements: Dict[str, str]) -> Dict[str, int]:
+    """跨所有持久化 owner 原子改写媒体引用；任一写入失败则回滚。"""
+    normalized = {
+        str(old).split("?", 1)[0].split("#", 1)[0]: str(new)
+        for old, new in (replacements or {}).items()
+        if old and new and old != new
+    }
+    if not normalized:
+        return {"files": 0, "references": 0}
+    pending = []
+    with CANVAS_LOCK, HISTORY_LOCK, CONVERSATION_LOCK, CANVAS_TASK_LOCK:
+        for path in persisted_media_json_paths():
+            try:
+                with open(path, "r", encoding="utf-8-sig") as handle:
+                    original = json.load(handle)
+            except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+                raise HTTPException(status_code=500, detail=f"无法读取引用文件，已取消移动：{path}") from exc
+            updated, count = replace_media_urls_in_json(original, normalized)
+            if count:
+                pending.append((path, original, updated, count))
+        written = []
+        try:
+            for path, original, updated, count in pending:
+                write_json_atomic(path, updated, indent=4 if same_path(path, HISTORY_FILE) else 2)
+                written.append((path, original))
+            task_entry = next((item for item in pending if same_path(item[0], CANVAS_VIDEO_TASKS_FILE)), None)
+            if task_entry:
+                CANVAS_TASKS.clear()
+                CANVAS_TASKS.update(task_entry[2] if isinstance(task_entry[2], dict) else {})
+        except Exception:
+            for path, original in reversed(written):
+                try:
+                    write_json_atomic(path, original, indent=4 if same_path(path, HISTORY_FILE) else 2)
+                except Exception as rollback_error:
+                    print(f"回滚媒体引用失败: {path}: {rollback_error}")
+            raise
+    return {
+        "files": len(pending),
+        "references": sum(item[3] for item in pending),
+    }
+
+def local_asset_url_replacements(old_rel: str, new_rel: str) -> Dict[str, str]:
+    old_rel = str(old_rel or "").replace("\\", "/").lstrip("/")
+    new_rel = str(new_rel or "").replace("\\", "/").lstrip("/")
+    old_quoted = urllib.parse.quote(old_rel, safe="/")
+    new_quoted = urllib.parse.quote(new_rel, safe="/")
+    return {
+        f"/api/storage-files/local/{old_quoted}": f"/api/storage-files/local/{new_quoted}",
+        f"/assets/uploads/{old_quoted}": f"/api/storage-files/local/{new_quoted}",
+    }
+
+def rewrite_legacy_storage_urls() -> Dict[str, int]:
+    replacements = {}
+    for subdir, kind, root in (
+        ("input", "upload", OUTPUT_INPUT_DIR),
+        ("output", "generated", OUTPUT_OUTPUT_DIR),
+        ("uploads", "local", LOCAL_UPLOAD_DIR),
+    ):
+        if not os.path.isdir(root):
+            continue
+        for current, _, files in os.walk(root):
+            for name in files:
+                rel = os.path.relpath(os.path.join(current, name), root).replace("\\", "/")
+                quoted = urllib.parse.quote(rel, safe="/")
+                replacements[f"/assets/{subdir}/{quoted}"] = f"/api/storage-files/{kind}/{quoted}"
+    return rewrite_persisted_media_urls(replacements)
+
 def local_media_path_from_url(url: str) -> Optional[str]:
     """Resolve a local media URL using the same one-to-one mapping as app mounts."""
     if not url:
@@ -7379,17 +7695,7 @@ def persisted_json_references_media_path(target_path: str) -> bool:
     # Generation history is an index of outputs, not an owner. When an output
     # is deleted we prune its history card separately so this index cannot pin
     # every generated file forever.
-    candidates = [ASSET_LIBRARY_PATH, CANVAS_VIDEO_TASKS_FILE]
-    for root in (CANVAS_DIR, CONVERSATION_DIR):
-        if os.path.isdir(root):
-            for current, _, files in os.walk(root):
-                candidates.extend(os.path.join(current, name) for name in files if name.lower().endswith(".json"))
-    seen = set()
-    for path in candidates:
-        path = os.path.abspath(path)
-        if path in seen or not os.path.isfile(path):
-            continue
-        seen.add(path)
+    for path in persisted_media_json_paths(include_history=False):
         try:
             with open(path, "r", encoding="utf-8-sig") as handle:
                 value = json.load(handle)
@@ -7417,8 +7723,7 @@ def prune_generation_history_for_media(paths: List[str]) -> int:
             ]
             removed = len(history) - len(kept)
             if removed:
-                with open(HISTORY_FILE, "w", encoding="utf-8") as handle:
-                    json.dump(kept, handle, ensure_ascii=False, indent=4)
+                write_json_atomic(HISTORY_FILE, kept, indent=4)
             return removed
     except (OSError, UnicodeError, json.JSONDecodeError):
         return 0
@@ -7541,6 +7846,19 @@ def delete_media_preview_cache(path: str) -> int:
                 pass
     return removed
 
+def delete_media_file_if_unreferenced(path: str) -> str:
+    """删除受管媒体；仍被任一持久化 owner 使用时安全保留。"""
+    if not path or not os.path.isfile(path):
+        return "missing"
+    if persisted_json_references_media_path(path):
+        return "referenced"
+    delete_media_preview_cache(path)
+    try:
+        os.remove(path)
+        return "removed"
+    except OSError:
+        return "failed"
+
 def image_has_alpha(img: Image.Image) -> bool:
     if img.mode in ("RGBA", "LA"):
         return True
@@ -7628,17 +7946,26 @@ async def delete_storage_files(payload: Dict[str, Any]):
     rels = [str(item or "").strip() for item in ((payload or {}).get("items") or []) if str(item or "").strip()]
     if not rels:
         raise HTTPException(status_code=400, detail="请选择要删除的文件")
-    removed = 0
+    removed = []
+    skipped_referenced = []
+    failed = []
     for rel in rels:
         path = storage_file_path(kind, rel)
         if not path or not os.path.isfile(path):
             continue
-        try:
-            os.remove(path)
-            removed += 1
-        except OSError:
-            pass
-    return {"removed": removed}
+        status = delete_media_file_if_unreferenced(path)
+        if status == "removed":
+            removed.append(rel)
+        elif status == "referenced":
+            skipped_referenced.append(rel)
+        elif status == "failed":
+            failed.append(rel)
+    return {
+        "removed": len(removed),
+        "removed_items": removed,
+        "skipped_referenced": skipped_referenced,
+        "failed": failed,
+    }
 
 @app.get("/api/asset-classification-prompt")
 async def get_asset_classification_prompt():
@@ -7872,7 +8199,7 @@ def import_local_image_file(path):
     filename = f"ai_ref_{uuid.uuid4().hex[:12]}{ext}"
     dest = output_path_for(filename, "input")
     try:
-        shutil.copyfile(path, dest)
+        copy_file_atomic(path, dest)
     except OSError:
         raise HTTPException(status_code=500, detail="导入本地图片失败")
     return {"url": output_url_for(filename, "input"), "name": os.path.basename(path) or filename, "kind": "image"}
@@ -8018,15 +8345,28 @@ def unique_asset_category_dir(library, base_name: str) -> str:
         i += 1
     return candidate
 
-def remove_asset_library_file(item) -> None:
-    """删除资产对应的本地文件（仅限 library 副本，删了不影响 /output 原图）。日志不影响主流程。"""
+def asset_library_file_path(item) -> Optional[str]:
+    url = item.get("url") if isinstance(item, dict) else ""
+    clean = urllib.parse.unquote(str(url or "").split("?", 1)[0]).replace("\\", "/")
+    prefix = "/assets/library/"
+    if not clean.startswith(prefix):
+        return None
+    rel = clean[len(prefix):].lstrip("/")
+    if not rel:
+        return None
+    root = os.path.realpath(ASSET_LIBRARY_DIR)
+    path = os.path.realpath(os.path.join(root, rel))
     try:
-        url = item.get("url") if isinstance(item, dict) else ""
-        path = output_file_from_url(url)
-        if path and os.path.isfile(path):
-            os.remove(path)
-    except Exception as exc:
-        print(f"删除资产文件失败: {exc}")
+        return path if os.path.commonpath([root, path]) == root else None
+    except ValueError:
+        return None
+
+def remove_asset_library_file(item) -> str:
+    """仅删除资产库自己的副本，且保留仍被画布等 owner 引用的文件。"""
+    path = asset_library_file_path(item)
+    if not path:
+        return "missing"
+    return delete_media_file_if_unreferenced(path)
 
 def make_asset_library_item(src: str, name: str = "", subdir: str = "") -> Tuple[str, Dict[str, Any]]:
     kind = asset_library_media_kind(src)
@@ -8044,7 +8384,7 @@ def make_asset_library_item(src: str, name: str = "", subdir: str = "") -> Tuple
     else:
         dest_path = os.path.join(ASSET_LIBRARY_DIR, dest_name)
         rel = dest_name
-    shutil.copy2(src, dest_path)
+    copy_file_atomic(src, dest_path)
     item = {
         "id": f"asset_{uuid.uuid4().hex[:12]}",
         "name": os.path.splitext(safe_name)[0][:120],
@@ -8210,8 +8550,7 @@ def _read_local_upload_classification(filename):
 
 def _write_local_upload_classification(filename, classification):
     path = _local_upload_classification_path(filename)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(normalize_asset_classification(classification), f, ensure_ascii=False, indent=2)
+    write_json_atomic(path, normalize_asset_classification(classification))
 
 def asset_classification_prompt(extra_prompt=""):
     base = load_asset_classification_prompt()
@@ -8249,6 +8588,8 @@ def migrate_asset_library_into_dirs():
         print(f"资产库分组整理：加载失败 {exc}")
         return
     changed = False
+    moves = []
+    replacements = {}
     for library in lib.get("libraries", []) or []:
         for cat in library.get("categories", []) or []:
             if (cat.get("type") or "image") != "image":
@@ -8276,16 +8617,20 @@ def migrate_asset_library_into_dirs():
                 dst = os.path.join(ASSET_LIBRARY_DIR, cat_dir, fname)
                 try:
                     if not os.path.exists(dst):
-                        shutil.move(src, dst)
-                    item["url"] = "/assets/library/" + urllib.parse.quote(f"{cat_dir}/{fname}", safe="/")
+                        moves.append((src, dst))
+                    old_url = str(item.get("url") or "")
+                    new_url = "/assets/library/" + urllib.parse.quote(f"{cat_dir}/{fname}", safe="/")
+                    replacements[old_url] = new_url
+                    item["url"] = new_url
                     changed = True
                 except Exception as exc:
                     print(f"资产库分组整理：搬运 {fname} 失败 {exc}")
     if changed:
         try:
+            execute_media_moves_with_rewrite(moves, replacements)
             save_asset_library(lib)
         except Exception as exc:
-            print(f"资产库分组整理：保存失败 {exc}")
+            print(f"资产库分组整理失败，已回滚文件移动: {exc}")
 
 def asset_library_workflow_category(lib, library_id="", category_id=""):
     library = find_asset_library(lib, library_id)
@@ -8337,9 +8682,7 @@ def save_asset_library(lib):
         lib = normalize_asset_library(lib)
         sort_asset_library_items(lib)
         lib["updated_at"] = now_ms()
-        os.makedirs(DATA_DIR, exist_ok=True)
-        with open(ASSET_LIBRARY_PATH, "w", encoding="utf-8") as f:
-            json.dump(lib, f, ensure_ascii=False, indent=2)
+        write_json_atomic(ASSET_LIBRARY_PATH, lib)
     if GLOBAL_LOOP:
         asyncio.run_coroutine_threadsafe(manager.broadcast_asset_library_updated(int(lib["updated_at"])), GLOBAL_LOOP)
 
@@ -8398,9 +8741,7 @@ def shared_folders_load():
     return {"folders": [f for f in folders if isinstance(f, dict)]}
 
 def shared_folders_save(data):
-    os.makedirs(DATA_DIR, exist_ok=True)
-    with open(SHARED_FOLDERS_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    write_json_atomic(SHARED_FOLDERS_FILE, data)
 
 def shared_folder_by_id(folder_id):
     for entry in shared_folders_load().get("folders", []):
@@ -8668,9 +9009,7 @@ def load_prompt_libraries():
 def save_prompt_libraries(data):
     data = normalize_prompt_libraries(data)
     data["updated_at"] = now_ms()
-    os.makedirs(DATA_DIR, exist_ok=True)
-    with open(PROMPT_LIBRARY_PATH, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    write_json_atomic(PROMPT_LIBRARY_PATH, data)
     return data
 
 def public_prompt_libraries(data=None):
@@ -10343,42 +10682,83 @@ async def preflight_canvas_video_material(
     }
 
 
+IMAGE_FORMAT_EXTENSIONS = {
+    "PNG": ".png",
+    "JPEG": ".jpg",
+    "WEBP": ".webp",
+    "GIF": ".gif",
+    "BMP": ".bmp",
+    "TIFF": ".tiff",
+    "AVIF": ".avif",
+}
+
+def validated_image_extension(content: bytes) -> str:
+    if not content:
+        raise ValueError("图片内容为空")
+    try:
+        with Image.open(BytesIO(content)) as image:
+            image.verify()
+            image_format = str(image.format or "").upper()
+        with Image.open(BytesIO(content)) as image:
+            image.load()
+    except Exception as exc:
+        raise ValueError("响应内容不是完整有效的图片") from exc
+    extension = IMAGE_FORMAT_EXTENSIONS.get(image_format)
+    if not extension:
+        raise ValueError(f"不支持的图片格式：{image_format or 'unknown'}")
+    return extension
+
+def validated_video_extension(content: bytes) -> str:
+    if not content or len(content) < 12:
+        raise ValueError("视频内容为空或不完整")
+    header = content[:64]
+    if b"ftyp" in header[4:32]:
+        return ".mp4"
+    if header.startswith(b"\x1a\x45\xdf\xa3"):
+        return ".webm"
+    if header.startswith(b"RIFF") and header[8:12] == b"AVI ":
+        return ".avi"
+    if header.startswith(b"FLV"):
+        return ".flv"
+    raise ValueError("响应内容不是受支持的视频容器")
+
+def ensure_existing_local_media_url(url: str) -> str:
+    try:
+        path = local_media_path_from_url(url)
+    except (HTTPException, OSError, ValueError) as exc:
+        raise HTTPException(status_code=502, detail=f"本地媒体路径无效：{url}") from exc
+    if not path or not os.path.isfile(path):
+        raise HTTPException(status_code=502, detail=f"本地媒体文件不存在：{url}")
+    return url
+
 async def save_ai_image_to_output(image_data, prefix="online_", category="output"):
-    filename = f"{prefix}{uuid.uuid4().hex[:10]}.png"
-    path = output_path_for(filename, category)
     if image_data["type"] == "b64":
-        mime_type = str(image_data.get("mime_type") or "").lower()
-        if "jpeg" in mime_type or "jpg" in mime_type:
-            filename = filename[:-4] + ".jpg"
-            path = output_path_for(filename, category)
-        elif "webp" in mime_type:
-            filename = filename[:-4] + ".webp"
-            path = output_path_for(filename, category)
-        with open(path, "wb") as f:
-            f.write(base64.b64decode(image_data["value"]))
-        return output_url_for(filename, category)
-    value = image_data["value"]
-    if value.startswith("/output/") or value.startswith("/assets/"):
-        return value
+        try:
+            content = base64.b64decode(image_data["value"], validate=False)
+            extension = validated_image_extension(content)
+            filename = f"{prefix}{uuid.uuid4().hex[:10]}{extension}"
+            write_bytes_atomic(output_path_for(filename, category), content)
+            return output_url_for(filename, category)
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"上游图片数据无效：{exc}") from exc
+    value = str(image_data["value"] or "").strip()
+    if value.startswith(("/output/", "/assets/", "/api/storage-files/")):
+        return ensure_existing_local_media_url(value)
     value = rewrite_runninghub_file_url(value)
+    if not value.startswith(("http://", "https://")):
+        raise HTTPException(status_code=502, detail="上游没有返回可下载的图片地址")
     try:
         timeout = httpx.Timeout(connect=20.0, read=300.0, write=60.0, pool=20.0)
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
             response = await client.get(value)
             response.raise_for_status()
-            content_type = response.headers.get("Content-Type", "")
-            if "jpeg" in content_type or "jpg" in content_type:
-                filename = filename[:-4] + ".jpg"
-                path = output_path_for(filename, category)
-            elif "webp" in content_type:
-                filename = filename[:-4] + ".webp"
-                path = output_path_for(filename, category)
-            with open(path, "wb") as f:
-                f.write(response.content)
+            extension = validated_image_extension(response.content)
+            filename = f"{prefix}{uuid.uuid4().hex[:10]}{extension}"
+            write_bytes_atomic(output_path_for(filename, category), response.content)
             return output_url_for(filename, category)
     except Exception as e:
         print(f"保存上游图片失败: {e}; url={value}")
-        return value
+        raise HTTPException(status_code=502, detail=f"上游图片下载或校验失败：{e}") from e
 
 def image_output_meta(url, source_item=None):
     meta = {"url": url, "kind": "image"}
@@ -10430,16 +10810,12 @@ def same_http_origin(left: str, right: str) -> bool:
 async def save_remote_video_to_output(url, prefix="video_", category="output", provider=None):
     if not url:
         return ""
-    if url.startswith("/output/") or url.startswith("/assets/"):
-        return url
-    video_exts = {".mp4", ".webm", ".mov", ".m4v", ".avi", ".mkv", ".flv"}
+    if url.startswith(("/output/", "/assets/", "/api/storage-files/")):
+        return ensure_existing_local_media_url(url)
     parsed = urllib.parse.urlparse(str(url or "").strip())
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
-        return url
-    clean_ext = os.path.splitext(parsed.path)[1].lower()
+        raise HTTPException(status_code=502, detail="上游没有返回可下载的视频地址")
     stem = f"{prefix}{uuid.uuid4().hex[:10]}"
-    filename = f"{stem}{clean_ext if clean_ext in video_exts else '.mp4'}"
-    path = output_path_for(filename, category)
     try:
         timeout = httpx.Timeout(connect=20.0, read=VIDEO_POLL_TIMEOUT, write=60.0, pool=20.0)
         headers = {
@@ -10466,35 +10842,14 @@ async def save_remote_video_to_output(url, prefix="video_", category="output", p
             content_type = (response.headers.get("Content-Type") or "").lower()
             if "text/html" in content_type or "application/json" in content_type:
                 raise RuntimeError(f"unexpected video content type: {content_type}")
-            ext = clean_ext
-            if ext in video_exts:
-                filename = f"{stem}{ext}"
-                path = output_path_for(filename, category)
-            elif "webm" in content_type:
-                filename = f"{stem}.webm"
-                path = output_path_for(filename, category)
-            elif "quicktime" in content_type or "mov" in content_type:
-                filename = f"{stem}.mov"
-                path = output_path_for(filename, category)
-            elif "x-matroska" in content_type or "mkv" in content_type:
-                filename = f"{stem}.mkv"
-                path = output_path_for(filename, category)
-            elif "x-flv" in content_type or "flv" in content_type:
-                filename = f"{stem}.flv"
-                path = output_path_for(filename, category)
-            with open(path, "wb") as f:
-                f.write(response.content)
-            if os.path.getsize(path) <= 0:
-                raise RuntimeError("empty video response")
+            extension = validated_video_extension(response.content)
+            filename = f"{stem}{extension}"
+            path = output_path_for(filename, category)
+            write_bytes_atomic(path, response.content)
             return output_url_for(filename, category)
     except Exception as e:
         print(f"保存上游视频失败: {e}")
-        try:
-            if os.path.exists(path):
-                os.remove(path)
-        except Exception:
-            pass
-        return url
+        raise HTTPException(status_code=502, detail=f"上游视频下载或校验失败：{e}") from e
 
 def parse_size_pair(size):
     match = re.fullmatch(r"\s*(\d+)\s*[xX*]\s*(\d+)\s*", str(size or ""))
@@ -12957,8 +13312,10 @@ async def upload_ai_reference(files: List[UploadFile] = File(...)):
                 ext = ".wav" if "wav" in content_type else ".ogg" if "ogg" in content_type else ".m4a" if "mp4" in content_type else ".mp3"
         elif ext in image_exts or content_type.startswith("image/"):
             kind = "image"
-            if ext not in image_exts:
-                ext = ".jpg" if "jpeg" in content_type else ".webp" if "webp" in content_type else ".gif" if "gif" in content_type else ".png"
+            try:
+                ext = validated_image_extension(content)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=f"{file.filename or '图片'} 无效：{exc}") from exc
         elif ext in doc_exts or content_type.startswith(("text/", "application/")):
             kind = "file"
             if not ext:
@@ -12969,8 +13326,7 @@ async def upload_ai_reference(files: List[UploadFile] = File(...)):
                 ext = ".bin"
         filename = f"ai_ref_{uuid.uuid4().hex[:12]}{ext}"
         path = output_path_for(filename, "input")
-        with open(path, "wb") as f:
-            f.write(content)
+        write_bytes_atomic(path, content)
         uploaded.append({"url": output_url_for(filename, "input"), "name": file.filename or filename, "kind": kind, "mime": content_type})
     return {"files": uploaded}
 
@@ -13000,10 +13356,19 @@ async def upload_ai_base64(payload: Base64UploadRequest):
     kind, ext = _local_upload_kind_ext(payload.name or "", ct or "image/png")
     if kind is None:
         kind, ext = "image", ".png"
+    if kind == "image":
+        try:
+            ext = validated_image_extension(content)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"图片数据无效：{exc}") from exc
+    elif kind == "video":
+        try:
+            ext = validated_video_extension(content)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"视频数据无效：{exc}") from exc
     filename = f"ai_ref_{uuid.uuid4().hex[:12]}{ext}"
     path = output_path_for(filename, "input")
-    with open(path, "wb") as f:
-        f.write(content)
+    write_bytes_atomic(path, content)
     return {"files": [{"url": output_url_for(filename, "input"), "name": payload.name or filename, "kind": kind}]}
 
 @app.post("/api/comfyui/upload-base64")
@@ -13109,6 +13474,39 @@ def _local_upload_safe_file_stem(name):
     if not cleaned:
         raise HTTPException(status_code=400, detail="文件名称不能为空")
     return cleaned[:120]
+
+def local_asset_sidecar_moves(old_rel: str, new_rel: str) -> List[Tuple[str, str]]:
+    pairs = []
+    for source, target in (
+        (_local_upload_caption_path(old_rel), _local_upload_caption_path(new_rel)),
+        (_local_upload_classification_path(old_rel), _local_upload_classification_path(new_rel)),
+    ):
+        if os.path.isfile(source) and not os.path.exists(target):
+            pairs.append((source, target))
+    return pairs
+
+def execute_media_moves_with_rewrite(
+    moves: List[Tuple[str, str]],
+    replacements: Dict[str, str],
+) -> Dict[str, int]:
+    completed = []
+    try:
+        for source, target in moves:
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            os.rename(source, target)
+            completed.append((source, target))
+        return rewrite_persisted_media_urls(replacements)
+    except Exception as exc:
+        for source, target in reversed(completed):
+            try:
+                if os.path.exists(target) and not os.path.exists(source):
+                    os.makedirs(os.path.dirname(source), exist_ok=True)
+                    os.rename(target, source)
+            except OSError as rollback_error:
+                print(f"回滚素材移动失败: {target} -> {source}: {rollback_error}")
+        if isinstance(exc, HTTPException):
+            raise
+        raise HTTPException(status_code=500, detail=f"素材移动失败，已回滚：{exc}") from exc
 
 def _local_upload_caption_path(filename):
     return os.path.splitext(os.path.join(LOCAL_UPLOAD_DIR, filename))[0] + ".txt"
@@ -13220,7 +13618,8 @@ def migrate_double_extension_uploads():
     旧版 URL 导入会把自带扩展名的 entry.name 又拼一次 ext，导致文件名重复后缀、URL 对不上而无法显示。"""
     if not os.path.isdir(LOCAL_UPLOAD_DIR):
         return
-    renamed = 0
+    moves = []
+    replacements = {}
     for current, _dirs, files in os.walk(LOCAL_UPLOAD_DIR):
         for name in files:
             m = _DOUBLE_EXT_RE.search(name)
@@ -13230,23 +13629,16 @@ def migrate_double_extension_uploads():
             new_path = os.path.join(current, name[:-len(m.group(1))])  # 去掉末尾重复的一层扩展名
             if os.path.exists(new_path):
                 continue
-            try:
-                os.rename(old_path, new_path)
-            except OSError:
-                continue
-            renamed += 1
-            # caption/classification 旁车以「去掉一层扩展名」为基名，需同步改名以保留标注
-            old_base = os.path.splitext(old_path)[0]
-            new_base = os.path.splitext(new_path)[0]
-            for suffix in (".classification.json", ".txt"):
-                src_side, dst_side = old_base + suffix, new_base + suffix
-                if os.path.exists(src_side) and not os.path.exists(dst_side):
-                    try:
-                        os.rename(src_side, dst_side)
-                    except OSError:
-                        pass
-    if renamed:
-        print(f"修复双重扩展名素材: {renamed} 个")
+            old_rel = os.path.relpath(old_path, LOCAL_UPLOAD_DIR).replace("\\", "/")
+            new_rel = os.path.relpath(new_path, LOCAL_UPLOAD_DIR).replace("\\", "/")
+            moves.extend([(old_path, new_path), *local_asset_sidecar_moves(old_rel, new_rel)])
+            replacements.update(local_asset_url_replacements(old_rel, new_rel))
+    if moves:
+        try:
+            execute_media_moves_with_rewrite(moves, replacements)
+            print(f"修复双重扩展名素材: {len(replacements) // 2} 个")
+        except Exception as exc:
+            print(f"修复双重扩展名素材失败: {exc}")
 
 def _sniff_image_ext_bytes(head):
     """按文件头魔数判断真实图片格式，返回规范扩展名（含点），无法识别返回 None。"""
@@ -13276,7 +13668,8 @@ def migrate_mislabeled_image_extensions():
     if not os.path.isdir(LOCAL_UPLOAD_DIR):
         return
     img_exts = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
-    fixed = 0
+    moves = []
+    replacements = {}
     for current, _dirs, files in os.walk(LOCAL_UPLOAD_DIR):
         for name in files:
             ext = os.path.splitext(name)[1].lower()
@@ -13293,22 +13686,16 @@ def migrate_mislabeled_image_extensions():
             new_path = os.path.join(current, new_name)
             if os.path.exists(new_path):
                 continue
-            try:
-                os.rename(path, new_path)
-            except OSError:
-                continue
-            fixed += 1
-            old_base = os.path.splitext(path)[0]
-            new_base = os.path.splitext(new_path)[0]
-            for suffix in (".classification.json", ".txt"):
-                src_side, dst_side = old_base + suffix, new_base + suffix
-                if os.path.isfile(src_side) and not os.path.exists(dst_side):
-                    try:
-                        os.rename(src_side, dst_side)
-                    except OSError:
-                        pass
-    if fixed:
-        print(f"纠正图片扩展名(内容与后缀不符): {fixed} 个")
+            old_rel = os.path.relpath(path, LOCAL_UPLOAD_DIR).replace("\\", "/")
+            new_rel = os.path.relpath(new_path, LOCAL_UPLOAD_DIR).replace("\\", "/")
+            moves.extend([(path, new_path), *local_asset_sidecar_moves(old_rel, new_rel)])
+            replacements.update(local_asset_url_replacements(old_rel, new_rel))
+    if moves:
+        try:
+            execute_media_moves_with_rewrite(moves, replacements)
+            print(f"纠正图片扩展名(内容与后缀不符): {len(replacements) // 2} 个")
+        except Exception as exc:
+            print(f"纠正图片扩展名失败: {exc}")
 
 @app.post("/api/local-assets/upload")
 async def upload_local_assets(files: List[UploadFile] = File(...), folder: str = Form("")):
@@ -13322,14 +13709,20 @@ async def upload_local_assets(files: List[UploadFile] = File(...), folder: str =
         kind, ext = _local_upload_kind_ext(file.filename, file.content_type)
         if kind is None:
             continue
+        try:
+            if kind == "image":
+                ext = validated_image_extension(content)
+            elif kind == "video":
+                ext = validated_video_extension(content)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"{file.filename or '素材'} 无效：{exc}") from exc
         base = os.path.splitext(os.path.basename(file.filename or "file"))[0]
         base = re.sub(r"[^0-9A-Za-z一-鿿._-]+", "_", base).strip("_") or "file"
         base = base[:60]
         filename = f"up_{uuid.uuid4().hex[:12]}_{base}{ext}"
         rel_name = f"{folder_rel}/{filename}".lstrip("/")
         path = os.path.join(folder_abs, filename)
-        with open(path, "wb") as f:
-            f.write(content)
+        write_bytes_atomic(path, content)
         if kind == "image":
             classification = await classify_asset_image_best_effort(path)
             if classification:
@@ -13375,9 +13768,9 @@ async def import_local_assets_from_urls(payload: LocalAssetUrlImportRequest):
                     name_path = urllib.parse.urlparse(src_url).path
                 kind, ext = _local_upload_kind_ext(name_path, content_type)
                 if kind == "image":
-                    real = _sniff_image_ext_bytes(content[:16])   # 以真实内容为准，避免 webp 被叫成 .png 等
-                    if real and not (real == ".jpg" and ext == ".jpeg"):
-                        ext = real
+                    ext = validated_image_extension(content)
+                elif kind == "video":
+                    ext = validated_video_extension(content)
                 if kind not in ("image", "video"):
                     raise HTTPException(status_code=400, detail=f"不是图片或视频资源：{content_type or src_url}")
                 if not content:
@@ -13396,8 +13789,7 @@ async def import_local_assets_from_urls(payload: LocalAssetUrlImportRequest):
                 filename = f"up_{uuid.uuid4().hex[:12]}_{base}{ext}"
                 rel_name = f"{folder_rel}/{filename}".lstrip("/")
                 path = os.path.join(folder_abs, filename)
-                with open(path, "wb") as f:
-                    f.write(content)
+                write_bytes_atomic(path, content)
                 if payload.classify and kind == "image":
                     classification = await classify_asset_image_best_effort(path, payload.provider, payload.model, payload.ms_model, payload.prompt)
                     if classification:
@@ -13446,9 +13838,26 @@ async def rename_local_asset_folder(payload: LocalAssetFolderRequest, request: R
     _, new_abs = _local_upload_safe_folder(new_rel)
     if os.path.exists(new_abs):
         raise HTTPException(status_code=400, detail="同名文件夹已存在")
-    os.rename(abs_path, new_abs)
+    replacements = {}
+    for current, _, files in os.walk(abs_path):
+        for filename in files:
+            old_abs = os.path.join(current, filename)
+            old_file_rel = os.path.relpath(old_abs, LOCAL_UPLOAD_DIR).replace("\\", "/")
+            kind, _ = _local_upload_kind_ext(old_file_rel, "")
+            if not kind:
+                continue
+            child_rel = os.path.relpath(old_abs, abs_path).replace("\\", "/")
+            new_file_rel = f"{new_rel}/{child_rel}".lstrip("/")
+            replacements.update(local_asset_url_replacements(old_file_rel, new_file_rel))
+    rewrite_result = execute_media_moves_with_rewrite([(abs_path, new_abs)], replacements)
     tree, items = _local_upload_tree_and_items()
-    return {"ok": True, "folder": {"path": new_rel, "name": name}, "tree": tree, "items": items}
+    return {
+        "ok": True,
+        "folder": {"path": new_rel, "name": name},
+        "tree": tree,
+        "items": items,
+        "url_rewrites": rewrite_result,
+    }
 
 @app.patch("/api/local-assets/items")
 async def rename_local_asset_item(payload: LocalAssetRenameRequest, request: Request):
@@ -13469,17 +13878,20 @@ async def rename_local_asset_item(payload: LocalAssetRenameRequest, request: Req
     _, new_abs = _local_upload_abs(new_rel)
     if os.path.exists(new_abs):
         raise HTTPException(status_code=400, detail="同名素材已存在")
-    os.rename(abs_path, new_abs)
-    old_caption = _local_upload_caption_path(rel)
-    new_caption = _local_upload_caption_path(new_rel)
-    if os.path.isfile(old_caption) and not os.path.exists(new_caption):
-        os.rename(old_caption, new_caption)
-    old_classification = _local_upload_classification_path(rel)
-    new_classification = _local_upload_classification_path(new_rel)
-    if os.path.isfile(old_classification) and not os.path.exists(new_classification):
-        os.rename(old_classification, new_classification)
+    moves = [(abs_path, new_abs), *local_asset_sidecar_moves(rel, new_rel)]
+    rewrite_result = execute_media_moves_with_rewrite(
+        moves,
+        local_asset_url_replacements(rel, new_rel),
+    )
     tree, items = _local_upload_tree_and_items()
-    return {"ok": True, "item": _local_upload_item(new_rel), "old_path": rel, "tree": tree, "items": items}
+    return {
+        "ok": True,
+        "item": _local_upload_item(new_rel),
+        "old_path": rel,
+        "tree": tree,
+        "items": items,
+        "url_rewrites": rewrite_result,
+    }
 
 @app.post("/api/local-assets/delete")
 async def delete_local_assets(payload: dict, request: Request):
@@ -13488,24 +13900,38 @@ async def delete_local_assets(payload: dict, request: Request):
     if not isinstance(names, list):
         names = []
     deleted = []
+    skipped_referenced = []
+    failed = []
     for name in names:
         try:
             rel, path = _local_upload_safe_path(name)
         except HTTPException:
             continue
         if os.path.isfile(path):
-            try:
-                os.remove(path)
+            status = delete_media_file_if_unreferenced(path)
+            if status == "removed":
                 txt_path = _local_upload_caption_path(rel)
                 if os.path.isfile(txt_path):
-                    os.remove(txt_path)
+                    try:
+                        os.remove(txt_path)
+                    except OSError:
+                        pass
                 cls_path = _local_upload_classification_path(rel)
                 if os.path.isfile(cls_path):
-                    os.remove(cls_path)
+                    try:
+                        os.remove(cls_path)
+                    except OSError:
+                        pass
                 deleted.append(rel)
-            except OSError:
-                pass
-    return {"deleted": deleted}
+            elif status == "referenced":
+                skipped_referenced.append(rel)
+            elif status == "failed":
+                failed.append(rel)
+    return {
+        "deleted": deleted,
+        "skipped_referenced": skipped_referenced,
+        "failed": failed,
+    }
 
 @app.post("/api/local-assets/move")
 async def move_local_assets(payload: dict, request: Request):
@@ -13518,7 +13944,10 @@ async def move_local_assets(payload: dict, request: Request):
     target_rel, target_abs = _local_upload_safe_folder(folder_value)
     if target_rel and not os.path.isdir(target_abs):
         raise HTTPException(status_code=404, detail="目标文件夹不存在")
-    moved = 0
+    moves = []
+    replacements = {}
+    moved_items = []
+    planned_targets = set()
     for name in names:
         try:
             rel, abs_path = _local_upload_safe_path(name)
@@ -13531,26 +13960,26 @@ async def move_local_assets(payload: dict, request: Request):
         if new_rel == rel:
             continue  # 已在目标文件夹，跳过
         _, new_abs = _local_upload_abs(new_rel)
-        if os.path.exists(new_abs):
+        while os.path.exists(new_abs) or os.path.normcase(new_abs) in planned_targets:
             # 同名冲突：加短随机后缀，避免覆盖已有文件
             stem, ext = os.path.splitext(base)
             base = f"{stem}_{uuid.uuid4().hex[:6]}{ext}"
             new_rel = f"{target_rel}/{base}".lstrip("/") if target_rel else base
             _, new_abs = _local_upload_abs(new_rel)
-        try:
-            os.makedirs(os.path.dirname(new_abs), exist_ok=True)
-            os.rename(abs_path, new_abs)
-            for src_sib, dst_sib in (
-                (_local_upload_caption_path(rel), _local_upload_caption_path(new_rel)),
-                (_local_upload_classification_path(rel), _local_upload_classification_path(new_rel)),
-            ):
-                if os.path.isfile(src_sib) and not os.path.exists(dst_sib):
-                    os.rename(src_sib, dst_sib)
-            moved += 1
-        except OSError:
-            continue
+        planned_targets.add(os.path.normcase(new_abs))
+        moves.extend([(abs_path, new_abs), *local_asset_sidecar_moves(rel, new_rel)])
+        replacements.update(local_asset_url_replacements(rel, new_rel))
+        moved_items.append({"old_path": rel, "new_path": new_rel})
+    rewrite_result = execute_media_moves_with_rewrite(moves, replacements)
     tree, items = _local_upload_tree_and_items()
-    return {"ok": True, "moved": moved, "items": items, "tree": tree}
+    return {
+        "ok": True,
+        "moved": len(moved_items),
+        "moved_items": moved_items,
+        "items": items,
+        "tree": tree,
+        "url_rewrites": rewrite_result,
+    }
 
 @app.post("/api/local-assets/caption")
 async def caption_local_assets(payload: LocalAssetCaptionRequest):
@@ -17362,8 +17791,7 @@ async def delete_project(project_id: str):
                 continue
             if str(data.get("project") or "") == project_id:
                 data["project"] = DEFAULT_PROJECT_ID
-                with open(path, 'w', encoding='utf-8') as f:
-                    json.dump(data, f, ensure_ascii=False, indent=2)
+                write_json_atomic(path, data)
                 moved += 1
     return {"ok": True, "moved": moved}
 
@@ -17409,8 +17837,7 @@ async def update_canvas_meta(canvas_id: str, payload: CanvasMetaUpdate):
                 canvas["board_x"] = float(payload.board_x)
             if payload.board_y is not None:
                 canvas["board_y"] = float(payload.board_y)
-            with open(canvas_path(canvas["id"]), 'w', encoding='utf-8') as f:
-                json.dump(canvas, f, ensure_ascii=False, indent=2)
+            write_json_atomic(canvas_path(canvas["id"]), canvas)
             return canvas
 
     canvas = await asyncio.to_thread(mutate_meta)
@@ -17987,11 +18414,22 @@ async def delete_asset_library(library_id: str):
         raise HTTPException(status_code=400, detail="至少保留一个资产库")
     if not any(item.get("id") == library_id for item in libraries):
         raise HTTPException(status_code=404, detail="资产库不存在")
+    removed_library = next(item for item in libraries if item.get("id") == library_id)
+    removed_items = [
+        item
+        for category in removed_library.get("categories", [])
+        for item in (category.get("items") or [])
+    ]
     lib["libraries"] = [item for item in libraries if item.get("id") != library_id]
     if lib.get("active_library_id") == library_id:
         lib["active_library_id"] = lib["libraries"][0].get("id")
     save_asset_library(lib)
-    return {"library": lib}
+    cleanup = [remove_asset_library_file(item) for item in removed_items]
+    return {
+        "library": lib,
+        "removed_files": cleanup.count("removed"),
+        "skipped_referenced": cleanup.count("referenced"),
+    }
 
 @app.post("/api/asset-library/categories")
 async def create_asset_library_category(payload: AssetLibraryCategoryRequest):
@@ -18031,20 +18469,24 @@ async def delete_asset_library_category(category_id: str, library_id: str = ""):
         raise HTTPException(status_code=404, detail="分类不存在")
     if cat.get("type") == "workflow" and category_id == "workflows" and (library.get("id") or "") == "default":
         raise HTTPException(status_code=400, detail="默认工作流分类不能删除")
-    # 删除分组时一并清理该分组下的本地文件 + 分组文件夹，避免磁盘残留。
-    for item in (cat.get("items") or []):
-        remove_asset_library_file(item)
+    removed_items = list(cat.get("items") or [])
     cat_dir = str(cat.get("dir") or "").strip("/").strip()
-    if cat_dir:
-        try:
-            target = os.path.join(ASSET_LIBRARY_DIR, cat_dir)
-            if os.path.isdir(target) and os.path.abspath(target).startswith(os.path.abspath(ASSET_LIBRARY_DIR) + os.sep):
-                shutil.rmtree(target, ignore_errors=True)
-        except Exception as exc:
-            print(f"删除分组文件夹失败: {exc}")
     library["categories"] = [c for c in library.get("categories", []) if c.get("id") != category_id]
     save_asset_library(lib)
-    return {"library": lib}
+    cleanup = [remove_asset_library_file(item) for item in removed_items]
+    if cat_dir:
+        target = os.path.realpath(os.path.join(ASSET_LIBRARY_DIR, cat_dir))
+        root = os.path.realpath(ASSET_LIBRARY_DIR)
+        try:
+            if os.path.commonpath([root, target]) == root and target != root:
+                os.rmdir(target)
+        except (OSError, ValueError):
+            pass
+    return {
+        "library": lib,
+        "removed_files": cleanup.count("removed"),
+        "skipped_referenced": cleanup.count("referenced"),
+    }
 
 @app.post("/api/asset-library/items")
 async def add_asset_library_item(payload: AssetLibraryAddRequest):
@@ -18411,9 +18853,9 @@ async def delete_asset_library_item(item_id: str):
             cat["items"] = keep
     if not removed:
         raise HTTPException(status_code=404, detail="资产不存在")
-    remove_asset_library_file(removed)  # 同时删除本地文件，避免磁盘上堆积
     save_asset_library(lib)
-    return {"library": lib}
+    cleanup = remove_asset_library_file(removed)
+    return {"library": lib, "file_cleanup": cleanup}
 
 @app.post("/api/asset-library/items/delete")
 async def batch_delete_asset_library_items(payload: AssetLibraryBatchDeleteRequest):
@@ -18435,10 +18877,14 @@ async def batch_delete_asset_library_items(payload: AssetLibraryBatchDeleteReque
                 else:
                     keep.append(item)
             cat["items"] = keep
-    for item in removed_items:  # 批量删除同时清理本地文件
-        remove_asset_library_file(item)
     save_asset_library(lib)
-    return {"library": lib, "removed": removed}
+    cleanup = [remove_asset_library_file(item) for item in removed_items]
+    return {
+        "library": lib,
+        "removed": removed,
+        "removed_files": cleanup.count("removed"),
+        "skipped_referenced": cleanup.count("referenced"),
+    }
 
 @app.post("/api/asset-library/items/move")
 async def batch_move_asset_library_items(payload: AssetLibraryBatchMoveRequest):
@@ -19075,38 +19521,54 @@ async def delete_history(req: DeleteHistoryRequest):
     if not os.path.exists(HISTORY_FILE):
         return {"success": False, "message": "History file not found"}
     try:
-        with HISTORY_LOCK:
-            with open(HISTORY_FILE, 'r', encoding='utf-8') as f:
-                history = json.load(f)
-            target_record = None
-            new_history = []
-            for item in history:
-                is_match = False
-                item_ts = item.get("timestamp", 0)
-                if isinstance(req.timestamp, (int, float)) and isinstance(item_ts, (int, float)):
-                    if abs(float(item_ts) - float(req.timestamp)) < 0.001:
+        with CANVAS_LOCK:
+            with HISTORY_LOCK:
+                with open(HISTORY_FILE, 'r', encoding='utf-8-sig') as f:
+                    history = json.load(f)
+                matched_records = []
+                new_history = []
+                for item in history:
+                    is_match = False
+                    item_ts = item.get("timestamp", 0)
+                    if isinstance(req.timestamp, (int, float)) and isinstance(item_ts, (int, float)):
+                        is_match = abs(float(item_ts) - float(req.timestamp)) < 0.001
+                    elif str(item_ts) == str(req.timestamp):
                         is_match = True
-                elif str(item_ts) == str(req.timestamp):
-                    is_match = True
-                if is_match:
-                    target_record = item
-                else:
-                    new_history.append(item)
-            if target_record:
-                with open(HISTORY_FILE, 'w', encoding='utf-8') as f:
-                    json.dump(new_history, f, ensure_ascii=False, indent=4)
+                    if is_match:
+                        matched_records.append(item)
+                    else:
+                        new_history.append(item)
+                if matched_records:
+                    write_json_atomic(HISTORY_FILE, new_history, indent=4)
 
-        if target_record:
-            for img_url in target_record.get("images", []):
-                file_path = output_file_from_url(img_url)
-                if file_path and os.path.exists(file_path):
-                    try:
-                        os.remove(file_path)
-                    except Exception as e:
-                        print(f"Failed to delete file {file_path}: {e}")
-            return {"success": True}
-        else:
-            return {"success": False, "message": "Record not found"}
+            if not matched_records:
+                return {"success": False, "message": "Record not found"}
+
+            paths = []
+            for url in collect_local_media_urls(matched_records):
+                try:
+                    path = local_media_path_from_url(url)
+                except (HTTPException, OSError, ValueError):
+                    path = None
+                if path and path not in paths:
+                    paths.append(path)
+            removed_files = []
+            skipped_referenced = []
+            for path in paths:
+                if json_references_media_path(new_history, path):
+                    skipped_referenced.append(path)
+                    continue
+                status = delete_media_file_if_unreferenced(path)
+                if status == "removed":
+                    removed_files.append(path)
+                elif status == "referenced":
+                    skipped_referenced.append(path)
+            return {
+                "success": True,
+                "removed_records": len(matched_records),
+                "removed_files": len(removed_files),
+                "skipped_referenced": len(skipped_referenced),
+            }
     except Exception as e:
         print(f"Delete history error: {e}")
         return {"success": False, "message": str(e)}

@@ -9725,7 +9725,29 @@ function generatorInputConnection(node, source){
     if(!node?.id || !sourceNodeId) return null;
     return connections.find(connection => connection.from === sourceNodeId && connection.to === node.id) || null;
 }
-function removePromptMentionsForGeneratorSources(sources, refs){
+function generatorSourceMentionMatches(mention, sourceRef){
+    const mentionKey = promptMentionRefKey(mention);
+    const sourceKey = promptMentionRefKey(sourceRef);
+    if(mentionKey && sourceKey && mentionKey === sourceKey) return true;
+    if((mentionKey && !mentionKey.startsWith('url:')) || (sourceKey && !sourceKey.startsWith('url:'))) return false;
+    return Boolean(mention?.url && sourceRef?.url && mention.url === sourceRef.url);
+}
+function promptMentionUsedByRemainingGenerator(promptNode, ref, removedConnectionId){
+    return promptTargetGenerators(promptNode).some(generator => generatorSourcesWithoutMutation(generator).some(source => {
+        const sourceNodeId = generatorInputSourceNodeId(source);
+        const remainsConnected = sourceNodeId && connections.some(connection => (
+            connection.id !== removedConnectionId
+            && connection.from === sourceNodeId
+            && connection.to === generator.id
+        ));
+        if(!remainsConnected) return false;
+        return (source.refs || []).some((raw, index) => generatorSourceMentionMatches(
+            ref,
+            promptRequestRefFromSource(source, raw, index)
+        ));
+    }));
+}
+function removePromptMentionsForGeneratorSources(sources, refs, removedConnectionId){
     if(!Array.isArray(refs) || !refs.length) return false;
     const promptNodeIds = new Set((sources || []).flatMap(source => source.promptNodeIds || []));
     let changed = false;
@@ -9733,7 +9755,11 @@ function removePromptMentionsForGeneratorSources(sources, refs){
         const promptNode = nodes.find(item => item.id === nodeId && item.type === 'prompt');
         if(!promptNode?.promptRichText?.parts) return;
         const parts = promptRichTextPartsForNode(promptNode);
-        const nextParts = parts.filter(part => part.type !== 'mention' || !refs.some(ref => promptMentionRefsEqual(part.ref, ref)));
+        const nextParts = parts.filter(part => (
+            part.type !== 'mention'
+            || !refs.some(ref => generatorSourceMentionMatches(part.ref, ref))
+            || promptMentionUsedByRemainingGenerator(promptNode, part.ref, removedConnectionId)
+        ));
         if(nextParts.length === parts.length) return;
         promptNode.promptRichText = {version:1, parts:nextParts};
         promptNode.text = promptPlainTextFromParts(nextParts);
@@ -9751,7 +9777,7 @@ function removeGeneratorInputReference(node, source, event){
         .filter(item => generatorInputConnection(node, item)?.id === connection.id)
         .flatMap(item => (item.refs || []).map((ref, index) => promptRequestRefFromSource(item, ref, index)));
     pushUndo();
-    removePromptMentionsForGeneratorSources(sources, refs);
+    removePromptMentionsForGeneratorSources(sources, refs, connection.id);
     return removeConnectionById(connection.id, false);
 }
 function renderImageInputList(list, node, imageInputs, emptyText=null){

@@ -7141,18 +7141,32 @@ function promptMentionTokenHtml(ref, state={}){
     const detached = Boolean(state.detached);
     const kindLabel = tr(`canvas.mentionKind.${item.kind}`);
     const status = detached ? ` · ${tr('canvas.mentionDetached')}` : '';
+    const displayLabel = String(state.label || '').trim() || `@${item.name}`;
     const media = item.kind === 'image'
         ? canvasPreviewImgHtml(item.url, 96, 'class="prompt-mention-thumb" alt="" draggable="false"')
         : `<span class="prompt-mention-kind" aria-hidden="true"><i data-lucide="${item.kind === 'video' ? 'film' : 'file-audio'}"></i></span>`;
-    return `<span class="prompt-mention-token${detached ? ' is-detached' : ''}" contenteditable="false" tabindex="0" role="button" aria-label="${escapeAttr(`${kindLabel} ${item.name}${status}`)}" title="${escapeAttr(`${kindLabel} · ${item.name}${status}`)}" data-prompt-mention-ref="${escapeAttr(encoded)}">${media}<span class="prompt-mention-name">@${escapeHtml(item.name)}</span>${detached ? '<i data-lucide="unlink" class="prompt-mention-state" aria-hidden="true"></i>' : ''}<button type="button" class="prompt-mention-remove" aria-label="${escapeAttr(tr('common.delete'))}" title="${escapeAttr(tr('common.delete'))}">×</button></span>`;
+    return `<span class="prompt-mention-token${detached ? ' is-detached' : ''}" contenteditable="false" tabindex="0" role="button" aria-label="${escapeAttr(`${kindLabel} ${item.name}${status}`)}" title="${escapeAttr(`${kindLabel} · ${item.name}${status}`)}" data-prompt-mention-ref="${escapeAttr(encoded)}">${media}<span class="prompt-mention-name">${escapeHtml(displayLabel)}</span>${detached ? '<i data-lucide="unlink" class="prompt-mention-state" aria-hidden="true"></i>' : ''}<button type="button" class="prompt-mention-remove" aria-label="${escapeAttr(tr('common.delete'))}" title="${escapeAttr(tr('common.delete'))}">×</button></span>`;
+}
+function refreshPromptMentionTokenLabels(editor){
+    const counters = {image:0, video:0, audio:0};
+    editor?.querySelectorAll?.('.prompt-mention-token').forEach(token => {
+        const ref = promptMentionRefFromToken(token);
+        if(!ref?.kind || counters[ref.kind] === undefined) return;
+        counters[ref.kind] += 1;
+        const label = token.querySelector('.prompt-mention-name');
+        if(label) label.textContent = promptMentionLabel(ref.kind, counters[ref.kind]);
+    });
 }
 function promptRichTextHtml(node){
+    const counters = {image:0, video:0, audio:0};
     return promptRichTextPartsForNode(node).map(part => {
         if(part.type === 'mention'){
             const currentRef = promptMentionCurrentRef(node, part.ref);
             const state = promptMentionRefState(node, currentRef);
-            if(state.missing) return escapeHtml(`@${currentRef.name || 'asset'}`);
-            return promptMentionTokenHtml(currentRef, state);
+            counters[currentRef.kind] = Number(counters[currentRef.kind] || 0) + 1;
+            const label = promptMentionLabel(currentRef.kind, counters[currentRef.kind]);
+            if(state.missing) return escapeHtml(label);
+            return promptMentionTokenHtml(currentRef, {...state, label});
         }
         return escapeHtml(part.text).replace(/\n/g, '<br>');
     }).join('');
@@ -7431,6 +7445,7 @@ function bindPromptRichEditor(editor, body, node){
     const state = {open:false, source:'connected', query:'', triggerRange:null, activeIndex:0, libraryId:activeCanvasAssetLibraryId || '', categoryId:''};
     let composing = false;
     const sync = () => {
+        refreshPromptMentionTokenLabels(editor);
         const parts = promptEditorParts(editor);
         node.promptRichText = {version:1, parts};
         node.text = promptPlainTextFromParts(parts);

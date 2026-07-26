@@ -1351,6 +1351,14 @@ function isNodeSelected(id){
 function selectedNodeIds(){
     return selectedIds.length ? selectedIds.slice() : (selectedId ? [selectedId] : []);
 }
+function topLevelSmartConnectionSourceIds(ids){
+    const uniqueIds = Array.from(new Set((ids || []).filter(id => nodes.some(node => node.id === id))));
+    const selectedGroups = uniqueIds
+        .map(id => nodes.find(node => node.id === id))
+        .filter(isSmartGroupNode);
+    const nestedIds = new Set(selectedGroups.flatMap(group => smartGroupMembers(group).map(member => member.id)));
+    return uniqueIds.filter(id => !nestedIds.has(id));
+}
 function isEditableTarget(target){
     const el = target || document.activeElement;
     return !!el?.closest?.('input, textarea, select, option, [contenteditable="true"], .prompt-node-control, .prompt-input');
@@ -8636,9 +8644,15 @@ function handlePortDrop(drag, e){
     if(targetId){
         const compatible = (drag.fromPort === 'out' && targetPort === 'in') || (drag.fromPort === 'in' && targetPort === 'out');
         if(!compatible){ discardPendingUndo(); render(); return; }
-        const fromId = drag.fromPort === 'out' ? drag.fromId : targetId;
-        const toId = drag.fromPort === 'out' ? targetId : drag.fromId;
-        if(connectInputNode(fromId, toId)){
+        const pairs = drag.fromPort === 'out'
+            ? (drag.sourceIds?.length ? drag.sourceIds : [drag.fromId]).map(sourceId => [sourceId, targetId])
+            : [[targetId, drag.fromId]];
+        let connected = false;
+        pairs.forEach(([fromId, toId]) => {
+            if(fromId === toId) return;
+            if(connectInputNode(fromId, toId)) connected = true;
+        });
+        if(connected){
             commitPendingUndo();
             render();
             scheduleSave();
@@ -8967,6 +8981,7 @@ function bindNodeEvents(){
             if(!node) return;
             if(e.altKey) node = duplicateForAltDrag(node, e.shiftKey);
             let dragIds = selectedIds.includes(node.id) ? selectedIds.slice() : [node.id];
+            const connectionSourceIds = topLevelSmartConnectionSourceIds(dragIds);
             if(isSmartGroupNode(node)){
                 const memberIds = smartGroupMembers(node).map(member => member.id);
                 dragIds = Array.from(new Set([...dragIds, ...memberIds]));
@@ -8975,7 +8990,7 @@ function bindNodeEvents(){
                 const n = nodes.find(x => x.id === dragId);
                 return n ? {id:n.id, ox:Number(n.x) || 0, oy:Number(n.y) || 0} : null;
             }).filter(Boolean);
-            dragState = {id:node.id, startX:e.clientX, startY:e.clientY, ox:node.x || 0, oy:node.y || 0, group, groupIds:group.map(item => item.id), ctrlGroup:Boolean(e.ctrlKey)};
+            dragState = {id:node.id, startX:e.clientX, startY:e.clientY, ox:node.x || 0, oy:node.y || 0, group, groupIds:group.map(item => item.id), connectionSourceIds, ctrlGroup:Boolean(e.ctrlKey)};
             document.body.classList.add('smart-node-drag');
             capturePendingUndo();
         };
@@ -8985,9 +9000,13 @@ function bindNodeEvents(){
                 e.preventDefault(); e.stopPropagation();
                 const portType = port.dataset.port;
                 const p = screenToWorld(e);
+                const selectedSourceIds = portType === 'out' && selectedNodeIds().includes(id)
+                    ? topLevelSmartConnectionSourceIds(selectedNodeIds())
+                    : [id];
                 portDragState = {
                     fromId:id,
                     fromPort:portType,
+                    sourceIds:selectedSourceIds,
                     currentWorld:p,
                     hoverTargetId:'',
                     hoverPort:'',
@@ -9023,7 +9042,7 @@ function rectOverlapNode(draggedId, x, y, w, h, excludeIds=[]){
     return null;
 }
 function dragConnectTargetFor(sourceNode, point=lastMouseWorld){
-    if(!sourceNode || (dragState?.group || []).length > 1) return null;
+    if(!sourceNode) return null;
     if(['smart-prompt', 'smart-loop'].includes(sourceNode.type) && point){
         return rectOverlapNode(sourceNode.id, point.x - 1, point.y - 1, 2, 2, dragState?.groupIds || []);
     }
@@ -9039,6 +9058,15 @@ function canAutoConnectDraggedNode(sourceNode, targetNode){
     if(sourceNode.type === 'smart-loop') return isSmartImageNode(targetNode);
     if(sourceNode.type === 'smart-group') return isSmartImageNode(targetNode) || targetNode.type === 'smart-loop';
     return false;
+}
+function connectDraggedNodesToTarget(sourceNodes, targetNode){
+    if(!targetNode) return 0;
+    let connected = 0;
+    sourceNodes.forEach(sourceNode => {
+        if(!canAutoConnectDraggedNode(sourceNode, targetNode)) return;
+        if(connectInputNode(sourceNode.id, targetNode.id)) connected += 1;
+    });
+    return connected;
 }
 function restoreDraggedNodePosition(){
     if(!dragState) return;
@@ -11993,6 +12021,7 @@ function loadPromptDraft(subject){
     } else {
         setPromptText('');
     }
+    refreshSmartMentionTokenLabels();
 }
 function positionComposerForNode(node){
     if(!node) return;
@@ -12788,12 +12817,54 @@ function pendingBoxSize(count, options={}){
     const h = rows * (cellH + 8) + 16;
     return {w, h};
 }
-function mentionTokenHtml(img){
+function smartMentionRefLabel(kind, index){
+    const safeKind = ['image','video','audio'].includes(kind) ? kind : 'image';
+    try {
+        return trf(`canvas.mentionRefLabel.${safeKind}`, {n:index});
+    } catch(_) {
+        return safeKind === 'video' ? `视频${index}` : safeKind === 'audio' ? `音频${index}` : `图${index}`;
+    }
+}
+function smartLabelledRefs(refs){
+    const counters = {image:0, video:0, audio:0};
+    return (refs || []).map(ref => {
+        const detectedKind = ['image','video','audio'].includes(ref?.kind) ? ref.kind : mediaKindForItem(ref);
+        const kind = ['image','video','audio'].includes(detectedKind) ? detectedKind : 'image';
+        counters[kind] = Number(counters[kind] || 0) + 1;
+        return {ref, label:smartMentionRefLabel(kind, counters[kind])};
+    });
+}
+function smartMentionLabelsForNode(node){
+    if(!node) return new Map();
+    const blockedRefs = blockedInputRefKeys(node);
+    const refs = uniqueReferenceImages(defaultReferenceImagesFor(node, false, smartLoopContext)
+        .filter(img => !blockedRefs.has(inputRefKey(img))));
+    collectPromptParts().forEach(part => {
+        if(part.type !== 'image' || !part.url || blockedRefs.has(inputRefKey(part))) return;
+        if(refs.some(ref => ref.url === part.url) || refs.length >= SMART_REFERENCE_IMAGE_MAX) return;
+        refs.push(part);
+    });
+    return new Map(smartLabelledRefs(refs).map(item => [item.ref.url, item.label]));
+}
+function refreshSmartMentionTokenLabels(){
+    const labels = smartMentionLabelsForNode(selectedNode());
+    promptInput?.querySelectorAll?.('.mention-image-token').forEach(token => {
+        const kind = ['image','video','audio'].includes(token.dataset.kind) ? token.dataset.kind : 'image';
+        const name = token.dataset.name || (kind === 'audio' ? '音频' : kind === 'video' ? '视频' : '图片');
+        const label = labels.get(token.dataset.url) || `@${name}`;
+        const visible = token.querySelector(':scope > span:not(.mention-audio-thumb)');
+        if(visible) visible.textContent = label;
+        token.setAttribute('aria-label', `${label} · ${name}`);
+        token.title = `${label} · ${name}`;
+    });
+}
+function mentionTokenHtml(img, options={}){
     if(!img?.url) return '';
     const kind = mediaKindForItem(img);
     const name = img.alias || img.name || (kind === 'audio' ? '音频' : kind === 'video' ? '视频' : '图片');
+    const displayLabel = String(options.label || '').trim() || name;
     const media = mentionTokenMediaHtml(img, kind);
-    return `<span class="mention-image-token" contenteditable="false" data-url="${escapeHtml(img.url)}" data-kind="${escapeHtml(kind)}" data-name="${escapeHtml(name)}" data-node-id="${escapeHtml(img.nodeId || '')}" data-image-index="${escapeHtml(img.imageIndex ?? '')}">${media}<span>${escapeHtml(name)}</span><button type="button" class="mention-image-remove" aria-label="${escapeHtml(tr('common.delete'))}" title="${escapeHtml(tr('common.delete'))}">×</button></span>`;
+    return `<span class="mention-image-token" contenteditable="false" data-url="${escapeHtml(img.url)}" data-kind="${escapeHtml(kind)}" data-name="${escapeHtml(name)}" data-node-id="${escapeHtml(img.nodeId || '')}" data-image-index="${escapeHtml(img.imageIndex ?? '')}" aria-label="${escapeHtml(`${displayLabel} · ${name}`)}" title="${escapeHtml(`${displayLabel} · ${name}`)}">${media}<span>${escapeHtml(displayLabel)}</span><button type="button" class="mention-image-remove" aria-label="${escapeHtml(tr('common.delete'))}" title="${escapeHtml(tr('common.delete'))}">×</button></span>`;
 }
 function mentionTokenMediaHtml(img, kind=mediaKindForItem(img)){
     if(kind === 'audio'){
@@ -12813,6 +12884,8 @@ function mentionOptionMediaHtml(img){
 }
 function promptHtmlWithMentionTokens(text, refs=[]){
     const value = String(text || '');
+    const labels = new Map(smartLabelledRefs((refs || []).filter(ref => ref?.url && ref?.name))
+        .map(item => [item.ref.url, item.label]));
     const items = (refs || []).filter(ref => ref?.url && ref?.name).sort((a, b) => String(b.name || '').length - String(a.name || '').length);
     if(!value || !items.length || !value.includes('@')) return '';
     let html = '';
@@ -12821,7 +12894,7 @@ function promptHtmlWithMentionTokens(text, refs=[]){
         if(value[index] === '@'){
             const hit = items.find(ref => value.slice(index + 1, index + 1 + String(ref.name || '').length) === String(ref.name || ''));
             if(hit){
-                html += mentionTokenHtml(hit);
+                html += mentionTokenHtml(hit, {label:labels.get(hit.url)});
                 index += 1 + String(hit.name || '').length;
                 continue;
             }
@@ -13618,7 +13691,15 @@ function insertMentionToken(img){
     token.dataset.nodeId = img.nodeId || '';
     token.dataset.imageIndex = String(img.imageIndex ?? '');
     token.dataset.assetUris = JSON.stringify(img.asset_uris || {});
-    token.innerHTML = `${mentionTokenMediaHtml(img, token.dataset.kind)}<span>${escapeHtml(token.dataset.name)}</span><button type="button" class="mention-image-remove" aria-label="${escapeHtml(tr('common.delete'))}" title="${escapeHtml(tr('common.delete'))}">×</button>`;
+    const counters = {image:0, video:0, audio:0};
+    promptInput.querySelectorAll('.mention-image-token').forEach(existing => {
+        const existingKind = existing.dataset.kind || 'image';
+        counters[existingKind] = Number(counters[existingKind] || 0) + 1;
+    });
+    const displayLabel = smartMentionRefLabel(token.dataset.kind, Number(counters[token.dataset.kind] || 0) + 1);
+    token.setAttribute('aria-label', `${displayLabel} · ${token.dataset.name}`);
+    token.title = `${displayLabel} · ${token.dataset.name}`;
+    token.innerHTML = `${mentionTokenMediaHtml(img, token.dataset.kind)}<span>${escapeHtml(displayLabel)}</span><button type="button" class="mention-image-remove" aria-label="${escapeHtml(tr('common.delete'))}" title="${escapeHtml(tr('common.delete'))}">×</button>`;
     range.insertNode(token);
     bindSmartPreviewImageFallbacks(token);
     const spacer = document.createTextNode(' ');
@@ -13629,6 +13710,7 @@ function insertMentionToken(img){
     sel.addRange(range);
     closeMentionPicker();
     promptInput.focus();
+    refreshSmartMentionTokenLabels();
     renderInputThumbsRow(selectedNode());
 }
 function collectPromptParts(){
@@ -13727,7 +13809,8 @@ function buildPromptRequest(node, overrideDefaultImages=null, consumeDefault=fal
                 role:`image_${refs.length + 1}`
             });
         }
-        body += `图${refMap.get(part.url)}`;
+        const labelledRefs = smartLabelledRefs(refs);
+        body += labelledRefs[refMap.get(part.url) - 1]?.label || `@${part.name || '图片'}`;
     });
     body = body.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
     const groupPrompt = isSmartGroupNode(node) ? textForNode(node, ctx).trim() : '';
@@ -13738,7 +13821,8 @@ function buildPromptRequest(node, overrideDefaultImages=null, consumeDefault=fal
     }
     const displayPrompt = originalPrompt || body;
     if(hasMentionToken && refs.length){
-        const mapText = refs.map((img, i) => `图${i + 1}：${img.name || `图片${i + 1}`}`).join('\n');
+        const labelledRefs = smartLabelledRefs(refs);
+        const mapText = labelledRefs.map(({ref, label}) => `${label}：${ref.name || label}`).join('\n');
         return {
             prompt:`${tr('smart.refMapHeader')}\n${mapText}\n\n${tr('smart.refUserNeed')}\n${body}`,
             displayPrompt,
@@ -17106,6 +17190,10 @@ window.onmouseup = e => {
             scheduleSave();
             return;
         }
+        const draggedNodes = (dragState.group || []).map(item => nodes.find(n => n.id === item.id)).filter(Boolean);
+        const connectionSources = (dragState.connectionSourceIds || [dragState.id])
+            .map(id => nodes.find(node => node.id === id))
+            .filter(Boolean);
         const autoTarget = draggedNode && dragState.ctrlGroup ? dragConnectTargetFor(draggedNode, screenToWorld(e)) : null;
         const insertHit = draggedNode?.type === 'smart-loop' && dragState.ctrlGroup && (dragState.group || []).length <= 1
             ? insertionConnectionForNode(draggedNode)
@@ -17116,7 +17204,6 @@ window.onmouseup = e => {
             : null;
         // 拖入分组：单个节点、多选（批量拖入）或整个分组（其成员会并入目标分组）都允许并入主分组下的目标分组。
         // 目标分组由主拖动节点的中心命中决定；smartGroupTargetForDraggedNode 已排除正在被拖动的节点/分组。
-        const draggedNodes = (dragState.group || []).map(item => nodes.find(n => n.id === item.id)).filter(Boolean);
         const smartGroupTarget = draggedNode ? smartGroupTargetForDraggedNode(draggedNode) : null;
         if(
             insertHit &&
@@ -17142,12 +17229,11 @@ window.onmouseup = e => {
             draggedNode &&
             autoTarget &&
             dragState.ctrlGroup &&
-            (dragState.group || []).length <= 1 &&
-            canAutoConnectDraggedNode(draggedNode, autoTarget) &&
-            connectInputNode(draggedNode.id, autoTarget.id)
+            connectDraggedNodesToTarget(connectionSources.length ? connectionSources : [draggedNode], autoTarget)
         ){
             stateChanged = true;
             restoreDraggedNodePosition();
+            if(selectedIds.length) selectedIds = selectedIds.filter(id => !connectionSources.some(node => node.id === id));
             if(selectedId === draggedNode.id) selectedId = '';
             render();
         } else if(draggedNode && (draggedNode.images || []).length && (dragState.group || []).length <= 1){
@@ -17749,6 +17835,7 @@ composer.addEventListener('click', event => {
 promptInput.addEventListener('input', maybeOpenMentionPicker);
 promptInput.addEventListener('input', () => {
     delete promptInput.dataset.preserveDraftOnce;
+    refreshSmartMentionTokenLabels();
     savePromptDraftForCurrent();
     renderInputThumbsRow(selectedNode());
     scheduleSave();
@@ -17765,6 +17852,7 @@ promptInput.addEventListener('click', event => {
     event.preventDefault();
     event.stopPropagation();
     remove.closest('.mention-image-token')?.remove();
+    refreshSmartMentionTokenLabels();
     mentionPreview.style.display = 'none';
     savePromptDraftForCurrent();
     renderInputThumbsRow(selectedNode());
@@ -18136,6 +18224,7 @@ window.addEventListener('message', event => {
 window.addEventListener('studio-lang-change', () => {
     renderDynamicParams();
     renderInputThumbsRow(selectedNode());
+    refreshSmartMentionTokenLabels();
     renderAssetLibrary();
     if(document.getElementById('imageEditModal')?.classList.contains('open')){
         setImageEditMode(imageEditMode);

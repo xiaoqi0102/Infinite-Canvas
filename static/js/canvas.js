@@ -9783,14 +9783,22 @@ function removeGeneratorInputReference(node, source, event){
 function renderImageInputList(list, node, imageInputs, emptyText=null){
     if(!list) return;
     list.innerHTML = imageInputs.length ? '' : `<div class="text-[11px] text-gray-300 py-2">${escapeHtml(emptyText || tr('canvas.inputImagesEmpty'))}</div>`;
+    const labelledRefs = promptLabelledRefs(resolveGeneratorRequestInputs(node).refs);
     imageInputs.forEach((src, i) => {
         const item = document.createElement('div');
         item.className = 'input-item';
         item.draggable = true;
         item.dataset.sourceId = src.id;
+        const sourceRefs = (src.refs || []).map((ref, index) => promptRequestRefFromSource(src, ref, index));
+        const displayLabel = uniqueValues(labelledRefs
+            .filter(item => sourceRefs.some(ref => promptMentionRefsEqual(item.ref, ref)))
+            .map(item => item.label)).join(' / ') || src.label;
+        const sourceName = String(src.label || sourceRefs[0]?.name || displayLabel).trim() || displayLabel;
         const previewHtml = src.preview && !isMissingAssetUrl(src.preview) ? canvasPreviewImgHtml(src.preview, 256) : (src.preview ? missingAssetHtml(src.preview, true) : '<i data-lucide="image" class="w-6 h-6 text-slate-400"></i>');
         const canRemove = Boolean(generatorInputConnection(node, src));
-        item.innerHTML = `<span class="input-index">${i + 1}</span>${previewHtml}<span class="input-label">${escapeHtml(src.label)}</span>${canRemove ? `<button class="input-reference-remove" type="button" title="${escapeAttr(tr('canvas.deleteLink'))}" aria-label="${escapeAttr(tr('canvas.deleteLink'))}"><i data-lucide="x"></i></button>` : ''}`;
+        item.title = `${displayLabel} · ${sourceName}`;
+        item.setAttribute('aria-label', `${displayLabel} · ${sourceName}`);
+        item.innerHTML = `<span class="input-index">${i + 1}</span>${previewHtml}<span class="input-label">${escapeHtml(displayLabel)}</span>${canRemove ? `<button class="input-reference-remove" type="button" title="${escapeAttr(tr('canvas.deleteLink'))}" aria-label="${escapeAttr(tr('canvas.deleteLink'))}"><i data-lucide="x"></i></button>` : ''}`;
         const removeButton = item.querySelector('.input-reference-remove');
         if(removeButton){
             removeButton.onpointerdown = event => event.stopPropagation();
@@ -11631,6 +11639,14 @@ function promptRequestRefFromSource(source, raw, index=0){
 function promptMentionLabel(kind, index){
     return trf(`canvas.mentionRefLabel.${kind}`, {n:index});
 }
+function promptLabelledRefs(refs){
+    const counters = {image:0, video:0, audio:0};
+    return (refs || []).map(ref => {
+        const kind = ['image','video','audio'].includes(ref?.kind) ? ref.kind : 'image';
+        counters[kind] += 1;
+        return {ref, label:promptMentionLabel(kind, counters[kind])};
+    });
+}
 function resolveGeneratorRequestInputs(gen){
     const sources = orderedSources(gen, generatorSources(gen));
     const promptParts = [];
@@ -11660,8 +11676,7 @@ function resolveGeneratorRequestInputs(gen){
     });
     const refs = [...baseRefs];
     validMentionRefs.forEach(ref => { if(!refs.some(item => promptMentionRefsEqual(item, ref))) refs.push(ref); });
-    const counters = {image:0, video:0, audio:0};
-    const labelledRefs = refs.map(ref => ({ref, label:promptMentionLabel(ref.kind, ++counters[ref.kind])}));
+    const labelledRefs = promptLabelledRefs(refs);
     const labelFor = ref => labelledRefs.find(item => promptMentionRefsEqual(item.ref, ref))?.label || `@${ref.name || 'asset'}`;
     const displayPrompt = promptPlainTextFromParts(promptParts);
     const modelBody = promptParts.map(part => {
@@ -11689,8 +11704,7 @@ function resolveGeneratorRequestInputs(gen){
 function restrictResolvedGeneratorInputs(inputs, allowedKinds){
     const allowed = new Set(allowedKinds || ['image','video','audio']);
     const refs = inputs.refs.filter(ref => allowed.has(ref.kind));
-    const counters = {image:0, video:0, audio:0};
-    const labelledRefs = refs.map(ref => ({ref, label:promptMentionLabel(ref.kind, ++counters[ref.kind])}));
+    const labelledRefs = promptLabelledRefs(refs);
     const labelFor = ref => labelledRefs.find(item => promptMentionRefsEqual(item.ref, ref))?.label || `@${ref.name || 'asset'}`;
     const mappedMentions = inputs.mentionedRefs.filter(ref => refs.some(item => promptMentionRefsEqual(item, ref)));
     const modelBody = inputs.promptParts.map(part => {
@@ -16030,14 +16044,20 @@ function startLink(e, originId, originKind){
         const target = targetPort?.closest('.node');
         if(target){
             const targetId = target.dataset.id;
-            const fromId = originKind === 'out' ? originId : targetId;
-            const toId = originKind === 'out' ? targetId : originId;
-            if(canConnect(fromId, toId)){
-                if(!connections.some(c => c.from === fromId && c.to === toId)){
-                    pushUndo();
+            const pairs = originKind === 'out' && selected.has(originId)
+                ? [...selected].map(fromId => [fromId, targetId])
+                : [[originKind === 'out' ? originId : targetId, originKind === 'out' ? targetId : originId]];
+            const pending = pairs.filter(([fromId, toId]) => (
+                canConnect(fromId, toId) && !connections.some(c => c.from === fromId && c.to === toId)
+            ));
+            if(pending.length){
+                pushUndo();
+                pending.forEach(([fromId, toId]) => {
                     connections.push({id:uid('c'), from:fromId, to:toId});
                     syncLatestGeneratedOutputToConnection(fromId, toId);
-                }
+                });
+            }
+            if(pending.length || pairs.some(([fromId, toId]) => canConnect(fromId, toId))){
                 syncGeneratorInputs();
                 scheduleSave();
                 render();

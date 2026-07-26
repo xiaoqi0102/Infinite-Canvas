@@ -9715,6 +9715,45 @@ function renderPromptPreview(container, promptInputs){
         };
     });
 }
+function generatorInputSourceNodeId(source){
+    if(source?.groupId) return source.groupId;
+    if(source?.nodeId) return source.nodeId;
+    return String(source?.id || '').split(':')[0];
+}
+function generatorInputConnection(node, source){
+    const sourceNodeId = generatorInputSourceNodeId(source);
+    if(!node?.id || !sourceNodeId) return null;
+    return connections.find(connection => connection.from === sourceNodeId && connection.to === node.id) || null;
+}
+function removePromptMentionsForGeneratorSources(sources, refs){
+    if(!Array.isArray(refs) || !refs.length) return false;
+    const promptNodeIds = new Set((sources || []).flatMap(source => source.promptNodeIds || []));
+    let changed = false;
+    promptNodeIds.forEach(nodeId => {
+        const promptNode = nodes.find(item => item.id === nodeId && item.type === 'prompt');
+        if(!promptNode?.promptRichText?.parts) return;
+        const parts = promptRichTextPartsForNode(promptNode);
+        const nextParts = parts.filter(part => part.type !== 'mention' || !refs.some(ref => promptMentionRefsEqual(part.ref, ref)));
+        if(nextParts.length === parts.length) return;
+        promptNode.promptRichText = {version:1, parts:nextParts};
+        promptNode.text = promptPlainTextFromParts(nextParts);
+        changed = true;
+    });
+    return changed;
+}
+function removeGeneratorInputReference(node, source, event){
+    event?.preventDefault();
+    event?.stopPropagation();
+    const connection = generatorInputConnection(node, source);
+    if(!connection) return false;
+    const sources = generatorSources(node);
+    const refs = sources
+        .filter(item => generatorInputConnection(node, item)?.id === connection.id)
+        .flatMap(item => (item.refs || []).map((ref, index) => promptRequestRefFromSource(item, ref, index)));
+    pushUndo();
+    removePromptMentionsForGeneratorSources(sources, refs);
+    return removeConnectionById(connection.id, false);
+}
 function renderImageInputList(list, node, imageInputs, emptyText=null){
     if(!list) return;
     list.innerHTML = imageInputs.length ? '' : `<div class="text-[11px] text-gray-300 py-2">${escapeHtml(emptyText || tr('canvas.inputImagesEmpty'))}</div>`;
@@ -9724,7 +9763,15 @@ function renderImageInputList(list, node, imageInputs, emptyText=null){
         item.draggable = true;
         item.dataset.sourceId = src.id;
         const previewHtml = src.preview && !isMissingAssetUrl(src.preview) ? canvasPreviewImgHtml(src.preview, 256) : (src.preview ? missingAssetHtml(src.preview, true) : '<i data-lucide="image" class="w-6 h-6 text-slate-400"></i>');
-        item.innerHTML = `<span class="input-index">${i + 1}</span>${previewHtml}<span class="input-label">${escapeHtml(src.label)}</span>`;
+        const canRemove = Boolean(generatorInputConnection(node, src));
+        item.innerHTML = `<span class="input-index">${i + 1}</span>${previewHtml}<span class="input-label">${escapeHtml(src.label)}</span>${canRemove ? `<button class="input-reference-remove" type="button" title="${escapeAttr(tr('canvas.deleteLink'))}" aria-label="${escapeAttr(tr('canvas.deleteLink'))}"><i data-lucide="x"></i></button>` : ''}`;
+        const removeButton = item.querySelector('.input-reference-remove');
+        if(removeButton){
+            removeButton.onpointerdown = event => event.stopPropagation();
+            removeButton.onmousedown = event => event.stopPropagation();
+            removeButton.ondragstart = event => event.preventDefault();
+            removeButton.onclick = event => removeGeneratorInputReference(node, src, event);
+        }
         item.ondragstart = e => {
             e.stopPropagation();
             internalDrag = true;
@@ -13466,12 +13513,17 @@ function deleteNodeFromButton(id, event){
 function deleteConnection(id, event){
     event?.preventDefault();
     event?.stopPropagation();
-    pushUndo();
+    removeConnectionById(id);
+}
+function removeConnectionById(id, recordUndo=true){
+    if(!connections.some(connection => connection.id === id)) return false;
+    if(recordUndo) pushUndo();
     connections = connections.filter(c => c.id !== id);
     if(hoveredConnectionId === id) hoveredConnectionId = '';
     syncGeneratorInputs();
     render();
     scheduleSave();
+    return true;
 }
 function outputDownloadName(url){
     const clean = (url || '').split('?')[0];

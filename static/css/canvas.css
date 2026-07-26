@@ -759,6 +759,9 @@ input[type=range].canvas-range::-webkit-slider-runnable-track { height:3px; bord
 .input-item img { width:100%; height:100%; object-fit:cover; border-radius:12px; }
 .input-index { position:absolute; left:5px; top:5px; min-width:18px; height:18px; border-radius:999px; background:#111827; color:#fff; display:flex; align-items:center; justify-content:center; font-size:10px; font-weight:700; }
 .input-label { position:absolute; left:5px; right:5px; bottom:5px; border-radius:10px; padding:2px 4px; background:rgba(255,255,255,.86); color:#475569; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.input-reference-remove { position:absolute; right:5px; top:5px; z-index:2; width:20px; height:20px; border:1px solid rgba(148,163,184,.42); border-radius:999px; background:rgba(255,255,255,.94); color:#64748b; cursor:pointer; display:inline-flex; align-items:center; justify-content:center; box-shadow:0 2px 6px rgba(15,23,42,.14); opacity:.86; transition:opacity .16s ease,color .16s ease,border-color .16s ease,background .16s ease; }
+.input-reference-remove:hover,.input-reference-remove:focus-visible { opacity:1; color:#dc2626; border-color:rgba(220,38,38,.5); background:#fff; outline:none; box-shadow:0 0 0 2px rgba(239,68,68,.16),0 2px 6px rgba(15,23,42,.14); }
+.input-reference-remove i,.input-reference-remove svg { width:12px; height:12px; pointer-events:none; }
 .video-frame-label { width:100%; min-height:22px; border:1px solid var(--line-2); border-radius:9px; background:var(--card-solid); color:var(--text); font-size:10px; font-weight:900; display:flex; align-items:center; justify-content:center; }
 .video-cloud-links { display:flex; flex-direction:column; gap:5px; margin:-2px 0 4px; }
 .video-cloud-links:empty { display:none; }
@@ -1129,6 +1132,8 @@ body.theme-dark .error-title { color:#fca5a5; }
 .theme-dark .llm-output,
 .theme-dark .model-row,
 .theme-dark .model-empty { background:var(--soft); border-color:var(--line); color:var(--muted); }
+.theme-dark .input-reference-remove { background:rgba(15,23,42,.94); border-color:rgba(148,163,184,.36); color:#cbd5e1; box-shadow:0 2px 6px rgba(0,0,0,.32); }
+.theme-dark .input-reference-remove:hover,.theme-dark .input-reference-remove:focus-visible { color:#fca5a5; border-color:rgba(248,113,113,.58); background:#1e293b; box-shadow:0 0 0 2px rgba(248,113,113,.18),0 2px 6px rgba(0,0,0,.32); }
 .theme-dark .llm-pane-resizer::before { background:#475569; }
 .theme-dark .group-node,
 .theme-dark .promptGroup-node,

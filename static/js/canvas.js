@@ -247,22 +247,52 @@ function applyLanguage(lang){
     renderCanvasList();
     render();
 }
+const CANVAS_API_CONFIG_EVENT_TYPES = new Set(['providers-changed','workflows-changed','comfy-instances-changed']);
+const canvasApiConfigEventsSeen = new Map();
+let canvasConfigRefreshTimer = 0;
+let canvasConfigRefreshPromise = null;
+function shouldHandleCanvasApiConfigEvent(data){
+    if(!CANVAS_API_CONFIG_EVENT_TYPES.has(data?.type)) return false;
+    const key = [data.type, data.updated_at || '', data.source || ''].join('|');
+    const now = Date.now();
+    const last = canvasApiConfigEventsSeen.get(key) || 0;
+    if(last && now - last < 1200) return false;
+    canvasApiConfigEventsSeen.set(key, now);
+    if(canvasApiConfigEventsSeen.size > 40) {
+        Array.from(canvasApiConfigEventsSeen.entries()).forEach(([eventKey, at]) => {
+            if(now - at > 2500) canvasApiConfigEventsSeen.delete(eventKey);
+        });
+    }
+    return true;
+}
+function scheduleCanvasConfigRefreshFromEvent(data, delay=520){
+    if(!shouldHandleCanvasApiConfigEvent(data)) return;
+    if(canvasConfigRefreshTimer) clearTimeout(canvasConfigRefreshTimer);
+    canvasConfigRefreshTimer = setTimeout(() => {
+        canvasConfigRefreshTimer = 0;
+        refreshCanvasConfigFromSettings();
+    }, Math.max(0, Number(delay) || 0));
+}
 async function refreshCanvasConfigFromSettings(){
-    await loadConfig();
-    pruneMissingComfyWorkflows();
-    (nodes || []).forEach(node => {
-        sanitizeImageNodeProviderModel(node);
-        sanitizeVideoNodeProviderModel(node);
+    if(canvasConfigRefreshPromise) return canvasConfigRefreshPromise;
+    canvasConfigRefreshPromise = (async () => {
+        await loadConfig();
+        pruneMissingComfyWorkflows();
+        (nodes || []).forEach(node => {
+            sanitizeImageNodeProviderModel(node);
+            sanitizeVideoNodeProviderModel(node);
+        });
+        if(typeof render === 'function') render();
+    })().finally(() => {
+        canvasConfigRefreshPromise = null;
     });
-    if(typeof render === 'function') render();
+    return canvasConfigRefreshPromise;
 }
 window.addEventListener('message', event => {
     if(event.origin && event.origin !== location.origin) return;
     if(event.data?.type === 'studio-lang') applyLanguage(event.data.lang);
     if(event.data?.type === 'canvas_updated') handleCanvasUpdatedMessage(event.data);
-    if(event.data?.type === 'providers-changed' || event.data?.type === 'workflows-changed' || event.data?.type === 'comfy-instances-changed'){
-        refreshCanvasConfigFromSettings();
-    }
+    scheduleCanvasConfigRefreshFromEvent(event.data);
     if(event.data?.type === 'canvas-focus'){
         // 从其他标签页切换回画布时，重新拉取工作流列表并刷新节点
         refreshCanvasConfigFromSettings();
@@ -584,6 +614,7 @@ const DEFAULT_VIDEO_MODELS = [
     // Agnes
     'agnes-video-v2.0'
 ];
+const JIMENG_SEEDANCE_VIDEO_MODELS = ['seedance2.0_vip', 'seedance2.0fast_vip', 'seedance2.0', 'seedance2.0fast', 'seedance2.0mini'];
 
 function uid(prefix='n'){ return `${prefix}_${Math.random().toString(16).slice(2)}_${Date.now()}`; }
 function loadLocalViewportMap(){
@@ -751,7 +782,12 @@ function videoProviderOptions(selectedId){
 function providerVideoModels(providerId){
     // 不走 providerById（会 fallback 到第一个 provider，造成串台），直接查精确匹配
     const provider = apiProviders.find(p => p.id === providerId);
-    return uniqueModels(provider?.video_models || []);
+    const isJimeng = String(providerId || '').trim().toLowerCase() === 'jimeng'
+        || String(provider?.protocol || '').trim().toLowerCase() === 'jimeng';
+    const models = isJimeng
+        ? [...(provider?.video_models || []), ...JIMENG_SEEDANCE_VIDEO_MODELS]
+        : (provider?.video_models || []);
+    return uniqueModels(models);
 }
 function videoProviderConfig(providerId){
     return (apiProviders.length ? apiProviders : defaultApiProviders()).find(p => p.id === providerId) || null;
@@ -1689,11 +1725,7 @@ async function loadConfig(){
 // 监听 API 设置页面的变更广播，实时刷新画布的模型/平台下拉
 try {
     const apiChannel = new BroadcastChannel('studio-api');
-    apiChannel.onmessage = async (e) => {
-        if(e.data?.type === 'providers-changed' || e.data?.type === 'workflows-changed' || e.data?.type === 'comfy-instances-changed'){
-            await refreshCanvasConfigFromSettings();
-        }
-    };
+    apiChannel.onmessage = e => scheduleCanvasConfigRefreshFromEvent(e.data);
 } catch(e) { /* 不支持 BroadcastChannel 的旧浏览器忽略 */ }
 function msChatModelOptions(selected){
     // 单一数据源：从 API 设置里 modelscope 平台的 chat_models 取
@@ -11822,6 +11854,8 @@ async function runGenerator(genId, opts={}){
         provider_id:resolveImageProviderId(gen.apiProvider || 'comfly'),
         model:resolveImageModel(gen.model),
         size:await generatorSizeForRun(gen, refs),
+        aspect_ratio:gen.ratio === 'custom' ? (gen.customRatio || '') : (gen.ratio || ''),
+        resolution:gen.resolution || '',
         reference_images:refs.slice(0, CANVAS_REFERENCE_IMAGE_MAX)
     };
     const quality = normalizedImageQuality(gen.quality);

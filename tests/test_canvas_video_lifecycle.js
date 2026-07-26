@@ -111,6 +111,7 @@ async function testIntermediateVideoTaskIsPersistedOnGenerator() {
         }),
         validateMentionRequestInputs:() => {},
         applyUploadedUrlToRefs:value => value,
+        preflightCanvasVideoMedia:async (_node, refs) => ({refs, manualVideoUrl:''}),
         imageRefsOnly:() => [],
         videoRefsOnly:() => [],
         audioRefsOnly:() => [],

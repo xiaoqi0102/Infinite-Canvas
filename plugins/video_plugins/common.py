@@ -373,6 +373,66 @@ async def public_http_get(value: Any, *, timeout: float = 120.0) -> httpx.Respon
     raise httpx.ConnectError("远程素材没有可连接的公网地址")
 
 
+async def public_http_probe(value: Any, *, timeout: float = 20.0) -> Dict[str, Any]:
+    """轻量探测公网素材，不下载完整媒体内容。"""
+    parsed, ascii_host, addresses = await _resolve_public_http_target(value)
+    explicit_port = parsed.port
+    default_port = 443 if parsed.scheme.lower() == "https" else 80
+    host_name = f"[{ascii_host}]" if ":" in ascii_host else ascii_host
+    host_header = f"{host_name}:{explicit_port}" if explicit_port is not None else host_name
+    last_error: httpx.TransportError | None = None
+    async with httpx.AsyncClient(
+        timeout=httpx.Timeout(connect=10.0, read=timeout, write=10.0, pool=10.0),
+        follow_redirects=False,
+        trust_env=False,
+    ) as client:
+        for address in addresses:
+            target_host = f"[{address}]" if ":" in address else address
+            port_suffix = (
+                f":{explicit_port}"
+                if explicit_port is not None and explicit_port != default_port
+                else ""
+            )
+            target_url = urllib.parse.urlunsplit(
+                (
+                    parsed.scheme,
+                    f"{target_host}{port_suffix}",
+                    parsed.path or "/",
+                    parsed.query,
+                    "",
+                )
+            )
+            for method, extra_headers in (
+                ("HEAD", {}),
+                ("GET", {"Range": "bytes=0-0"}),
+            ):
+                headers = {"Host": host_header, "Accept": "*/*", **extra_headers}
+                try:
+                    async with client.stream(
+                        method,
+                        target_url,
+                        headers=headers,
+                        follow_redirects=False,
+                        extensions={"sni_hostname": ascii_host},
+                    ) as response:
+                        if response.is_redirect:
+                            raise UnsafePublicUrlError("远程素材探测不允许重定向")
+                        result = {
+                            "status_code": response.status_code,
+                            "content_type": response.headers.get("content-type", ""),
+                            "content_length": response.headers.get("content-length", ""),
+                        }
+                except httpx.TransportError as exc:
+                    last_error = exc
+                    break
+                if method == "HEAD" and result["status_code"] in {403, 405, 501}:
+                    continue
+                return result
+    if last_error:
+        raise last_error
+    raise httpx.ConnectError("远程素材没有可连接的公网地址")
+
+
 def canonical_video_api_root(base_url: Any) -> str:
     """返回不含尾斜杠和重复 v1/v2 尾段的视频 API 根地址。"""
     text = str(base_url or "").strip()

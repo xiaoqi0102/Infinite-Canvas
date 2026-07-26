@@ -1282,8 +1282,12 @@ Sudashui Base URL 带不带末尾 `/` 或 `/v1` 均会统一拼接为单一的 `
 - 受控本地素材上传到 `https://files.sudashuiapi.com`，使用当前 provider 的 Bearer Key 和 multipart `file` 字段。
 - 通用“上传云端”入口在自动模式下，会先查找已启用、已配置 Base URL 与 API Key 且明确选择 `sudashui-video-generations` 的 provider；多个候选中优先使用主平台。上传成功后接口直接返回 Sudashui 文件服务响应中的实际 `url`，并标记 `service=sudashui`，前端不得用本地源地址或固定有效期替代该链接。只有自动模式的 Sudashui 上传失败时才继续尝试 Litterbox/temp.sh；显式指定 Sudashui 时失败即返回错误，不做静默降级。
 - 用户再次点击“上传云端”时，普通画布和智能画布必须优先使用保存的 `originalLocalUrl` / `sourceUrl` 或上传映射中的本地 `source` 重新上传，并用新链接替换旧临时链接，不能因命中旧缓存而直接返回。若素材只剩公网 URL 且没有受控本地副本，仍按公网 URL 透传规则处理，不得为了续传主动下载任意远程内容。
+- 普通画布和智能画布在调用 `POST /api/canvas-video-tasks` 前，必须先调用 `POST /api/canvas-video-materials/preflight` 检查图片、视频和音频素材是否仍可访问。探测复用视频插件的公网 DNS 校验、IP 固定和禁重定向边界，优先 `HEAD`，不支持时退回流式 `Range GET`，不得下载完整媒体。失效素材存在受控 `/assets/` 或 `/output/` 本地副本时自动重新上传，并把返回的新链接覆盖到本次请求和画布上传缓存；没有本地副本时必须停止创建任务，避免上游计费后才返回素材 404。
+- 智能画布的自动上传映射必须随节点 `runSettings.videoTempShLinks` 持久化，并保留输入引用的 `nodeId`、`imageIndex`、`originalLocalUrl` 和 `sourceUrl`，不能只依赖任务结束后会清空的 `transientSmartCloudLinks`。
 - 普通画布的云端链接列表支持逐条删除。删除只清理画布内保存的上传映射和链接缓存，不调用远端文件删除接口；若映射保留了受控本地 `source`，对应素材节点同时恢复为该本地地址，后续生成不得继续引用已删除链接。
 - 单个任务内相同本地素材只上传一次，但最终数组顺序必须保持不变。
+
+安全边界与已知风险：预检接口只接受同源页面调用；公网探测拒绝账号信息、本机/内网 DNS 结果和重定向，并把已校验 IP 固定到实际连接；自动重传只读取 `USER_DATA_ROOT` 约束下的 `/assets/`、`/output/` 文件，不下载任意远程 URL。为避免重定向绕过 DNS 校验，当前合法的 30x 素材链接也会按不可用处理。预检只能确认提交瞬间可访问，无法消除链接在预检成功后、上游读取前再次过期的时间窗口。
 - 视频创建请求不能自动重发，避免响应丢失时重复扣费。
 - `references` 最多 9 图、3 视频、3 音频，三类总数不超过 12。
 - `frames` 必须恰好包含一个首帧和一个尾帧，不能混入其它图片、视频或音频。

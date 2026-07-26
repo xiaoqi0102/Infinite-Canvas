@@ -150,6 +150,8 @@
         "smart.cloudUploadTip": { zh: "上传当前输入图片或视频到云端直链", en: "Upload current input images or videos to a direct cloud link" },
         "smart.cloudUploadDone": { zh: "云端上传完成：{count} 个媒体文件，已使用实际上传链接。", en: "Cloud upload complete: {count} media file(s), using the actual uploaded URL(s)." },
         "smart.cloudUploadExpiryNote": { zh: "链接有效期 {value}。", en: "Link expiry: {value}." },
+        "smart.videoMaterialCheckFailed": { zh: "视频素材检查失败", en: "Video material check failed" },
+        "smart.videoMaterialRefreshed": { zh: "已重新上传并更新 {count} 个失效素材链接", en: "Re-uploaded and updated {count} expired material link(s)" },
         "smart.manualMediaUrl": { zh: "输入网址", en: "Enter URL" },
         "smart.manualMediaUrlTip": { zh: "手动输入媒体网址", en: "Enter a media URL manually" },
         "smart.videoAspectKeep": { zh: "原图比例", en: "Keep" },

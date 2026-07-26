@@ -649,9 +649,11 @@ function cloneSmartSettings(source=settings){
         return {...(source || {})};
     }
 }
-function settingsForStorage(source=settings){
+function settingsForStorage(source=settings, options={}){
     const clean = cloneSmartSettings(source);
-    clean.videoTempShLinks = (clean.videoTempShLinks || []).filter(item => item?.manual === true);
+    clean.videoTempShLinks = (clean.videoTempShLinks || []).filter(item =>
+        item?.url && (options.preserveCloudLinks === true || item?.manual === true)
+    );
     return clean;
 }
 function normalizeSmartVideoModeSettings(target, preferMultimodal=false){
@@ -707,7 +709,7 @@ function canvasForStorage(){
     if(Array.isArray(clean.nodes)) clean.nodes = clean.nodes.filter(node => node.id !== SMART_LOG_PREVIEW_NODE_ID);
     (clean.nodes || []).forEach(node => {
         if(Array.isArray(node.images)) node.images = node.images.map(mediaItemForStorage);
-        if(node.runSettings) node.runSettings = settingsForStorage(node.runSettings);
+        if(node.runSettings) node.runSettings = settingsForStorage(node.runSettings, {preserveCloudLinks:true});
     });
     return clean;
 }
@@ -781,7 +783,7 @@ function serializableSmartNode(node){
     const base = JSON.parse(JSON.stringify(node || {}));
     const copy = normalizeLegacySmartNode(base) || {};
     if(Array.isArray(copy.images)) copy.images = copy.images.map(img => mediaItemForStorage(stripImageGenerationMeta(img))).filter(Boolean);
-    if(copy.runSettings) copy.runSettings = settingsForStorage(copy.runSettings);
+    if(copy.runSettings) copy.runSettings = settingsForStorage(copy.runSettings, {preserveCloudLinks:true});
     clearSmartNodeTransientRunState(copy);
     delete copy._dom;
     return copy;
@@ -1149,7 +1151,7 @@ function persistActiveSmartSettings(){
     if(!composer?.classList?.contains('open')) return;
     const subject = activeComposerNode();
     if(!subject) return;
-    subject.runSettings = settingsForStorage(settings);
+    subject.runSettings = settingsForStorage(settings, {preserveCloudLinks:true});
     rememberRecentSmartSettings(settings, subject);
 }
 function rememberCanvasListProject(projectId){
@@ -3731,8 +3733,8 @@ function rhMediaForRun(prompt, refs){
 }
 function tempShUploadedUrlFor(url, sourceSettings=settings){
     const source = String(url || '');
-    const manualLinks = ((sourceSettings || settings).videoTempShLinks || []).filter(item => item?.manual === true);
-    const links = [...(transientSmartCloudLinks || []), ...manualLinks];
+    const savedLinks = (sourceSettings || settings).videoTempShLinks || [];
+    const links = [...(transientSmartCloudLinks || []), ...savedLinks];
     const match = links.find(item =>
         item?.url && (item?.source === source || item?.originalLocalUrl === source || item?.url === source)
     );
@@ -3813,7 +3815,94 @@ async function uploadMediaRefToCloud(ref){
         ...(transientSmartCloudLinks || []).filter(item => item?.source !== sourceUrl),
         {source:sourceUrl, url:uploadedUrl, expires:data.expires || '', service:data.service || '', kind}
     ];
+    settings.videoTempShLinks = [
+        ...(settings.videoTempShLinks || []).filter(item =>
+            item?.manual === true || (item?.source !== sourceUrl && item?.url !== ref?.url)
+        ),
+        {source:sourceUrl, url:uploadedUrl, expires:data.expires || '', service:data.service || '', kind}
+    ];
     return uploadedUrl;
+}
+function updateSmartVideoMaterialCache(runSettings, ref, prepared){
+    if(!prepared?.refreshed || !prepared.url) return ref;
+    const sourceUrl = prepared.source || mediaRefSourceUrl(ref);
+    runSettings.videoTempShLinks = [
+        ...(runSettings.videoTempShLinks || []).filter(item =>
+            item?.manual === true || (item?.source !== sourceUrl && item?.url !== ref.url)
+        ),
+        {
+            source:sourceUrl,
+            url:prepared.url,
+            expires:prepared.expires || '',
+            service:prepared.service || '',
+            kind:mediaKindForItem(ref),
+        }
+    ];
+    const sourceNode = ref.nodeId ? nodes.find(node => node.id === ref.nodeId) : null;
+    const imageIndex = Number(ref.imageIndex);
+    const sourceItem = Number.isFinite(imageIndex) ? sourceNode?.images?.[imageIndex] : null;
+    if(sourceItem && typeof sourceItem === 'object'){
+        sourceItem.originalLocalUrl = sourceUrl || sourceItem.originalLocalUrl || sourceItem.url;
+        sourceItem.url = prepared.url;
+    }
+    return {...ref, url:prepared.url, originalLocalUrl:ref.originalLocalUrl || sourceUrl};
+}
+async function preflightSmartVideoMedia(refs, runSettings=settings, logContext={}){
+    const manualLinks = manualSmartMediaLinks(runSettings);
+    const skipRef = typeof logContext.skipRef === 'function' ? logContext.skipRef : () => false;
+    const mediaRefs = (refs || []).filter(ref => {
+        if(!ref?.url || !['image','video','audio'].includes(mediaKindForItem(ref)) || skipRef(ref)) return false;
+        return !(manualLinks.length && mediaKindForItem(ref) === 'video');
+    });
+    const checkRefs = [
+        ...mediaRefs,
+        ...manualLinks.map(item => ({
+            url:item.url,
+            originalLocalUrl:item.source || '',
+            kind:'video',
+            manual:true,
+        })),
+    ];
+    if(!checkRefs.length) return refs || [];
+    const response = await fetch('/api/canvas-video-materials/preflight', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({
+            service:'auto',
+            materials:checkRefs.map(ref => ({
+                url:ref.url,
+                source_url:mediaRefSourceUrl(ref),
+                kind:mediaKindForItem(ref),
+            })),
+        }),
+    });
+    if(!response.ok) throw new Error(await smartResponseErrorMessage(response, tr('smart.videoMaterialCheckFailed')));
+    const data = await response.json();
+    const prepared = Array.isArray(data.materials) ? data.materials : [];
+    let changed = false;
+    const nextRefs = (refs || []).map(ref => {
+        const index = mediaRefs.indexOf(ref);
+        const item = index >= 0 ? prepared[index] : null;
+        if(!item?.refreshed) return ref;
+        changed = true;
+        return updateSmartVideoMaterialCache(runSettings, ref, item);
+    });
+    manualLinks.forEach((link, index) => {
+        const item = prepared[mediaRefs.length + index];
+        if(!item?.refreshed || !item.url) return;
+        const sourceUrl = item.source || link.source || '';
+        runSettings.videoTempShLinks = (runSettings.videoTempShLinks || []).filter(saved => saved !== link);
+        runSettings.videoTempShLinks.push({source:sourceUrl, url:item.url, manual:true});
+        changed = true;
+    });
+    if(changed){
+        transientSmartCloudLinks = [];
+        if(logContext.settingsOwner) logContext.settingsOwner.runSettings = settingsForStorage(runSettings, {preserveCloudLinks:true});
+        if(runSettings === settings) persistActiveSmartSettings();
+        scheduleSave();
+        toast(trf('smart.videoMaterialRefreshed', {count:Number(data.refreshed_count) || 1}));
+    }
+    return nextRefs;
 }
 function applyManualVideoUrlToSmartRef(ref, manualUrl){
     if(!manualUrl) return;
@@ -3894,6 +3983,8 @@ async function uploadCurrentSmartVideosToCloud(){
             trf('smart.cloudUploadDone', {count:urls.length}),
             expires.length === 1 ? trf('smart.cloudUploadExpiryNote', {value:expires[0]}) : ''
         ].filter(Boolean).join(' ');
+        persistActiveSmartSettings();
+        scheduleSave();
         toast(message);
         return urls;
     } finally {
@@ -6029,7 +6120,7 @@ async function saveCanvas(){
     savePromptDraftForCurrent();
     nodes.forEach(node => {
         node.images = (node.images || []).map(img => mediaItemForStorage(stripImageGenerationMeta(img)));
-        if(node.runSettings) node.runSettings = settingsForStorage(node.runSettings);
+        if(node.runSettings) node.runSettings = settingsForStorage(node.runSettings, {preserveCloudLinks:true});
     });
     canvas.nodes = nodes;
     canvas.settings = settingsForStorage(canvasDefaultSmartSettings || initialSmartSettings);
@@ -6064,7 +6155,7 @@ async function saveCanvas(){
                 applyMergedServerCanvas(serverCanvas);
                 nodes.forEach(node => {
                     node.images = (node.images || []).map(img => mediaItemForStorage(stripImageGenerationMeta(img)));
-                    if(node.runSettings) node.runSettings = settingsForStorage(node.runSettings);
+                    if(node.runSettings) node.runSettings = settingsForStorage(node.runSettings, {preserveCloudLinks:true});
                 });
                 canvas.nodes = nodes;
             } else if(data.detail?.updated_at) {
@@ -12214,6 +12305,10 @@ async function smartResponseErrorMessage(response, fallback='请求失败'){
         const detail = data.detail ?? data.error ?? data.message;
         if(typeof detail === 'string') return detail || fallback;
         if(Array.isArray(detail)) return detail.map(item => item?.msg || item?.message || String(item)).join('\n') || fallback;
+        if(detail && typeof detail === 'object'){
+            if(window.StudioI18n?.lang?.() === 'en' && detail.message_en) return detail.message_en;
+            return detail.message || detail.msg || detail.message_en || fallback;
+        }
     } catch(_) {}
     try {
         const text = await response.text();
@@ -13372,7 +13467,21 @@ function collectPromptParts(){
             let assetUris = {};
             try { assetUris = JSON.parse(node.dataset.assetUris || '{}') || {}; } catch(e) { assetUris = {}; }
             const kind = node.dataset.kind || 'image';
-            parts.push({type:'image', kind, url:node.dataset.url || '', name:node.dataset.name || (kind === 'audio' ? '音频' : '图片'), nodeId:node.dataset.nodeId || '', imageIndex:Number(node.dataset.imageIndex || 0), asset_uris:assetUris});
+            const nodeId = node.dataset.nodeId || '';
+            const imageIndex = Number(node.dataset.imageIndex || 0);
+            const sourceNode = nodeId ? nodes.find(item => item.id === nodeId) : null;
+            const sourceItem = Number.isFinite(imageIndex) ? sourceNode?.images?.[imageIndex] : null;
+            parts.push({
+                type:'image',
+                kind,
+                url:sourceItem?.url || node.dataset.url || '',
+                name:node.dataset.name || (kind === 'audio' ? '音频' : '图片'),
+                nodeId,
+                imageIndex,
+                asset_uris:assetUris,
+                originalLocalUrl:sourceItem?.originalLocalUrl || sourceItem?.localUrl || '',
+                sourceUrl:sourceItem?.sourceUrl || '',
+            });
             return;
         }
         if(node.tagName === 'BR'){
@@ -13430,7 +13539,17 @@ function buildPromptRequest(node, overrideDefaultImages=null, consumeDefault=fal
                 return;
             }
             refMap.set(part.url, refs.length + 1);
-            refs.push({url:part.url, name:part.name || `图${refs.length + 1}`, nodeId:part.nodeId, imageIndex:part.imageIndex, kind:part.kind || 'image', asset_uris:part.asset_uris || {}, role:`image_${refs.length + 1}`});
+            refs.push({
+                url:part.url,
+                name:part.name || `图${refs.length + 1}`,
+                nodeId:part.nodeId,
+                imageIndex:part.imageIndex,
+                kind:part.kind || 'image',
+                asset_uris:part.asset_uris || {},
+                originalLocalUrl:part.originalLocalUrl || '',
+                sourceUrl:part.sourceUrl || '',
+                role:`image_${refs.length + 1}`
+            });
         }
         body += `图${refMap.get(part.url)}`;
     });
@@ -13447,14 +13566,34 @@ function buildPromptRequest(node, overrideDefaultImages=null, consumeDefault=fal
         return {
             prompt:`${tr('smart.refMapHeader')}\n${mapText}\n\n${tr('smart.refUserNeed')}\n${body}`,
             displayPrompt,
-            refs:refs.map((img, index) => ({url:img.url, name:img.name || `图${index + 1}`, kind:img.kind || mediaKindForItem(img), asset_uris:img.asset_uris || {}, role:`image_${index + 1}`})),
+            refs:refs.map((img, index) => ({
+                url:img.url,
+                name:img.name || `图${index + 1}`,
+                nodeId:img.nodeId || '',
+                imageIndex:img.imageIndex ?? '',
+                kind:img.kind || mediaKindForItem(img),
+                asset_uris:img.asset_uris || {},
+                originalLocalUrl:img.originalLocalUrl || '',
+                sourceUrl:img.sourceUrl || '',
+                role:`image_${index + 1}`
+            })),
             mentioned:true
         };
     }
     return {
         prompt:body,
         displayPrompt,
-        refs:refs.map((img, index) => ({url:img.url, name:img.name || `图${index + 1}`, kind:img.kind || mediaKindForItem(img), asset_uris:img.asset_uris || {}, role:`image_${index + 1}`})),
+        refs:refs.map((img, index) => ({
+            url:img.url,
+            name:img.name || `图${index + 1}`,
+            nodeId:img.nodeId || '',
+            imageIndex:img.imageIndex ?? '',
+            kind:img.kind || mediaKindForItem(img),
+            asset_uris:img.asset_uris || {},
+            originalLocalUrl:img.originalLocalUrl || '',
+            sourceUrl:img.sourceUrl || '',
+            role:`image_${index + 1}`
+        })),
         mentioned:false
     };
 }
@@ -14501,7 +14640,7 @@ async function runCascadeStepIntoNode(sourceNode, targetNode, inputRefs, ctx=sma
     try {
         const result = await generateUrlsForCurrentSettings(
             outputNode, prompt, request.refs || [], runSettings,
-            {run:runLog, startedAt:runLogStart, runState:ctx?.runState}
+            {run:runLog, startedAt:runLogStart, runState:ctx?.runState, settingsOwner:requestNode}
         );
         if(!result.urls?.length) throw new Error(result.kind === 'video' ? tr('smart.errNoOutVideos') : tr('smart.errNoOutImages'));
         if(outpaintSize) delete requestNode.outpaintSize;
@@ -14620,7 +14759,7 @@ async function runLoopRoundIntoSlot(loopNode, rootNode, outputSlot, loopIndex, c
         } else {
             result = await generateUrlsForCurrentSettings(
                 outputSlot, prompt, request.refs || [], runSettings,
-                {run:runLog, startedAt:runLogStart, runState:ctx?.runState}
+                {run:runLog, startedAt:runLogStart, runState:ctx?.runState, settingsOwner:rootNode}
             );
         }
         if(!result.urls?.length) throw new Error(result.kind === 'video' ? tr('smart.errNoOutVideos') : tr('smart.errNoOutImages'));
@@ -15286,13 +15425,17 @@ async function runApiVideoGeneration(prompt, refs, runSettings=settings, logCont
     if(!runSettings.videoModel) throw new Error(tr('smart.errNoVideoModel'));
     try {
         normalizeMegabyVideoSettings(runSettings, {resetInvalidGroup:true});
-        const uploadedRefs = applyUploadedUrlsToSmartRefs(refs, runSettings);
+        let uploadedRefs = applyUploadedUrlsToSmartRefs(refs, runSettings);
         const profile = smartVideoProtocolProfile(runSettings);
         const trustedMode = profile.supportsTrustedAssets !== false && !profile.isSudashui && Boolean(runSettings.videoTrustedAsset);
         const trustedSource = trustedMode ? (['library','cloud','manual'].includes(runSettings.videoTrustedSource) ? runSettings.videoTrustedSource : 'library') : 'none';
         // 仅「素材库链接」来源才走 asset:// 认证地址 + 后端可信素材路由；上传云端/手动网址走普通直链。
         const useAssetUris = trustedSource === 'library';
         const targetPlatform = videoProviderPlatform(runSettings.videoProvider || 'comfly');
+        uploadedRefs = await preflightSmartVideoMedia(uploadedRefs, runSettings, {
+            ...logContext,
+            skipRef:ref => Boolean(useAssetUris && targetPlatform && ref?.asset_uris?.[targetPlatform]),
+        });
         let mismatchedAsset = false;
         const effUrl = ref => {
             const uris = (ref && ref.asset_uris && typeof ref.asset_uris === 'object') ? ref.asset_uris : null;

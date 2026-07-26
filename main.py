@@ -77,6 +77,7 @@ from plugins.video_plugins import (
     is_tudou_official_provider,
     megabyai_video_task_retryable,
     public_http_get,
+    public_http_probe,
     resume_aicost_video,
     resume_geeknow_video,
     resume_megabyai_video,
@@ -3383,6 +3384,15 @@ class TempShUploadRequest(BaseModel):
 
 class CloudVideoUploadRequest(BaseModel):
     url: str = ""
+    service: str = "auto"
+
+class CanvasVideoMaterialPreflightItem(BaseModel):
+    url: str = ""
+    source_url: str = ""
+    kind: str = ""
+
+class CanvasVideoMaterialPreflightRequest(BaseModel):
+    materials: List[CanvasVideoMaterialPreflightItem] = []
     service: str = "auto"
 
 class RunningHubSubmitRequest(BaseModel):
@@ -10207,6 +10217,132 @@ async def upload_local_video_to_cloud(ref_url: str, service: str = "auto") -> Di
 async def upload_local_video_to_temp_sh(ref_url: str) -> Dict[str, str]:
     return await upload_local_video_to_cloud(ref_url, "auto")
 
+
+def canvas_video_material_error(
+    message: str,
+    message_en: str,
+    *,
+    status_code: int = 400,
+    code: str = "material_unavailable",
+) -> HTTPException:
+    return HTTPException(
+        status_code=status_code,
+        detail={"code": code, "message": message, "message_en": message_en},
+    )
+
+
+def canvas_video_material_local_source(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        normalized = cloud_upload_local_url_path(text)
+    except HTTPException:
+        return ""
+    if normalized and normalized.startswith(("/assets/", "/output/")):
+        return text
+    return ""
+
+
+async def preflight_canvas_video_material(
+    material: CanvasVideoMaterialPreflightItem,
+    service: str = "auto",
+) -> Dict[str, Any]:
+    url = str(material.url or "").strip()
+    source_url = canvas_video_material_local_source(material.source_url)
+    kind = str(material.kind or "").strip().lower() or "media"
+    if not url:
+        raise canvas_video_material_error(
+            "视频素材缺少 URL，已停止创建任务。",
+            "A video material URL is missing. The task was not created.",
+            code="material_url_missing",
+        )
+    if url.lower().startswith("asset://"):
+        return {
+            "url": url,
+            "source": material.source_url or "",
+            "kind": kind,
+            "refreshed": False,
+            "service": "asset",
+            "expires": "",
+        }
+
+    current_local_source = canvas_video_material_local_source(url)
+    probe_reason = ""
+    if not current_local_source and re.match(r"^https?://", url, re.I):
+        try:
+            probe = await public_http_probe(url)
+            status_code = int(probe.get("status_code") or 0)
+            if 200 <= status_code < 300:
+                return {
+                    "url": url,
+                    "source": material.source_url or "",
+                    "kind": kind,
+                    "refreshed": False,
+                    "service": "existing",
+                    "expires": "",
+                    "status_code": status_code,
+                }
+            probe_reason = f"HTTP {status_code or 'unknown'}"
+        except (UnsafePublicUrlError, httpx.HTTPError, OSError) as exc:
+            probe_reason = str(exc) or exc.__class__.__name__
+    elif current_local_source:
+        source_url = source_url or current_local_source
+        probe_reason = "素材仍是本地地址"
+    else:
+        probe_reason = "素材 URL 不是可探测的公网 HTTP/HTTPS 地址"
+
+    if not source_url:
+        raise canvas_video_material_error(
+            f"素材已失效或无法加载（{probe_reason}），且找不到可重新上传的本地副本，已停止创建视频任务。",
+            "The material is expired or unreachable and no local copy is available for re-upload. The video task was not created.",
+            code="material_local_source_missing",
+        )
+
+    try:
+        uploaded = await upload_local_video_to_cloud(source_url, service)
+    except HTTPException as exc:
+        raise canvas_video_material_error(
+            f"素材已失效，自动重新上传失败：{exc.detail}",
+            "The material is expired, and the automatic re-upload failed.",
+            status_code=exc.status_code,
+            code="material_reupload_failed",
+        ) from exc
+    uploaded_url = str(uploaded.get("url") or "").strip()
+    if not uploaded_url or uploaded_url == source_url:
+        raise canvas_video_material_error(
+            "素材已失效，但云端上传没有返回新的公网链接，已停止创建视频任务。",
+            "The material is expired, but the cloud upload did not return a new public URL. The video task was not created.",
+            status_code=502,
+            code="material_reupload_url_missing",
+        )
+    try:
+        uploaded_probe = await public_http_probe(uploaded_url)
+        uploaded_status = int(uploaded_probe.get("status_code") or 0)
+    except (UnsafePublicUrlError, httpx.HTTPError, OSError) as exc:
+        raise canvas_video_material_error(
+            f"素材重新上传后仍无法加载：{exc}",
+            "The material is still unreachable after re-upload.",
+            status_code=502,
+            code="material_reupload_unreachable",
+        ) from exc
+    if not 200 <= uploaded_status < 300:
+        raise canvas_video_material_error(
+            f"素材重新上传后仍无法加载（HTTP {uploaded_status}），已停止创建视频任务。",
+            f"The material is still unreachable after re-upload (HTTP {uploaded_status}). The video task was not created.",
+            status_code=502,
+            code="material_reupload_unreachable",
+        )
+    return {
+        **uploaded,
+        "url": uploaded_url,
+        "source": source_url,
+        "kind": kind,
+        "refreshed": True,
+        "status_code": uploaded_status,
+    }
+
+
 async def save_ai_image_to_output(image_data, prefix="online_", category="output"):
     filename = f"{prefix}{uuid.uuid4().hex[:10]}.png"
     path = output_path_for(filename, category)
@@ -13514,6 +13650,37 @@ async def temp_sh_upload(payload: TempShUploadRequest, request: Request):
 async def cloud_video_upload(payload: CloudVideoUploadRequest, request: Request):
     ensure_same_origin_request(request)
     return await upload_local_video_to_cloud(payload.url, payload.service)
+
+@app.post("/api/canvas-video-materials/preflight")
+async def canvas_video_materials_preflight(
+    payload: CanvasVideoMaterialPreflightRequest,
+    request: Request,
+):
+    ensure_same_origin_request(request)
+    materials = list(payload.materials or [])
+    if not materials:
+        return {"materials": [], "refreshed_count": 0}
+    if len(materials) > 20:
+        raise canvas_video_material_error(
+            "单次最多检查 20 个视频素材。",
+            "At most 20 video materials can be checked at once.",
+            code="material_limit",
+        )
+    cache: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
+    prepared = []
+    for material in materials:
+        key = (
+            str(material.url or "").strip(),
+            str(material.source_url or "").strip(),
+            str(material.kind or "").strip().lower(),
+        )
+        if key not in cache:
+            cache[key] = await preflight_canvas_video_material(material, payload.service)
+        prepared.append(dict(cache[key]))
+    return {
+        "materials": prepared,
+        "refreshed_count": sum(1 for item in prepared if item.get("refreshed")),
+    }
 
 @app.post("/api/ai/import-local-image")
 async def import_local_ai_reference(payload: LocalImageImportRequest, request: Request):

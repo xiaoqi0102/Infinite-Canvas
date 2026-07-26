@@ -222,6 +222,8 @@
         "canvas.cloudUpload": { zh: "上传云端", en: "Upload to Cloud" },
         "canvas.cloudUploadDone": { zh: "已上传 {count} 个媒体文件到云端，首个实际链接已复制。", en: "Uploaded {count} media file(s) to the cloud. The first actual URL was copied." },
         "canvas.cloudUploadExpiryNote": { zh: "链接有效期 {value}。", en: "Link expiry: {value}." },
+        "canvas.videoMaterialCheckFailed": { zh: "视频素材检查失败", en: "Video material check failed" },
+        "canvas.videoMaterialRefreshed": { zh: "已重新上传并更新 {count} 个失效素材链接", en: "Re-uploaded and updated {count} expired material link(s)" },
         "canvas.cloudLink": { zh: "云端链接", en: "Cloud link" },
         "canvas.cloudLinkCopy": { zh: "复制云端链接", en: "Copy cloud link" },
         "canvas.cloudLinkCopyAria": { zh: "复制{label}的云端链接", en: "Copy the cloud link for {label}" },

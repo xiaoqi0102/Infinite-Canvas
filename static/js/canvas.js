@@ -877,7 +877,8 @@ function apiErrorMessage(data, fallback='请求失败'){
         return messages.join('\n') || fallback;
     }
     if(detail && typeof detail === 'object'){
-        return detail.message || detail.msg || JSON.stringify(detail);
+        if(langIsEn() && detail.message_en) return detail.message_en;
+        return detail.message || detail.msg || detail.message_en || JSON.stringify(detail);
     }
     try {
         return JSON.stringify(data);
@@ -3876,6 +3877,72 @@ async function uploadCanvasMediaRefToCloud(node, ref){
         applyTempShUrlToCanvasRef(ref, sourceUrl, sourceUrl);
         throw error;
     }
+}
+async function preflightCanvasVideoMedia(node, refs){
+    const mediaRefs = (refs || []).filter(ref => ref?.url && ['image','video','audio'].includes(mediaKindForRef(ref)));
+    const manualLink = (node?.tempShLinks || []).find(item => item?.manual === true && item?.url) || null;
+    const checkRefs = [
+        ...mediaRefs,
+        ...(manualLink ? [{
+            url:manualLink.url,
+            originalLocalUrl:manualLink.source || '',
+            kind:'video',
+            manual:true,
+        }] : []),
+    ];
+    if(!checkRefs.length) return {refs:refs || [], manualVideoUrl:manualVideoUrlForNode(node)};
+    const response = await fetch('/api/canvas-video-materials/preflight', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({
+            service:'auto',
+            materials:checkRefs.map(ref => ({
+                url:ref.url,
+                source_url:cloudUploadSourceUrlForCanvasRef(node, ref) || '',
+                kind:mediaKindForRef(ref),
+            })),
+        }),
+    });
+    if(!response.ok) throw new Error(await responseErrorMessage(response, tr('canvas.videoMaterialCheckFailed')));
+    const data = await response.json();
+    const prepared = Array.isArray(data.materials) ? data.materials : [];
+    let changed = false;
+    const nextRefs = (refs || []).map(ref => {
+        const index = mediaRefs.indexOf(ref);
+        const item = index >= 0 ? prepared[index] : null;
+        if(!item?.refreshed || !item.url) return ref;
+        const sourceUrl = item.source || cloudUploadSourceUrlForCanvasRef(node, ref);
+        node.tempShLinks = (node.tempShLinks || []).filter(link =>
+            link?.manual === true
+            || (link?.url !== ref.url && link?.source !== sourceUrl)
+        );
+        node.tempShLinks.push({
+            source:sourceUrl,
+            url:item.url,
+            expires:item.expires || '',
+            service:item.service || '',
+            kind:mediaKindForRef(ref),
+        });
+        applyTempShUrlToCanvasRef(ref, item.url, sourceUrl);
+        changed = true;
+        return {...ref, url:item.url, originalLocalUrl:ref.originalLocalUrl || sourceUrl};
+    });
+    let manualVideoUrl = manualVideoUrlForNode(node);
+    const manualItem = manualLink ? prepared[mediaRefs.length] : null;
+    if(manualItem?.refreshed && manualItem.url){
+        const sourceUrl = manualItem.source || manualLink.source || '';
+        node.tempShLinks = (node.tempShLinks || []).filter(item => item?.manual !== true);
+        node.tempShLinks.push({source:sourceUrl, url:manualItem.url, manual:true});
+        node.manualVideoUrls = [manualItem.url];
+        manualVideoUrl = manualItem.url;
+        changed = true;
+    }
+    if(changed){
+        refreshNodes([node.id, ...mediaRefs.map(ref => ref.nodeId).filter(Boolean)]);
+        scheduleSave();
+        setStatus(trf('canvas.videoMaterialRefreshed', {count:Number(data.refreshed_count) || 1}));
+    }
+    return {refs:nextRefs, manualVideoUrl};
 }
 async function uploadCanvasVideosToCloud(nodeId){
     const node = nodes.find(n => n.id === nodeId);
@@ -11717,23 +11784,20 @@ async function runVideoNode(nodeId, opts={}){
     }
     const prompt = inputs.modelPrompt;
     const displayPrompt = inputs.displayPrompt;
-    const mediaRefs = applyUploadedUrlToRefs(inputs.refs, node);
-    const refs = imageRefsOnly(mediaRefs);
-    const videoRefs = videoRefsOnly(mediaRefs);
-    const audioRefs = audioRefsOnly(mediaRefs);
+    let mediaRefs = applyUploadedUrlToRefs(inputs.refs, node);
     if(!prompt){ alert(tr('canvas.videoNeedsPrompt')); return; }
     let out = outputForNode(node, 460);
     const pendingHost = out || node;
     const pendingId = uid('p');
-    const run = runSnapshot(node, displayPrompt, mediaRefs, prompt, inputs.promptParts);
-    const manualVideoUrl = manualVideoUrlForNode(node);
+    let manualVideoUrl = manualVideoUrlForNode(node);
     const providerId = resolveVideoProviderId(node.apiProvider || 'comfly');
     const provider = videoProviderConfig(providerId);
     const profile = window.StudioVideoApi?.videoProtocolProfile
         ? window.StudioVideoApi.videoProtocolProfile(provider, node.model || '', node.resolution || '')
         : {isSudashui:false, resolution:node.resolution || '', officialAssetsEnabled:false};
-    if(node.useFrameRoles && profile.supportsFrameRoles !== false && refs[0]) refs[0] = {...refs[0], role:'first_frame'};
-    if(node.useFrameRoles && profile.supportsFrameRoles !== false && refs[1]) refs[1] = {...refs[1], role:'last_frame'};
+    let refs;
+    let videoRefs;
+    let audioRefs;
     if(window.StudioVideoApi?.normalizeVideoProtocolValues){
         const normalized = window.StudioVideoApi.normalizeVideoProtocolValues(profile, {
             duration:node.duration,
@@ -11744,11 +11808,21 @@ async function runVideoNode(nodeId, opts={}){
         node.aspectRatio = normalized.aspectRatio || node.aspectRatio;
         node.resolution = normalized.resolution ?? node.resolution;
     }
-    const videoUrls = videoRefs.map(ref => tempShUploadedUrlForNode(node, ref.url)).filter(Boolean);
-    if(manualVideoUrl && !videoUrls.includes(manualVideoUrl)) videoUrls.push(manualVideoUrl);
-    const audioUrls = audioRefs.map(ref => ref.url).filter(Boolean);
+    const videoUrls = [];
+    const audioUrls = [];
     let sudashui;
     try {
+        const prepared = await preflightCanvasVideoMedia(node, mediaRefs);
+        mediaRefs = prepared.refs;
+        manualVideoUrl = prepared.manualVideoUrl;
+        refs = imageRefsOnly(mediaRefs);
+        videoRefs = videoRefsOnly(mediaRefs);
+        audioRefs = audioRefsOnly(mediaRefs);
+        if(node.useFrameRoles && profile.supportsFrameRoles !== false && refs[0]) refs[0] = {...refs[0], role:'first_frame'};
+        if(node.useFrameRoles && profile.supportsFrameRoles !== false && refs[1]) refs[1] = {...refs[1], role:'last_frame'};
+        videoUrls.splice(0, videoUrls.length, ...videoRefs.map(ref => ref.url).filter(Boolean));
+        if(manualVideoUrl && !videoUrls.includes(manualVideoUrl)) videoUrls.push(manualVideoUrl);
+        audioUrls.splice(0, audioUrls.length, ...audioRefs.map(ref => ref.url).filter(Boolean));
         const issue = window.StudioVideoApi?.videoProtocolReferenceIssue?.(profile, {image:refs.length, video:videoUrls.length, audio:audioUrls.length});
         if(issue?.code === 'image_required') throw new Error(trf('canvas.videoImageRequired', {count:issue.count}));
         if(issue?.code === 'unsupported') throw new Error(trf('canvas.videoReferenceUnsupported', {kind:tr(`canvas.mentionKind.${issue.kind}`)}));
@@ -11759,6 +11833,7 @@ async function runVideoNode(nodeId, opts={}){
         showErrorModal(error.message || tr('canvas.videoFailed'), tr('canvas.apiFailed'));
         return;
     }
+    const run = runSnapshot(node, displayPrompt, mediaRefs, prompt, inputs.promptParts);
     const payload = {
         prompt,
         provider_id:providerId,

@@ -18,6 +18,8 @@ const apiKindToggle = document.getElementById('apiKindToggle');
 const inputThumbsRow = document.getElementById('inputThumbsRow');
 const SMART_UPLOAD_MAX = 20;
 const SMART_REFERENCE_IMAGE_MAX = 20;
+const SMART_VIDEO_REQUEST_TIMEOUT_MS = 30000;
+const SMART_VIDEO_PREVIEW_TIMEOUT_MS = 12000;
 const SMART_LOOP_AUTO_MAX_HEIGHT = 456;
 const inputPromptPreview = document.getElementById('inputPromptPreview');
 const minimap = document.getElementById('minimap');
@@ -521,7 +523,7 @@ function smartVideoPreviewHtml(itemOrUrl, size=512, attrs=''){
     const original = smartOriginalMediaUrl(smartPreferredMediaUrl(itemOrUrl));
     const remote = smartRemoteMediaUrl(itemOrUrl);
     const preview = smartMediaPreviewUrl(itemOrUrl, size);
-    return `<img src="${escapeHtml(preview)}" data-preview-src="${escapeAttr(preview)}" data-original-src="${escapeAttr(original)}" data-remote-src="${escapeAttr(remote)}" data-url="${escapeAttr(original)}" data-preview-kind="video"${attrs ? ` ${attrs}` : ''}>`;
+    return `<img src="${escapeHtml(preview)}" data-preview-src="${escapeAttr(preview)}" data-original-src="${escapeAttr(original)}" data-remote-src="${escapeAttr(remote)}" data-url="${escapeAttr(original)}" data-preview-kind="video" loading="lazy" decoding="async"${attrs ? ` ${attrs}` : ''}>`;
 }
 function smartVideoPlayerHtml(itemOrUrl, attrs=''){
     const original = smartOriginalMediaUrl(smartPreferredMediaUrl(itemOrUrl));
@@ -548,13 +550,29 @@ function smartCreateVideoElement(itemOrUrl, player=false, attrs=''){
 function bindSmartVideoSourceFallback(video){
     if(!video || video.dataset.remoteFallbackBound === '1') return;
     video.dataset.remoteFallbackBound = '1';
+    const clearFallbackTimer = () => {
+        if(video._smartFallbackTimer){
+            clearTimeout(video._smartFallbackTimer);
+            video._smartFallbackTimer = null;
+        }
+    };
+    video.addEventListener('loadedmetadata', clearFallbackTimer, {once:true});
     video.addEventListener('error', () => {
+        clearFallbackTimer();
         const remote = displayMediaUrl(video.dataset.remoteSrc || '');
         if(remote && video.getAttribute('src') !== remote){
             video.src = remote;
             video.load?.();
         }
     });
+    video._smartFallbackTimer = setTimeout(() => {
+        if(video.readyState > 0) return;
+        const remote = displayMediaUrl(video.dataset.remoteSrc || '');
+        if(remote && video.getAttribute('src') !== remote){
+            video.src = remote;
+            video.load?.();
+        }
+    }, SMART_VIDEO_PREVIEW_TIMEOUT_MS);
 }
 function smartActivateVideoPreview(target){
     const root = target?.closest?.('.media-video-card,.video-thumb,.image-wrap,.thumb-item') || target?.parentElement || null;
@@ -599,7 +617,16 @@ function isSmartPreviewImage(img){
 function bindSmartPreviewImageFallbacks(root=document){
     root.querySelectorAll?.('img[data-preview-src][data-original-src]:not([data-preview-fallback-bound])').forEach(img => {
         img.dataset.previewFallbackBound = '1';
+        let previewTimeout = null;
+        const clearPreviewTimeout = () => {
+            if(previewTimeout){
+                clearTimeout(previewTimeout);
+                previewTimeout = null;
+            }
+        };
+        img.addEventListener('load', clearPreviewTimeout, {once:true});
         img.addEventListener('error', () => {
+            clearPreviewTimeout();
             const original = img.dataset.originalSrc || '';
             const remote = img.dataset.remoteSrc || '';
             if(img.dataset.previewKind === 'video'){
@@ -620,6 +647,11 @@ function bindSmartPreviewImageFallbacks(root=document){
             const remoteDisplay = displayMediaUrl(remote);
             if(remoteDisplay && current !== remoteDisplay) img.src = remoteDisplay;
         });
+        if(img.dataset.previewKind === 'video'){
+            previewTimeout = setTimeout(() => {
+                if(img.isConnected && !img.complete) img.dispatchEvent(new Event('error'));
+            }, SMART_VIDEO_PREVIEW_TIMEOUT_MS);
+        }
     });
     root.querySelectorAll?.('video[data-remote-src]:not([data-remote-fallback-bound])').forEach(bindSmartVideoSourceFallback);
 }
@@ -6240,7 +6272,7 @@ async function saveCanvas(){
     const storageCanvas = canvasForStorage();
     canvasSyncInFlight = true;
     try {
-        const res = await fetch(`/api/canvases/${encodeURIComponent(canvasId)}`, {
+        const res = await smartFetchWithTimeout(`/api/canvases/${encodeURIComponent(canvasId)}`, {
             method:'PUT',
             headers:{'Content-Type':'application/json'},
             body:JSON.stringify({
@@ -14611,7 +14643,7 @@ async function createSmartComfyTask(payload){
     return res.json();
 }
 async function createSmartCanvasVideoTask(payload){
-    const res = await fetch('/api/canvas-video-tasks', {
+    const res = await smartFetchWithTimeout('/api/canvas-video-tasks', {
         method:'POST',
         headers:{'Content-Type':'application/json'},
         body:JSON.stringify(payload)
@@ -15800,6 +15832,23 @@ async function urlToBase64(url){
     });
 }
 function sleep(ms){ return new Promise(resolve => setTimeout(resolve, ms)); }
+async function smartFetchWithTimeout(input, init={}, timeoutMs=SMART_VIDEO_REQUEST_TIMEOUT_MS, timeoutKey='smart.videoQueryTimeout'){
+    if(typeof AbortController !== 'function') return fetch(input, init);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+        return await fetch(input, {...init, signal:controller.signal});
+    } catch(error) {
+        if(controller.signal.aborted){
+            const timeoutError = new Error(tr(timeoutKey));
+            timeoutError.smartRequestTimeout = true;
+            throw timeoutError;
+        }
+        throw error;
+    } finally {
+        clearTimeout(timer);
+    }
+}
 async function runSmartComfyUpscale(imageUrl, resolution){
     if(!imageUrl) throw new Error(tr('smart.errRunFailed'));
     const inputName = await comfyNameForRef({url:imageUrl, name:'smart-upscale-input.png'});
@@ -16118,7 +16167,7 @@ async function querySmartImageTaskNow(nodeId, localTaskId){
     render();
     try {
         if(task.kind === 'video'){
-            const res = await fetch(`/api/canvas-video-tasks/${encodeURIComponent(task.taskId || localTaskId)}`);
+            const res = await smartFetchWithTimeout(`/api/canvas-video-tasks/${encodeURIComponent(task.taskId || localTaskId)}`);
             if(!res.ok) throw await smartCanvasVideoResponseError(res);
             const data = await res.json();
             if(data.status === 'succeeded'){
@@ -16269,7 +16318,7 @@ async function pollSmartCanvasVideoTask(taskId, onProgress=null){
     if(activeSmartTaskPolls.has(taskId)) return activeSmartTaskPolls.get(taskId);
     const promise = (async () => {
         for(let i = 0; i < 1440; i++){
-            const task = await fetch(`/api/canvas-video-tasks/${encodeURIComponent(taskId)}`).then(async r => {
+            const task = await smartFetchWithTimeout(`/api/canvas-video-tasks/${encodeURIComponent(taskId)}`).then(async r => {
                 if(!r.ok) throw await smartCanvasVideoResponseError(r);
                 return r.json();
             });

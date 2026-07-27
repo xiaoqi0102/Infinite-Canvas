@@ -14654,6 +14654,7 @@ function renderOutputMedia(item, useGridLayout=false){
     const safe = escapeAttr(url);
     const meta = item && typeof item === 'object' ? item : {};
     const kind = mediaKindForOutputItem(item);
+    const displayItem = item && typeof item === 'object' ? item : {url};
     const grid = useGridLayout ? (meta.grid || null) : null;
     const gridStyle = grid ? ` style="grid-row:${Number(grid.row || 0) + 1};grid-column:${Number(grid.col || 0) + 1};aspect-ratio:${Math.max(1, Number(grid.w || 1))}/${Math.max(1, Number(grid.h || 1))}"` : '';
     const timePill = meta.runMs && !meta.viewed ? `<span class="output-time-pill">${formatRunDuration(meta.runMs)}</span>` : '';

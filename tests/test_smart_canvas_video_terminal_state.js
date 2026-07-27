@@ -10,6 +10,7 @@ assert.ok(pollStart >= 0 && helperEnd > pollStart, '无法定位智能画布视�
 
 const sandbox = {
     activeSmartTaskPolls:new Map(),
+    smartFetchWithTimeout:(input, init) => sandbox.fetch(input, init),
     fetch:async () => ({
         ok:true,
         status:200,

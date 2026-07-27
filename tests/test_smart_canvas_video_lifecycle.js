@@ -42,6 +42,7 @@ async function testPendingFailureSemantics() {
     const sandbox = {
         nodes:[transientNode],
         console:{warn:(...args) => warnings.push(args)},
+        smartFetchWithTimeout:(input, init) => sandbox.fetch(input, init),
         liveSmartNode:node => sandbox.nodes.find(item => item.id === node?.id) || node,
         smartPendingTasks:node => Array.isArray(node?.pendingTasks) ? node.pendingTasks.filter(task => task?.taskId) : [],
         pollSmartCanvasTask:async () => {
@@ -127,6 +128,7 @@ async function testManualQueryMissingVideoClearsPending() {
     const sandbox = {
         nodes:[node],
         fetch:async () => ({ok:false, status:404}),
+        smartFetchWithTimeout:(input, init) => sandbox.fetch(input, init),
         smartPendingTasks:value => Array.isArray(value?.pendingTasks) ? value.pendingTasks.filter(task => task?.taskId) : [],
         liveSmartNode:value => sandbox.nodes.find(item => item.id === value?.id) || value,
         smartResponseErrorMessage:async () => '视频任务不存在',
@@ -334,6 +336,46 @@ function testConcurrentVideoKeepsSmartRunButtonEnabled() {
     assert.equal(runBtn.disabled, true, '其它进行中任务仍应禁用运行按钮');
 }
 
+function testSmartVideoPreviewUsesLazyLoading() {
+    assert.match(
+        source,
+        /data-preview-kind="video" loading="lazy" decoding="async"/,
+        '智能画布视频预览必须懒加载，避免批量触发首帧生成',
+    );
+}
+
+async function testSmartVideoRequestTimeoutIsRecoverable() {
+    class FakeAbortController {
+        constructor(){
+            this.signal = {aborted:false};
+        }
+        abort(){
+            this.signal.aborted = true;
+        }
+    }
+    const sandbox = {
+        AbortController:FakeAbortController,
+        fetch:async (_input, init) => {
+            assert.equal(init.signal.aborted, true);
+            throw new Error('aborted');
+        },
+        setTimeout:callback => {
+            callback();
+            return 1;
+        },
+        clearTimeout:() => {},
+        tr:key => key,
+    };
+    vm.runInNewContext(
+        sourceBetween('function sleep', 'async function runSmartComfyUpscale'),
+        sandbox,
+    );
+    await assert.rejects(
+        sandbox.smartFetchWithTimeout('/api/canvas-video-tasks/test', {}, 1),
+        error => error.smartRequestTimeout === true && error.message === 'smart.videoQueryTimeout',
+    );
+}
+
 (async () => {
     await testPendingFailureSemantics();
     await testManualQueryMissingVideoClearsPending();
@@ -341,6 +383,8 @@ function testConcurrentVideoKeepsSmartRunButtonEnabled() {
     await testParallelFailureStopsNewRounds();
     testConcurrentVideoRunUsesIndependentOutput();
     testConcurrentVideoKeepsSmartRunButtonEnabled();
+    testSmartVideoPreviewUsesLazyLoading();
+    await testSmartVideoRequestTimeoutIsRecoverable();
     console.log('smart canvas video lifecycle ok');
 })().catch(error => {
     console.error(error);

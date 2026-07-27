@@ -674,6 +674,29 @@ function testPendingDeletePersists() {
     assert.equal(videoStateSyncs, 0, '删除非视频 pending 不能误改视频任务状态');
 }
 
+function testRenderOutputMediaVideoUsesItemMetadata() {
+    const seen = [];
+    const sandbox = {
+        outputUrlValue:item => typeof item === 'string' ? item : item?.url || '',
+        escapeAttr:value => String(value || ''),
+        mediaKindForOutputItem:() => 'video',
+        isMissingAssetUrl:() => false,
+        formatRunDuration:() => '',
+        canvasVideoPreviewHtml:item => {
+            seen.push(item);
+            return `<img data-preview-kind="video" src="${item.url}">`;
+        },
+        tr:key => key,
+    };
+    vm.runInNewContext(
+        sourceBetween('function renderOutputMedia', 'function outputGridLayout'),
+        sandbox,
+    );
+    const html = sandbox.renderOutputMedia({url:'/output/video.mp4', kind:'video'});
+    assert.equal(seen[0].url, '/output/video.mp4');
+    assert.match(html, /data-preview-kind="video"/);
+}
+
 (async () => {
     await testParallelRoundsStopAtFirstError();
     testParallelFailureContextKeepsOriginalNode();
@@ -687,6 +710,7 @@ function testPendingDeletePersists() {
     testConcurrentPendingStateAggregation();
     await testPollTerminalAndRecoverableErrors();
     testPendingDeletePersists();
+    testRenderOutputMediaVideoUsesItemMetadata();
     console.log('canvas video lifecycle ok');
 })().catch(error => {
     console.error(error);

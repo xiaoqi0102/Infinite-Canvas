@@ -991,6 +991,14 @@ VIDEO_MATERIAL_UPLOAD_CACHE_TTL = max(
     0.0,
     float(os.getenv("VIDEO_MATERIAL_UPLOAD_CACHE_TTL", str(24 * 60 * 60))),
 )
+SUDASHUI_UPLOAD_URL_TTL_SECONDS = max(
+    0.0,
+    float(os.getenv("SUDASHUI_UPLOAD_URL_TTL_SECONDS", str(60 * 60))),
+)
+VIDEO_MATERIAL_UPLOAD_CACHE_SAFETY_SECONDS = max(
+    0.0,
+    float(os.getenv("VIDEO_MATERIAL_UPLOAD_CACHE_SAFETY_SECONDS", str(10 * 60))),
+)
 VIDEO_MATERIAL_PROBE_CONCURRENCY = max(
     1,
     min(8, int(os.getenv("VIDEO_MATERIAL_PROBE_CONCURRENCY", "4"))),
@@ -10512,7 +10520,17 @@ def configured_sudashui_upload_providers() -> List[Dict[str, Any]]:
         providers.append(provider)
     return sorted(providers, key=lambda provider: not bool(provider.get("primary")))
 
-async def upload_video_to_sudashui(path: str, source_url: str, provider: Dict[str, Any]) -> Dict[str, str]:
+
+def cloud_upload_expiry_label(seconds: float) -> str:
+    value = max(0.0, float(seconds or 0))
+    if value >= 3600:
+        return f"{value / 3600:g}h"
+    if value >= 60:
+        return f"{value / 60:g}m"
+    return f"{value:g}s"
+
+
+async def upload_video_to_sudashui(path: str, source_url: str, provider: Dict[str, Any]) -> Dict[str, Any]:
     media_type = content_type_for_path(path).split("/", 1)[0].strip().lower()
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(connect=20.0, read=600.0, write=600.0, pool=20.0)) as client:
@@ -10526,15 +10544,21 @@ async def upload_video_to_sudashui(path: str, source_url: str, provider: Dict[st
             )
     except SudashuiProtocolError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    uploaded_at = time.time()
+    expires_at = signed_media_url_expires_at(direct_url) or (
+        uploaded_at + SUDASHUI_UPLOAD_URL_TTL_SECONDS
+    )
     return {
         "url": direct_url,
         "source": source_url,
         "name": os.path.basename(path),
         "service": "sudashui",
         "provider_id": str(provider.get("id") or ""),
+        "expires": cloud_upload_expiry_label(expires_at - uploaded_at),
+        "expires_at": expires_at,
     }
 
-async def upload_local_video_to_cloud(ref_url: str, service: str = "auto") -> Dict[str, str]:
+async def upload_local_video_to_cloud(ref_url: str, service: str = "auto") -> Dict[str, Any]:
     ref_url = str(ref_url or "").strip()
     source_url = ref_url
     normalized_url = cloud_upload_local_url_path(ref_url)
@@ -10570,7 +10594,7 @@ async def upload_local_video_to_cloud(ref_url: str, service: str = "auto") -> Di
             errors.append(f"{name}: {exc.detail}")
     raise HTTPException(status_code=502, detail="云端上传失败：" + "；".join(errors))
 
-async def upload_local_video_to_temp_sh(ref_url: str) -> Dict[str, str]:
+async def upload_local_video_to_temp_sh(ref_url: str) -> Dict[str, Any]:
     return await upload_local_video_to_cloud(ref_url, "auto")
 
 
@@ -10629,6 +10653,9 @@ def canvas_video_upload_expires_at(uploaded: Dict[str, Any], now: float) -> floa
         explicit = 0.0
     if explicit > now:
         return explicit
+    signed_expiry = signed_media_url_expires_at(uploaded.get("url"), now=now)
+    if signed_expiry > now:
+        return signed_expiry
     text = str(uploaded.get("expires") or "").strip().lower()
     match = re.fullmatch(r"(\d+(?:\.\d+)?)\s*(s|sec|secs|second|seconds|m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days)", text)
     if match:
@@ -10641,7 +10668,99 @@ def canvas_video_upload_expires_at(uploaded: Dict[str, Any], now: float) -> floa
             else 1
         )
         return now + value * multiplier
+    service = str(uploaded.get("service") or "").strip().lower()
+    if service == "sudashui":
+        return now + SUDASHUI_UPLOAD_URL_TTL_SECONDS
     return now + VIDEO_MATERIAL_UPLOAD_CACHE_TTL
+
+
+def signed_media_url_expires_at(value: Any, *, now: Optional[float] = None) -> float:
+    text = str(value or "").strip()
+    if not text:
+        return 0.0
+    try:
+        parsed = urllib.parse.urlsplit(text)
+        query = {
+            str(key).strip().lower(): values[-1]
+            for key, values in urllib.parse.parse_qs(
+                parsed.query,
+                keep_blank_values=True,
+            ).items()
+            if values
+        }
+    except (TypeError, ValueError):
+        return 0.0
+    current = time.time() if now is None else float(now)
+    for date_key, ttl_key in (
+        ("x-amz-date", "x-amz-expires"),
+        ("x-goog-date", "x-goog-expires"),
+    ):
+        date_text = str(query.get(date_key) or "").strip()
+        ttl_text = str(query.get(ttl_key) or "").strip()
+        if not date_text or not ttl_text:
+            continue
+        try:
+            signed_at = datetime.datetime.strptime(
+                date_text,
+                "%Y%m%dT%H%M%SZ",
+            ).replace(tzinfo=datetime.timezone.utc).timestamp()
+            expires_at = signed_at + float(ttl_text)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if expires_at > current:
+            return expires_at
+    for key in ("expires_at", "expires", "exp"):
+        try:
+            expires_at = float(query.get(key) or 0)
+            if expires_at > 10**12:
+                expires_at /= 1000
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if expires_at > current:
+            return expires_at
+    return 0.0
+
+
+def effective_cached_canvas_video_upload_expires_at(
+    cached: Dict[str, Any],
+    now: float,
+) -> float:
+    try:
+        explicit = float(cached.get("expires_at") or 0)
+    except (TypeError, ValueError):
+        explicit = 0.0
+    if str(cached.get("service") or "").strip().lower() != "sudashui":
+        return explicit
+    candidates = [value for value in (
+        explicit,
+        signed_media_url_expires_at(cached.get("url"), now=now),
+    ) if value > 0]
+    try:
+        created_at = float(cached.get("created_at") or 0)
+    except (TypeError, ValueError):
+        created_at = 0.0
+    if created_at > 0:
+        candidates.append(created_at + SUDASHUI_UPLOAD_URL_TTL_SECONDS)
+    return min(candidates) if candidates else 0.0
+
+
+def cached_canvas_video_upload_expires_at_for_url(
+    source_url: str,
+    service: str,
+    public_url: str,
+) -> float:
+    try:
+        cache_key, _ = canvas_video_upload_cache_context(source_url, service)
+    except (HTTPException, OSError):
+        return 0.0
+    try:
+        with CANVAS_VIDEO_UPLOAD_CACHE_LOCK:
+            cached = dict(load_canvas_video_upload_cache().get(cache_key) or {})
+    except (OSError, TypeError, ValueError):
+        return 0.0
+    if str(cached.get("url") or "").strip() != str(public_url or "").strip():
+        return 0.0
+    return effective_cached_canvas_video_upload_expires_at(cached, time.time())
 
 
 def cached_canvas_video_upload(source_url: str, service: str) -> Optional[Dict[str, Any]]:
@@ -10654,12 +10773,16 @@ def cached_canvas_video_upload(source_url: str, service: str) -> Optional[Dict[s
         with CANVAS_VIDEO_UPLOAD_CACHE_LOCK:
             entries = load_canvas_video_upload_cache()
             cached = dict(entries.get(cache_key) or {})
-            expires_at = float(cached.get("expires_at") or 0)
-            if not cached.get("url") or expires_at <= now + max(300.0, VIDEO_POLL_TIMEOUT):
+            expires_at = effective_cached_canvas_video_upload_expires_at(cached, now)
+            if (
+                not cached.get("url")
+                or expires_at <= now + VIDEO_MATERIAL_UPLOAD_CACHE_SAFETY_SECONDS
+            ):
                 if cache_key in entries:
                     entries.pop(cache_key, None)
                     write_canvas_video_upload_cache(entries)
                 return None
+            cached["expires_at"] = expires_at
     except (OSError, TypeError, ValueError) as exc:
         print(f"读取视频素材上传缓存条目失败: {exc}")
         return None
@@ -10862,7 +10985,23 @@ async def preflight_canvas_video_material(
     current_local_source = canvas_video_material_local_source(url)
     probe_reason = ""
     probe_content_type_mismatch = ""
-    if not current_local_source and re.match(r"^https?://", url, re.I):
+    known_expires_at = 0.0
+    if source_url and re.match(r"^https?://", url, re.I):
+        known_expires_at = cached_canvas_video_upload_expires_at_for_url(
+            source_url,
+            service,
+            url,
+        )
+    refresh_expiring_url = bool(
+        source_url
+        and known_expires_at > 0
+        and known_expires_at <= time.time() + VIDEO_MATERIAL_UPLOAD_CACHE_SAFETY_SECONDS
+    )
+    if (
+        not current_local_source
+        and re.match(r"^https?://", url, re.I)
+        and not refresh_expiring_url
+    ):
         try:
             probe = await limited_canvas_video_material_probe(url, probe_semaphore)
             status_code = int(probe.get("status_code") or 0)
@@ -10881,6 +11020,7 @@ async def preflight_canvas_video_material(
                         "expires": "",
                         "status_code": status_code,
                         "content_type": str(probe.get("content_type") or ""),
+                        "expires_at": known_expires_at,
                     }
                 probe_reason = f"响应类型为 {probe_content_type_mismatch}"
             else:
@@ -10890,6 +11030,8 @@ async def preflight_canvas_video_material(
     elif current_local_source:
         source_url = source_url or current_local_source
         probe_reason = "素材仍是本地地址"
+    elif refresh_expiring_url:
+        probe_reason = "素材公网链接即将失效"
     else:
         probe_reason = "素材 URL 不是可探测的公网 HTTP/HTTPS 地址"
 

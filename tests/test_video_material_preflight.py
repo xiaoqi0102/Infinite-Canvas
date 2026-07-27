@@ -1,4 +1,5 @@
 import asyncio
+import datetime
 import os
 import tempfile
 import unittest
@@ -59,6 +60,47 @@ class PublicHttpProbeTests(unittest.IsolatedAsyncioTestCase):
 
 
 class VideoMaterialPreflightTests(unittest.IsolatedAsyncioTestCase):
+    def test_sudashui_upload_without_expiry_uses_one_hour_ttl(self):
+        with patch("main.SUDASHUI_UPLOAD_URL_TTL_SECONDS", 3600):
+            expires_at = main.canvas_video_upload_expires_at({
+                "url": "https://files.sudashuiapi.com/proxy/material.mp4",
+                "service": "sudashui",
+            }, 1000)
+
+        self.assertEqual(expires_at, 4600)
+
+    def test_signed_media_url_expiry_overrides_service_estimate(self):
+        url = (
+            "https://files.sudashuiapi.com/proxy/material.mp4"
+            "?X-Amz-Date=20260727T000000Z&X-Amz-Expires=1800"
+        )
+        signed_at = datetime.datetime(
+            2026,
+            7,
+            27,
+            tzinfo=datetime.timezone.utc,
+        ).timestamp()
+
+        self.assertEqual(
+            main.signed_media_url_expires_at(url, now=signed_at),
+            signed_at + 1800,
+        )
+
+    def test_legacy_sudashui_cache_is_clamped_to_one_hour(self):
+        cached = {
+            "url": "https://files.sudashuiapi.com/proxy/material.mp4",
+            "service": "sudashui",
+            "created_at": 1000,
+            "expires_at": 1000 + 24 * 60 * 60,
+        }
+        with patch("main.SUDASHUI_UPLOAD_URL_TTL_SECONDS", 3600):
+            expires_at = main.effective_cached_canvas_video_upload_expires_at(
+                cached,
+                2000,
+            )
+
+        self.assertEqual(expires_at, 4600)
+
     async def test_storage_materials_are_uploaded_before_video_submission(self):
         cases = (
             ("image", "/api/storage-files/upload/reference.png", "https://files.example/reference.png"),
@@ -103,6 +145,43 @@ class VideoMaterialPreflightTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result["refreshed"])
         self.assertEqual(result["url"], material.url)
         upload.assert_not_awaited()
+
+    async def test_public_material_near_expiry_reuploads_before_submission(self):
+        material = main.CanvasVideoMaterialPreflightItem(
+            url="https://files.sudashuiapi.com/proxy/material.png",
+            source_url="/assets/material.png",
+            kind="image",
+        )
+        upload = AsyncMock(return_value={
+            "url": "https://files.sudashuiapi.com/proxy/refreshed.png",
+            "service": "sudashui",
+            "expires": "1h",
+            "expires_at": 4600,
+        })
+        probe = AsyncMock(return_value={
+            "status_code": 200,
+            "content_type": "image/png",
+        })
+        with (
+            patch("main.time.time", return_value=1000),
+            patch("main.VIDEO_MATERIAL_UPLOAD_CACHE_SAFETY_SECONDS", 600),
+            patch(
+                "main.cached_canvas_video_upload_expires_at_for_url",
+                return_value=1500,
+            ),
+            patch("main.cached_canvas_video_upload", return_value=None),
+            patch("main.upload_local_video_to_cloud", new=upload),
+            patch(
+                "main.remember_canvas_video_upload",
+                side_effect=lambda source_url, _service, uploaded: uploaded,
+            ),
+            patch("main.public_http_probe", new=probe),
+        ):
+            result = await main.preflight_canvas_video_material(material)
+
+        self.assertTrue(result["refreshed"])
+        self.assertEqual(result["url"], "https://files.sudashuiapi.com/proxy/refreshed.png")
+        probe.assert_awaited_once_with(result["url"])
 
     async def test_expired_material_is_reuploaded_from_local_copy(self):
         old_url = "https://files.example/expired.png"

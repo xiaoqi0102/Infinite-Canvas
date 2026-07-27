@@ -891,6 +891,34 @@ class CloudMediaUploadTests(unittest.IsolatedAsyncioTestCase):
         litterbox_upload.assert_not_awaited()
         temp_upload.assert_not_awaited()
 
+    async def test_sudashui_upload_records_explicit_expiry(self):
+        direct_url = "https://files.sudashuiapi.com/proxy/reference.mp4"
+        client_context = AsyncMock()
+        client_context.__aenter__.return_value = object()
+        client_context.__aexit__.return_value = False
+        with (
+            patch.object(main, "content_type_for_path", return_value="video/mp4"),
+            patch.object(main.httpx, "AsyncClient", return_value=client_context),
+            patch.object(
+                main,
+                "upload_sudashui_media",
+                new=AsyncMock(return_value=direct_url),
+            ),
+            patch.object(main, "api_headers", return_value={"Authorization": "Bearer test"}),
+            patch.object(main.time, "time", return_value=1000),
+            patch.object(main, "SUDASHUI_UPLOAD_URL_TTL_SECONDS", 3600),
+        ):
+            result = await main.upload_video_to_sudashui(
+                "D:/tmp/reference.mp4",
+                "/assets/reference.mp4",
+                {"id": "sudashui"},
+            )
+
+        self.assertEqual(result["url"], direct_url)
+        self.assertEqual(result["service"], "sudashui")
+        self.assertEqual(result["expires"], "1h")
+        self.assertEqual(result["expires_at"], 4600)
+
     async def test_private_http_media_is_uploaded_instead_of_returned_as_existing(self):
         provider = {"id": "sudashui", "name": "Sudashui"}
         private_url = "http://127.0.0.1:3000/assets/reference%20image.png?cache=1"

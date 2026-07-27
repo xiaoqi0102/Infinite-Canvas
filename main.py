@@ -10686,6 +10686,84 @@ async def preflight_canvas_video_material(
     }
 
 
+async def preflight_canvas_video_materials(
+    materials: List[CanvasVideoMaterialPreflightItem],
+    service: str = "auto",
+) -> List[Dict[str, Any]]:
+    materials = list(materials or [])
+    if len(materials) > 20:
+        raise canvas_video_material_error(
+            "单次最多检查 20 个视频素材。",
+            "At most 20 video materials can be checked at once.",
+            code="material_limit",
+        )
+    cache: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
+    prepared = []
+    for material in materials:
+        key = (
+            str(material.url or "").strip(),
+            str(material.source_url or "").strip(),
+            str(material.kind or "").strip().lower(),
+        )
+        if key not in cache:
+            cache[key] = await preflight_canvas_video_material(material, service)
+        prepared.append(dict(cache[key]))
+    return prepared
+
+
+async def preflight_canvas_video_request(
+    payload: CanvasVideoRequest,
+    service: str = "auto",
+) -> CanvasVideoRequest:
+    materials: List[CanvasVideoMaterialPreflightItem] = []
+    image_count = len(payload.images or [])
+    for ref in payload.images or []:
+        source_url = ref.originalLocalUrl or ref.sourceUrl or ref.url
+        materials.append(CanvasVideoMaterialPreflightItem(
+            url=ref.url,
+            source_url=source_url,
+            kind="image",
+        ))
+    materials.extend(
+        CanvasVideoMaterialPreflightItem(url=url, source_url=url, kind="video")
+        for url in (payload.videos or [])
+    )
+    materials.extend(
+        CanvasVideoMaterialPreflightItem(url=url, source_url=url, kind="audio")
+        for url in (payload.audios or [])
+    )
+    if not materials:
+        return payload
+
+    prepared = await preflight_canvas_video_materials(materials, service)
+    next_images = []
+    for index, ref in enumerate(payload.images or []):
+        item = prepared[index]
+        ref_data = ref.model_dump() if hasattr(ref, "model_dump") else ref.dict()
+        ref_data["url"] = str(item.get("url") or "").strip()
+        if item.get("refreshed") and not ref_data.get("originalLocalUrl"):
+            ref_data["originalLocalUrl"] = str(item.get("source") or "").strip()
+        next_images.append(AIReference(**ref_data))
+
+    video_start = image_count
+    audio_start = video_start + len(payload.videos or [])
+    next_videos = [
+        str(item.get("url") or "").strip()
+        for item in prepared[video_start:audio_start]
+    ]
+    next_audios = [
+        str(item.get("url") or "").strip()
+        for item in prepared[audio_start:]
+    ]
+    payload_data = payload.model_dump() if hasattr(payload, "model_dump") else payload.dict()
+    payload_data.update({
+        "images": next_images,
+        "videos": next_videos,
+        "audios": next_audios,
+    })
+    return CanvasVideoRequest(**payload_data)
+
+
 IMAGE_FORMAT_EXTENSIONS = {
     "PNG": ".png",
     "JPEG": ".jpg",
@@ -14093,23 +14171,7 @@ async def canvas_video_materials_preflight(
     materials = list(payload.materials or [])
     if not materials:
         return {"materials": [], "refreshed_count": 0}
-    if len(materials) > 20:
-        raise canvas_video_material_error(
-            "单次最多检查 20 个视频素材。",
-            "At most 20 video materials can be checked at once.",
-            code="material_limit",
-        )
-    cache: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
-    prepared = []
-    for material in materials:
-        key = (
-            str(material.url or "").strip(),
-            str(material.source_url or "").strip(),
-            str(material.kind or "").strip().lower(),
-        )
-        if key not in cache:
-            cache[key] = await preflight_canvas_video_material(material, payload.service)
-        prepared.append(dict(cache[key]))
+    prepared = await preflight_canvas_video_materials(materials, payload.service)
     return {
         "materials": prepared,
         "refreshed_count": sum(1 for item in prepared if item.get("refreshed")),
@@ -17576,11 +17638,13 @@ async def build_canvas_video_result(payload: CanvasVideoRequest, progress=None):
 
 @app.post("/api/canvas-video")
 async def canvas_video(payload: CanvasVideoRequest):
+    payload = await preflight_canvas_video_request(payload)
     result = await build_canvas_video_result(payload)
     return await dedupe_canvas_video_result(result)
 
 @app.post("/api/canvas-video-tasks")
 async def create_canvas_video_task(payload: CanvasVideoRequest):
+    payload = await preflight_canvas_video_request(payload)
     task_id = f"canvas_video_{uuid.uuid4().hex}"
     task = {
         "id": task_id,

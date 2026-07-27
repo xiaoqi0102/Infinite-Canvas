@@ -160,6 +160,103 @@ class VideoMaterialPreflightTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result["refreshed"])
         probe.assert_not_awaited()
 
+    async def test_request_preflight_normalizes_all_material_kinds(self):
+        payload = main.CanvasVideoRequest(
+            prompt="test",
+            images=[main.AIReference(
+                url="/api/storage-files/upload/reference.png",
+                name="reference.png",
+            )],
+            videos=["/api/storage-files/generated/reference.mp4"],
+            audios=["/api/storage-files/local/reference.mp3"],
+        )
+        public_urls = [
+            "https://files.example/reference.png",
+            "https://files.example/reference.mp4",
+            "https://files.example/reference.mp3",
+        ]
+        prepared = [
+            {
+                "url": url,
+                "source": material.url,
+                "kind": material.kind,
+                "refreshed": True,
+            }
+            for material, url in zip(
+                [
+                    main.CanvasVideoMaterialPreflightItem(
+                        url="/api/storage-files/upload/reference.png",
+                        kind="image",
+                    ),
+                    main.CanvasVideoMaterialPreflightItem(
+                        url="/api/storage-files/generated/reference.mp4",
+                        kind="video",
+                    ),
+                    main.CanvasVideoMaterialPreflightItem(
+                        url="/api/storage-files/local/reference.mp3",
+                        kind="audio",
+                    ),
+                ],
+                public_urls,
+            )
+        ]
+        with patch(
+            "main.preflight_canvas_video_materials",
+            new=AsyncMock(return_value=prepared),
+        ) as preflight:
+            result = await main.preflight_canvas_video_request(payload)
+
+        self.assertEqual(result.images[0].url, public_urls[0])
+        self.assertEqual(
+            result.images[0].originalLocalUrl,
+            "/api/storage-files/upload/reference.png",
+        )
+        self.assertEqual(result.videos, [public_urls[1]])
+        self.assertEqual(result.audios, [public_urls[2]])
+        self.assertEqual(result.images[0].name, "reference.png")
+        materials = preflight.await_args.args[0]
+        self.assertEqual([item.kind for item in materials], ["image", "video", "audio"])
+
+    async def test_sync_endpoint_preflights_before_upstream_submission(self):
+        payload = main.CanvasVideoRequest(prompt="test")
+        failure = main.canvas_video_material_error(
+            "素材不可用",
+            "Material unavailable",
+        )
+        with (
+            patch(
+                "main.preflight_canvas_video_request",
+                new=AsyncMock(side_effect=failure),
+            ),
+            patch("main.build_canvas_video_result", new=AsyncMock()) as build,
+        ):
+            with self.assertRaises(main.HTTPException):
+                await main.canvas_video(payload)
+
+        build.assert_not_awaited()
+
+    async def test_task_endpoint_preflights_before_task_persistence(self):
+        payload = main.CanvasVideoRequest(prompt="test")
+        failure = main.canvas_video_material_error(
+            "素材不可用",
+            "Material unavailable",
+        )
+        task_ids_before = set(main.CANVAS_TASKS)
+        with (
+            patch(
+                "main.preflight_canvas_video_request",
+                new=AsyncMock(side_effect=failure),
+            ),
+            patch("main.persist_canvas_video_tasks") as persist,
+            patch("main.asyncio.create_task") as create_task,
+        ):
+            with self.assertRaises(main.HTTPException):
+                await main.create_canvas_video_task(payload)
+
+        self.assertEqual(set(main.CANVAS_TASKS), task_ids_before)
+        persist.assert_not_called()
+        create_task.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

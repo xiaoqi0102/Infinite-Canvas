@@ -697,6 +697,29 @@ function testRenderOutputMediaVideoUsesItemMetadata() {
     assert.match(html, /data-preview-kind="video"/);
 }
 
+function testRefreshRunNodesRefreshesConnectedGeneratorInputs() {
+    const refreshed = [];
+    let generatorInputRefreshes = 0;
+    const sandbox = {
+        refreshNodes:ids => refreshed.push(ids),
+        refreshGeneratorInputViews:() => {
+            generatorInputRefreshes += 1;
+        },
+    };
+    vm.runInNewContext(
+        sourceBetween('function refreshRunNodes', 'function normalizedPendingPreviewSize'),
+        sandbox,
+    );
+
+    sandbox.refreshRunNodes({id:'video-node'}, {id:'output-node'});
+
+    assert.deepEqual(
+        JSON.parse(JSON.stringify(refreshed)),
+        [['video-node', 'output-node']],
+    );
+    assert.equal(generatorInputRefreshes, 1, '视频完成后必须刷新下游生成器的输入视图');
+}
+
 (async () => {
     await testParallelRoundsStopAtFirstError();
     testParallelFailureContextKeepsOriginalNode();
@@ -711,6 +734,7 @@ function testRenderOutputMediaVideoUsesItemMetadata() {
     await testPollTerminalAndRecoverableErrors();
     testPendingDeletePersists();
     testRenderOutputMediaVideoUsesItemMetadata();
+    testRefreshRunNodesRefreshesConnectedGeneratorInputs();
     console.log('canvas video lifecycle ok');
 })().catch(error => {
     console.error(error);

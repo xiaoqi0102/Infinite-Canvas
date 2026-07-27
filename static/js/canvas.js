@@ -6328,6 +6328,9 @@ function refreshNodes(ids=[]){
 }
 function refreshRunNodes(node, out=null){
     refreshNodes([node?.id, out?.id]);
+    if(typeof refreshGeneratorInputViews === 'function'){
+        refreshGeneratorInputViews();
+    }
 }
 function normalizedPendingPreviewSize(size){
     const w = Number(size?.w ?? size?.width ?? 0);

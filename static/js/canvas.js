@@ -1597,6 +1597,12 @@ function serializableCanvasNode(node){
     delete copy._cascadeIdx;
     delete copy._cascadeFailed;
     delete copy._activeLoopCtx;
+    if(Array.isArray(copy._pending)){
+        copy._pending = copy._pending.filter(pending =>
+            !(String(pending?.canvasTaskStatus || '').toLowerCase() === 'preflight' && !pending?.canvasTaskId)
+        );
+        if(!copy._pending.length) delete copy._pending;
+    }
     return copy;
 }
 function serializableCanvasNodes(list=nodes){
@@ -6408,6 +6414,17 @@ function renderPendingOutput(pending){
             <button class="output-del" title="${tr('common.delete')}">×</button>
         </div>`;
     }
+    if(String(pending?.canvasTaskStatus || '').toLowerCase() === 'preflight'){
+        return `<div class="output-img-wrap loading-wrap preflight" data-pending-id="${escapeAttr(pending.id)}"${pendingOutputStyle(pending)}>
+            <span class="output-time-pill running">${formatRunDuration(nowMs() - Number(pending.startedAt || nowMs()))}</span>
+            <div class="output-spinner"></div>
+            <div class="output-pending-state">
+                <div class="output-pending-title">${escapeHtml(tr('canvas.videoMaterialChecking'))}</div>
+                <div class="output-pending-sub">${escapeHtml(tr('canvas.videoMaterialCheckingSub'))}</div>
+            </div>
+            <button class="output-del" title="${tr('common.delete')}">×</button>
+        </div>`;
+    }
     return `<div class="output-img-wrap loading-wrap" data-pending-id="${escapeAttr(pending.id)}"${pendingOutputStyle(pending)}><span class="output-time-pill running">${formatRunDuration(nowMs() - Number(pending.startedAt || nowMs()))}</span><div class="output-spinner"></div><button class="output-del" title="${tr('common.delete')}">×</button></div>`;
 }
 function captureOutputScrolls(){
@@ -9559,6 +9576,9 @@ function renderVideoBody(node){
     const currentVideoTasks = canvasVideoBlockingTasksForNode(node.id);
     const hasActiveVideoTasks = currentVideoTasks.length > 0
         && currentVideoTasks.every(item => !item.pending.failed);
+    const isCheckingVideoMaterials = currentVideoTasks.some(item =>
+        String(item.pending.canvasTaskStatus || '').toLowerCase() === 'preflight'
+    );
     if(window.StudioVideoApi?.normalizeVideoProtocolValues){
         const normalized = window.StudioVideoApi.normalizeVideoProtocolValues(profile, {
             duration:node.duration,
@@ -9647,7 +9667,7 @@ function renderVideoBody(node){
             ${profile.isSudashui ? `<div class="text-[10px] text-gray-400">${escapeHtml(tr('canvas.sudashuiAutoUploadTip'))}</div>` : ''}
         </div>
         <div class="gen-run-row">
-            <button class="gen-btn ${node.running ? 'running' : ''}" ${node.running && !hasActiveVideoTasks ? 'disabled' : ''}><i data-lucide="clapperboard" class="w-4 h-4"></i>${hasActiveVideoTasks ? tr('canvas.videoGenerateAgain') : (node.running ? tr('canvas.generating') : tr('canvas.videoGenerate'))}</button>
+            <button class="gen-btn ${node.running || isCheckingVideoMaterials ? 'running' : ''}" ${isCheckingVideoMaterials || (node.running && !hasActiveVideoTasks) ? 'disabled' : ''}><i data-lucide="clapperboard" class="w-4 h-4"></i>${isCheckingVideoMaterials ? tr('canvas.videoMaterialChecking') : (hasActiveVideoTasks ? tr('canvas.videoGenerateAgain') : (node.running ? tr('canvas.generating') : tr('canvas.videoGenerate')))}</button>
             ${cascadeBtnHtml(node)}
         </div>
         ${nodePendingHtml ? `<div class="video-node-pending">${nodePendingHtml}</div>` : ''}
@@ -12038,6 +12058,7 @@ async function runVideoNode(nodeId, opts={}){
     const node = nodes.find(n => n.id === nodeId);
     if(!node) return;
     const existingVideoTasks = canvasVideoBlockingTasksForNode(nodeId);
+    if(existingVideoTasks.some(item => String(item.pending.canvasTaskStatus || '').toLowerCase() === 'preflight')) return;
     let allowConcurrentVideoRun = false;
     if(existingVideoTasks.length){
         syncCanvasVideoNodeState(node);
@@ -12070,6 +12091,20 @@ async function runVideoNode(nodeId, opts={}){
     let out = outputForNode(node, 460);
     const pendingHost = out || node;
     const pendingId = uid('p');
+    const run = runSnapshot(node, displayPrompt, mediaRefs, prompt, inputs.promptParts);
+    const startedAt = nowMs();
+    let taskInfo = null;
+    pendingHost._pending = [
+        ...(pendingHost._pending || []),
+        makePendingForRun(pendingId, run, node, {refs:mediaRefs, cascadeTargetId}, {
+            canvasTaskStatus:'preflight',
+            canvasTaskType:'online-video',
+            providerId:resolveVideoProviderId(node.apiProvider || 'comfly'),
+            model:node.model || 'veo3-fast',
+        })
+    ];
+    addGenerationLog({run, outputs:[], runMs:0, status:'preflight'});
+    refreshRunNodes(node, out || pendingHost);
     let manualVideoUrl = manualVideoUrlForNode(node);
     const providerId = resolveVideoProviderId(node.apiProvider || 'comfly');
     const provider = videoProviderConfig(providerId);
@@ -12110,11 +12145,17 @@ async function runVideoNode(nodeId, opts={}){
         if(issue?.code === 'limit') throw new Error(trf('canvas.videoReferenceLimit', {kind:tr(`canvas.mentionKind.${issue.kind}`), count:issue.count}));
         sudashui = validateCanvasSudashuiVideoRequest(node, profile, refs, videoUrls, audioUrls);
     } catch(error) {
+        pendingHost._pending = (pendingHost._pending || []).filter(p => p.id !== pendingId);
+        run.requestDetails = run.requestDetails || {phase:'material_preflight'};
+        addGenerationLog({run, outputs:[], runMs:nowMs() - startedAt, error:error.message || String(error), status:'failed'});
+        node.runStatus = 'failed';
+        node.runError = error.message || String(error);
+        refreshRunNodes(node, out || pendingHost);
+        scheduleSave();
         if(opts.cascade) throw error;
         showErrorModal(error.message || tr('canvas.videoFailed'), tr('canvas.apiFailed'));
         return;
     }
-    const run = runSnapshot(node, displayPrompt, mediaRefs, prompt, inputs.promptParts);
     const payload = {
         prompt,
         provider_id:providerId,
@@ -12133,8 +12174,6 @@ async function runVideoNode(nodeId, opts={}){
         multimodal:Boolean(node.multimodal)
     };
     if(profile.isSudashui) payload.official_asset_indexes = sudashui.officialAssetIndexes;
-    const startedAt = nowMs();
-    let taskInfo = null;
     if(!opts.cascade){
         node.running = true;
         refreshRunNodes(node, out);
@@ -12146,16 +12185,19 @@ async function runVideoNode(nodeId, opts={}){
         run.localTaskId = taskInfo.task_id;
         run.request = {...(run.request || {}), task_id:taskInfo.task_id, provider_id:payload.provider_id};
         addGenerationLog({run, outputs:[], runMs:nowMs() - startedAt, status:taskInfo.status || 'queued'});
-        pendingHost._pending = [
-            ...(pendingHost._pending || []),
-            makePendingForRun(pendingId, run, node, {refs, cascadeTargetId}, {
+        const pending = pendingById(pendingHost, pendingId);
+        if(pending){
+            Object.assign(pending, {
+                run,
+                refs,
+                cascadeTargetId,
                 canvasTaskId:taskInfo.task_id,
-                canvasTaskType:'online-video',
+                canvasTaskStatus:taskInfo.status || 'queued',
                 providerId:payload.provider_id,
                 model:payload.model,
                 appendGenerated:Boolean(opts.cascade)
-            })
-        ];
+            });
+        }
         refreshRunNodes(node, out || pendingHost);
         scheduleSave();
         await saveCanvas();
@@ -13767,6 +13809,7 @@ function logTaskLabel(log){
 function generationLogStatusText(status){
     const value = String(status || '').toLowerCase();
     if(value === 'failed') return tr('canvas.failed');
+    if(value === 'preflight') return tr('canvas.videoMaterialChecking');
     if(value === 'queued') return tr('canvas.queued');
     if(value === 'submitting') return tr('canvas.submitting');
     if(value === 'polling') return tr('canvas.polling');
@@ -13776,7 +13819,7 @@ function generationLogStatusText(status){
 function generationLogStatusClass(status){
     const value = String(status || '').toLowerCase();
     if(value === 'failed') return 'status-failed';
-    if(['queued','submitting','polling','running'].includes(value)) return 'status-pending';
+    if(['preflight','queued','submitting','polling','running'].includes(value)) return 'status-pending';
     return 'status-ok';
 }
 async function deleteCanvasLogEntry(logId, deleteMedia=false){

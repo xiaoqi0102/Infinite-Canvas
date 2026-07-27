@@ -85,6 +85,8 @@
         "canvas.logMediaReferenced": { zh: "{n} 个原图仍被其他位置引用，已保留", en: "Kept {n} media files that are still referenced" },
         "canvas.success": { zh: "成功", en: "Success" },
         "canvas.failed": { zh: "失败", en: "Failed" },
+        "canvas.videoMaterialChecking": { zh: "验证素材可用性", en: "Checking material availability" },
+        "canvas.videoMaterialCheckingSub": { zh: "正在检查公网连接，素材较大时可能需要一点时间", en: "Checking public access; large materials may take a little longer" },
         "canvas.queued": { zh: "已排队", en: "Queued" },
         "canvas.submitting": { zh: "提交中", en: "Submitting" },
         "canvas.polling": { zh: "查询中", en: "Polling" },

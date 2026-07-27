@@ -807,6 +807,7 @@ function canvasForStorage(){
     (clean.nodes || []).forEach(node => {
         if(Array.isArray(node.images)) node.images = node.images.map(mediaItemForStorage);
         if(node.runSettings) node.runSettings = settingsForStorage(node.runSettings, {preserveCloudLinks:true});
+        delete node.pendingStatus;
     });
     return clean;
 }
@@ -867,6 +868,7 @@ function clearSmartNodeTransientRunState(node, options={}){
     node.queued = false;
     delete node.jimengPending;
     delete node.pendingTasks;
+    delete node.pendingStatus;
     delete node._runMetaTargetId;
     if(options.clearRunHistory){
         delete node.runStartedAt;
@@ -5441,6 +5443,7 @@ function clearSmartNodeBusyState(node){
     node.queued = false;
     delete node.jimengPending;
     delete node.pendingTasks;
+    delete node.pendingStatus;
     return node;
 }
 function markSmartNodeComplete(node, meta=null){
@@ -6209,6 +6212,7 @@ async function loadCanvas(){
         migrateSmartGroupImageMembers();
         canvas.connections = Array.isArray(canvas.connections) ? canvas.connections : [];
         nodes.forEach(n => {
+            delete n.pendingStatus;
             const pendingTasks = smartPendingTasks(n);
             if(pendingTasks.length){
                 n.pending = Math.max(pendingTasks.length, Number(n.pending || 0) || pendingTasks.length);
@@ -7322,6 +7326,7 @@ function smartRunSnapshot(node, prompt, refs=[], kind='image'){
 function smartGenerationLogStatusText(status){
     const value = String(status || '').toLowerCase();
     if(value === 'failed') return tr('canvas.failed');
+    if(value === 'preflight') return tr('canvas.videoMaterialChecking');
     if(value === 'queued') return tr('canvas.queued');
     if(value === 'submitting') return tr('canvas.submitting');
     if(value === 'polling') return tr('canvas.polling');
@@ -7331,7 +7336,7 @@ function smartGenerationLogStatusText(status){
 function smartGenerationLogStatusClass(status){
     const value = String(status || '').toLowerCase();
     if(value === 'failed') return 'status-failed';
-    if(['queued','submitting','polling','running'].includes(value)) return 'status-pending';
+    if(['preflight','queued','submitting','polling','running'].includes(value)) return 'status-pending';
     return 'status-ok';
 }
 function addSmartGenerationLog({run, outputs=[], runMs=0, error='', status=''}) {
@@ -7841,6 +7846,15 @@ function nodeBodyHtml(node, layout){
     const recoverTask = smartRecoverableImageTask(node);
     if(recoverTask && imgs.length === 0){
         return imageTaskRecoverBodyHtml(node, recoverTask, layout);
+    }
+    if(node.pendingStatus === 'preflight' && imgs.length === 0){
+        return `<div class="jimeng-pending-cell loading-cell single" style="width:${layout.width}px;height:${layout.height}px">
+            <div class="jimeng-pending-overlay">
+                <div class="jimeng-pending-spinner"><i data-lucide="loader-2"></i></div>
+                <div class="jimeng-pending-text">${escapeHtml(tr('canvas.videoMaterialChecking'))}</div>
+                <div class="jimeng-pending-sub">${escapeHtml(tr('canvas.videoMaterialCheckingSub'))}</div>
+            </div>
+        </div>`;
     }
     if(node.queued && imgs.length === 0 && !node.pending){
         return `<div class="loading-cell single queued" style="width:${layout.width}px;height:${layout.height}px"></div>`;
@@ -14932,7 +14946,7 @@ async function runCascadeStepIntoNode(sourceNode, targetNode, inputRefs, ctx=sma
     try {
         const result = await generateUrlsForCurrentSettings(
             outputNode, prompt, request.refs || [], runSettings,
-            {run:runLog, startedAt:runLogStart, runState:ctx?.runState, settingsOwner:requestNode}
+            {run:runLog, startedAt:runLogStart, runState:ctx?.runState, settingsOwner:requestNode, pendingNode:outputNode}
         );
         if(!result.urls?.length) throw new Error(result.kind === 'video' ? tr('smart.errNoOutVideos') : tr('smart.errNoOutImages'));
         if(outpaintSize) delete requestNode.outpaintSize;
@@ -15051,7 +15065,7 @@ async function runLoopRoundIntoSlot(loopNode, rootNode, outputSlot, loopIndex, c
         } else {
             result = await generateUrlsForCurrentSettings(
                 outputSlot, prompt, request.refs || [], runSettings,
-                {run:runLog, startedAt:runLogStart, runState:ctx?.runState, settingsOwner:rootNode}
+                {run:runLog, startedAt:runLogStart, runState:ctx?.runState, settingsOwner:rootNode, pendingNode:outputSlot}
             );
         }
         if(!result.urls?.length) throw new Error(result.kind === 'video' ? tr('smart.errNoOutVideos') : tr('smart.errNoOutImages'));
@@ -15506,12 +15520,12 @@ async function runGeneration(){
         }
         const rhModelMode = settings.engine === 'runninghub' && Boolean(runningHubSelectedModel(settings));
         const outImages = rhModelMode
-            ? await runApiGeneration(prompt, refs, runningHubModelApiSettings(settings), {run:runLog, startedAt:runLogStart})
+            ? await runApiGeneration(prompt, refs, runningHubModelApiSettings(settings), {run:runLog, startedAt:runLogStart, pendingNode})
             : settings.engine === 'runninghub'
                 ? await runRunningHubGeneration(prompt, refs)
                 : settings.engine === 'modelscope'
                 ? await runModelscopeGeneration(prompt, refs)
-                : await runApiGeneration(prompt, refs, settings, {run:runLog, startedAt:runLogStart});
+                : await runApiGeneration(prompt, refs, settings, {run:runLog, startedAt:runLogStart, pendingNode});
         if(isApiLikeEngine(settings.engine) || rhModelMode){
             const taskIds = Array.isArray(outImages?.taskIds) ? outImages.taskIds : [];
             if(!taskIds.length) throw new Error(tr('smart.errRunFailed'));
@@ -15566,6 +15580,7 @@ async function runGeneration(){
             return;
         }
         pendingNode.pending = 0;
+        delete pendingNode.pendingStatus;
         if(branchNode){
             nodes = nodes.filter(n => n.id !== branchNode.id);
             canvas.connections = (canvas.connections || []).filter(c => c.from !== branchNode.id && c.to !== branchNode.id);
@@ -15720,6 +15735,19 @@ function validateSmartSudashuiVideoRequest(runSettings, profile, images, videos,
 async function runApiVideoGeneration(prompt, refs, runSettings=settings, logContext={}){
     if(!runSettings.videoModel) throw new Error(tr('smart.errNoVideoModel'));
     try {
+        const pendingNode = logContext?.pendingNode;
+        if(pendingNode){
+            pendingNode.pendingStatus = 'preflight';
+            render();
+        }
+        if(logContext?.run){
+            addSmartGenerationLog({
+                run:logContext.run,
+                outputs:[],
+                runMs:0,
+                status:'preflight'
+            });
+        }
         normalizeMegabyVideoSettings(runSettings, {resetInvalidGroup:true});
         let uploadedRefs = applyUploadedUrlsToSmartRefs(refs, runSettings);
         const profile = smartVideoProtocolProfile(runSettings);
@@ -15784,9 +15812,16 @@ async function runApiVideoGeneration(prompt, refs, runSettings=settings, logCont
         const task = await createSmartCanvasVideoTask(payload);
         const taskId = task?.task_id || task?.id || '';
         if(!taskId) throw new Error(tr('smart.errRunFailed'));
+        if(pendingNode){
+            pendingNode.pendingStatus = '';
+            render();
+        }
         updateSmartTaskGenerationLog(logContext, taskId, {...task, provider_id:payload.provider_id}, 'video');
         return {taskIds:[taskId], count:1, providerId:payload.provider_id, model:payload.model, kind:'video'};
     } finally {
+        if(logContext?.pendingNode){
+            logContext.pendingNode.pendingStatus = '';
+        }
         transientSmartCloudLinks = [];
     }
 }

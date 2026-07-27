@@ -991,6 +991,14 @@ VIDEO_MATERIAL_UPLOAD_CACHE_TTL = max(
     0.0,
     float(os.getenv("VIDEO_MATERIAL_UPLOAD_CACHE_TTL", str(24 * 60 * 60))),
 )
+VIDEO_MATERIAL_PROBE_CONCURRENCY = max(
+    1,
+    min(8, int(os.getenv("VIDEO_MATERIAL_PROBE_CONCURRENCY", "4"))),
+)
+VIDEO_MATERIAL_UPLOAD_CONCURRENCY = max(
+    1,
+    min(4, int(os.getenv("VIDEO_MATERIAL_UPLOAD_CONCURRENCY", "2"))),
+)
 ONLINE_IMAGE_PROMPT_MAX_LENGTH = int(os.getenv("ONLINE_IMAGE_PROMPT_MAX_LENGTH", "20000"))
 VIDEO_PROMPT_MAX_LENGTH = int(os.getenv("VIDEO_PROMPT_MAX_LENGTH", "4000"))
 LLM_MESSAGE_MAX_LENGTH = int(os.getenv("LLM_MESSAGE_MAX_LENGTH", "20000"))
@@ -10745,9 +10753,33 @@ def canvas_video_material_local_source(value: str) -> str:
     return ""
 
 
+async def limited_canvas_video_material_probe(
+    url: str,
+    semaphore: Optional[asyncio.Semaphore] = None,
+) -> Dict[str, Any]:
+    if semaphore is None:
+        return await public_http_probe(url)
+    async with semaphore:
+        return await public_http_probe(url)
+
+
+async def limited_canvas_video_material_upload(
+    source_url: str,
+    service: str,
+    semaphore: Optional[asyncio.Semaphore] = None,
+) -> Dict[str, Any]:
+    if semaphore is None:
+        return await upload_local_video_to_cloud(source_url, service)
+    async with semaphore:
+        return await upload_local_video_to_cloud(source_url, service)
+
+
 async def preflight_canvas_video_material(
     material: CanvasVideoMaterialPreflightItem,
     service: str = "auto",
+    *,
+    probe_semaphore: Optional[asyncio.Semaphore] = None,
+    upload_semaphore: Optional[asyncio.Semaphore] = None,
 ) -> Dict[str, Any]:
     url = str(material.url or "").strip()
     source_url = canvas_video_material_local_source(material.source_url)
@@ -10772,7 +10804,7 @@ async def preflight_canvas_video_material(
     probe_reason = ""
     if not current_local_source and re.match(r"^https?://", url, re.I):
         try:
-            probe = await public_http_probe(url)
+            probe = await limited_canvas_video_material_probe(url, probe_semaphore)
             status_code = int(probe.get("status_code") or 0)
             if 200 <= status_code < 300:
                 return {
@@ -10803,7 +10835,11 @@ async def preflight_canvas_video_material(
     try:
         uploaded = cached_canvas_video_upload(source_url, service)
         if not uploaded:
-            uploaded = await upload_local_video_to_cloud(source_url, service)
+            uploaded = await limited_canvas_video_material_upload(
+                source_url,
+                service,
+                upload_semaphore,
+            )
     except HTTPException as exc:
         raise canvas_video_material_error(
             f"素材已失效，自动重新上传失败：{exc.detail}",
@@ -10822,7 +10858,10 @@ async def preflight_canvas_video_material(
 
     uploaded_error = None
     try:
-        uploaded_probe = await public_http_probe(uploaded_url)
+        uploaded_probe = await limited_canvas_video_material_probe(
+            uploaded_url,
+            probe_semaphore,
+        )
         uploaded_status = int(uploaded_probe.get("status_code") or 0)
     except (UnsafePublicUrlError, httpx.HTTPError, OSError) as exc:
         uploaded_status = 0
@@ -10830,7 +10869,11 @@ async def preflight_canvas_video_material(
     if (uploaded_error or not 200 <= uploaded_status < 300) and uploaded.get("cache_hit"):
         forget_canvas_video_upload(str(uploaded.get("cache_key") or ""))
         try:
-            uploaded = await upload_local_video_to_cloud(source_url, service)
+            uploaded = await limited_canvas_video_material_upload(
+                source_url,
+                service,
+                upload_semaphore,
+            )
         except HTTPException as exc:
             raise canvas_video_material_error(
                 f"素材已失效，自动重新上传失败：{exc.detail}",
@@ -10848,7 +10891,10 @@ async def preflight_canvas_video_material(
             )
         uploaded_error = None
         try:
-            uploaded_probe = await public_http_probe(uploaded_url)
+            uploaded_probe = await limited_canvas_video_material_probe(
+                uploaded_url,
+                probe_semaphore,
+            )
             uploaded_status = int(uploaded_probe.get("status_code") or 0)
         except (UnsafePublicUrlError, httpx.HTTPError, OSError) as exc:
             uploaded_status = 0
@@ -10890,18 +10936,42 @@ async def preflight_canvas_video_materials(
             "At most 20 video materials can be checked at once.",
             code="material_limit",
         )
-    cache: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
-    prepared = []
+    unique_materials: Dict[Tuple[str, str, str], CanvasVideoMaterialPreflightItem] = {}
+    material_keys = []
     for material in materials:
         key = (
             str(material.url or "").strip(),
             str(material.source_url or "").strip(),
             str(material.kind or "").strip().lower(),
         )
-        if key not in cache:
-            cache[key] = await preflight_canvas_video_material(material, service)
-        prepared.append(dict(cache[key]))
-    return prepared
+        material_keys.append(key)
+        unique_materials.setdefault(key, material)
+
+    probe_semaphore = asyncio.Semaphore(VIDEO_MATERIAL_PROBE_CONCURRENCY)
+    upload_semaphore = asyncio.Semaphore(VIDEO_MATERIAL_UPLOAD_CONCURRENCY)
+    keys = list(unique_materials)
+    tasks = [
+        asyncio.create_task(preflight_canvas_video_material(
+            unique_materials[key],
+            service,
+            probe_semaphore=probe_semaphore,
+            upload_semaphore=upload_semaphore,
+        ))
+        for key in keys
+    ]
+    try:
+        results = await asyncio.gather(*tasks)
+    except BaseException:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
+    prepared_by_key = {
+        key: result
+        for key, result in zip(keys, results)
+    }
+    return [dict(prepared_by_key[key]) for key in material_keys]
 
 
 async def preflight_canvas_video_request(

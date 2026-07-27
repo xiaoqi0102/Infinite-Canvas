@@ -1286,6 +1286,7 @@ Sudashui Base URL 带不带末尾 `/` 或 `/v1` 均会统一拼接为单一的 `
 - 普通画布和智能画布在调用 `POST /api/canvas-video-tasks` 前，必须先调用 `POST /api/canvas-video-materials/preflight` 检查图片、视频和音频素材是否仍可访问。本地 `/assets/`、`/output/`、`/api/storage-files/` 素材必须先上传并取得公网 HTTP/HTTPS URL，再按图片、视频、音频类型分别提交给上游。探测复用视频插件的公网 DNS 校验、IP 固定和禁重定向边界，优先 `HEAD`，不支持时退回流式 `Range GET`，不得下载完整媒体。失效素材存在上述受控本地副本时自动重新上传，并把返回的新链接覆盖到本次请求和画布上传缓存；没有本地副本时必须停止创建任务，避免上游计费后才返回素材 404。
 - 后端兼容接口 `POST /api/canvas-video` 和任务接口 `POST /api/canvas-video-tasks` 还会统一执行同一套请求级素材预检。直接调用后端 API 时，本地图片、视频和音频同样必须先取得公网 URL；预检失败发生在任务落库和上游提交之前，不会留下无效排队任务。
 - 自动预检上传成功后，会在用户数据目录 `data/canvas_video_upload_cache.json` 按本地文件路径、大小、修改时间和上传服务保存公网链接及失效时间。文件未变化、链接未接近失效且仍可访问时可以跨任务、跨重启复用；文件变化、链接不可达或剩余有效期不足以覆盖视频轮询窗口时自动清除缓存并重新上传。用户手动点击“上传云端”仍强制生成新链接，不读取该缓存。
+- 批量素材预检会先按 URL、本地来源和素材类型去重，再按原顺序还原结果。公网探测默认最多 4 路并发，本地素材上传默认最多 2 路并发，分别可通过 `VIDEO_MATERIAL_PROBE_CONCURRENCY`（1～8）和 `VIDEO_MATERIAL_UPLOAD_CONCURRENCY`（1～4）调整；任一素材失败时会取消同批尚未完成的检查。
 - 智能画布的自动上传映射必须随节点 `runSettings.videoTempShLinks` 持久化，并保留输入引用的 `nodeId`、`imageIndex`、`originalLocalUrl` 和 `sourceUrl`，不能只依赖任务结束后会清空的 `transientSmartCloudLinks`。
 - 普通画布的云端链接列表支持逐条删除。删除只清理画布内保存的上传映射和链接缓存，不调用远端文件删除接口；若映射保留了受控本地 `source`，对应素材节点同时恢复为该本地地址，后续生成不得继续引用已删除链接。
 - 单个任务内相同本地素材只上传一次，但最终数组顺序必须保持不变。

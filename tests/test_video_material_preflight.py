@@ -1,3 +1,4 @@
+import asyncio
 import os
 import tempfile
 import unittest
@@ -373,6 +374,101 @@ class VideoMaterialPreflightTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result["url"], "https://files.example/refreshed.png")
         self.assertEqual(upload.await_count, 2)
+
+    async def test_batch_preflight_limits_public_probe_concurrency(self):
+        materials = [
+            main.CanvasVideoMaterialPreflightItem(
+                url=f"https://files.example/reference-{index}.png",
+                kind="image",
+            )
+            for index in range(8)
+        ]
+        active = 0
+        max_active = 0
+
+        async def probe(_url):
+            nonlocal active, max_active
+            active += 1
+            max_active = max(max_active, active)
+            await asyncio.sleep(0.01)
+            active -= 1
+            return {"status_code": 200}
+
+        with (
+            patch("main.VIDEO_MATERIAL_PROBE_CONCURRENCY", 3),
+            patch("main.public_http_probe", new=probe),
+        ):
+            result = await main.preflight_canvas_video_materials(materials)
+
+        self.assertEqual(len(result), len(materials))
+        self.assertGreater(max_active, 1)
+        self.assertLessEqual(max_active, 3)
+
+    async def test_batch_preflight_deduplicates_and_preserves_order(self):
+        first = main.CanvasVideoMaterialPreflightItem(
+            url="https://files.example/first.png",
+            kind="image",
+        )
+        second = main.CanvasVideoMaterialPreflightItem(
+            url="https://files.example/second.png",
+            kind="image",
+        )
+        probe = AsyncMock(return_value={"status_code": 200})
+        with patch("main.public_http_probe", new=probe):
+            result = await main.preflight_canvas_video_materials([
+                first,
+                second,
+                first,
+            ])
+
+        self.assertEqual(
+            [item["url"] for item in result],
+            [first.url, second.url, first.url],
+        )
+        self.assertEqual(probe.await_count, 2)
+
+    async def test_batch_preflight_limits_upload_concurrency(self):
+        materials = [
+            main.CanvasVideoMaterialPreflightItem(
+                url=f"/assets/reference-{index}.png",
+                source_url=f"/assets/reference-{index}.png",
+                kind="image",
+            )
+            for index in range(6)
+        ]
+        active = 0
+        max_active = 0
+
+        async def upload(source_url, _service):
+            nonlocal active, max_active
+            active += 1
+            max_active = max(max_active, active)
+            await asyncio.sleep(0.01)
+            active -= 1
+            return {
+                "url": f"https://files.example/{os.path.basename(source_url)}",
+                "source": source_url,
+                "service": "litterbox",
+            }
+
+        with (
+            patch("main.VIDEO_MATERIAL_UPLOAD_CONCURRENCY", 2),
+            patch("main.cached_canvas_video_upload", return_value=None),
+            patch(
+                "main.remember_canvas_video_upload",
+                side_effect=lambda source_url, _service, uploaded: uploaded,
+            ),
+            patch("main.upload_local_video_to_cloud", new=upload),
+            patch(
+                "main.public_http_probe",
+                new=AsyncMock(return_value={"status_code": 200}),
+            ),
+        ):
+            result = await main.preflight_canvas_video_materials(materials)
+
+        self.assertEqual(len(result), len(materials))
+        self.assertGreater(max_active, 1)
+        self.assertLessEqual(max_active, 2)
 
 
 if __name__ == "__main__":

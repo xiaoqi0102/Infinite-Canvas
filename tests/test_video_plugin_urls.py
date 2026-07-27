@@ -933,6 +933,37 @@ class CloudMediaUploadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(path, "D:/tmp/reference image.png")
         resolve.assert_called_once_with("/assets/reference image.png")
 
+    def test_storage_media_path_is_resolved_under_controlled_roots(self):
+        storage_url = "/api/storage-files/upload/reference.mp4"
+        with (
+            patch.object(main, "output_file_from_url", return_value="D:/tmp/reference.mp4") as resolve,
+            patch.object(main, "content_type_for_path", return_value="video/mp4"),
+            patch.object(main.os.path, "getsize", return_value=1024),
+        ):
+            path = main.local_media_path_for_cloud_upload(storage_url)
+
+        self.assertEqual(path, "D:/tmp/reference.mp4")
+        resolve.assert_called_once_with(storage_url)
+
+    def test_private_http_storage_media_path_is_resolved_under_controlled_roots(self):
+        private_url = "http://127.0.0.1:3000/api/storage-files/generated/reference%20video.mp4"
+        storage_url = "/api/storage-files/generated/reference video.mp4"
+        with (
+            patch.object(main, "output_file_from_url", return_value="D:/tmp/reference video.mp4") as resolve,
+            patch.object(main, "content_type_for_path", return_value="video/mp4"),
+            patch.object(main.os.path, "getsize", return_value=1024),
+        ):
+            path = main.local_media_path_for_cloud_upload(private_url)
+
+        self.assertEqual(path, "D:/tmp/reference video.mp4")
+        resolve.assert_called_once_with(storage_url)
+
+    def test_storage_media_path_keeps_kind_and_traversal_guards(self):
+        with self.assertRaisesRegex(main.HTTPException, "未知存储目录"):
+            main.output_file_from_url("/api/storage-files/unknown/reference.mp4")
+        with self.assertRaisesRegex(main.HTTPException, "非法文件路径"):
+            main.output_file_from_url("/api/storage-files/upload/../reference.mp4")
+
     def test_cloud_upload_local_url_path_covers_private_host_variants(self):
         local_urls = (
             "http://100.64.0.1/assets/reference.png",
@@ -1073,6 +1104,28 @@ class PublicReferenceSafetyTests(unittest.IsolatedAsyncioTestCase):
             "public.example",
         )
         self.assertFalse(kwargs["follow_redirects"])
+
+    async def test_storage_media_references_are_uploaded_before_upstream_submission(self):
+        cases = (
+            ("/api/storage-files/upload/ai_ref_demo.png", "D:/tmp/ai_ref_demo.png"),
+            ("/api/storage-files/generated/ai_ref_demo.mp4", "D:/tmp/ai_ref_demo.mp4"),
+            ("/api/storage-files/local/ai_ref_demo.mp3", "D:/tmp/ai_ref_demo.mp3"),
+        )
+        for storage_url, local_path in cases:
+            with self.subTest(storage_url=storage_url):
+                public_url = f"https://files.example/{storage_url.rsplit('/', 1)[-1]}"
+                with (
+                    patch("main.output_file_from_url", return_value=local_path) as resolve,
+                    patch(
+                        "main.upload_local_video_to_cloud",
+                        new=AsyncMock(return_value={"url": public_url, "service": "litterbox"}),
+                    ) as upload,
+                ):
+                    result = await main.openai_video_proxy_public_reference_url(storage_url)
+
+                self.assertEqual(result, public_url)
+                resolve.assert_called_once_with(storage_url)
+                upload.assert_awaited_once_with(storage_url)
 
     async def test_megabyai_republishes_temp_link_from_original_local_image(self):
         uploaded = {"url": "https://litter.catbox.moe/example.jpg"}

@@ -7339,6 +7339,10 @@ async def wait_for_image_task(client, task_id, provider=None):
 def output_storage(category="output"):
     return (OUTPUT_INPUT_DIR, "input") if category == "input" else (OUTPUT_OUTPUT_DIR, "output")
 
+
+LOCAL_MEDIA_URL_PREFIXES = ("/output/", "/assets/", "/api/storage-files/")
+
+
 def output_url_for(filename, category="output"):
     rel = str(filename or "").replace("\\", "/").lstrip("/")
     kind = "upload" if category == "input" else "generated"
@@ -7482,11 +7486,11 @@ async def dedupe_canvas_video_result(result):
     return merged
 
 def collect_local_media_urls(value: Any) -> List[str]:
-    """Collect local /assets and /output URLs from nested canvas log payloads."""
+    """Collect controlled local media URLs from nested canvas log payloads."""
     urls = []
     if isinstance(value, str):
         text = value.strip()
-        if text.startswith(("/assets/", "/output/", "/api/storage-files/")):
+        if text.startswith(LOCAL_MEDIA_URL_PREFIXES):
             urls.append(text)
     elif isinstance(value, dict):
         for item in value.values():
@@ -9662,7 +9666,7 @@ def public_media_url_suffix() -> str:
 
 def local_asset_public_url(value: str) -> str:
     text = str(value or "").strip()
-    if not text.startswith(("/output/", "/assets/")):
+    if not text.startswith(LOCAL_MEDIA_URL_PREFIXES):
         return ""
     if not output_file_from_url(text):
         return ""
@@ -9672,7 +9676,7 @@ def local_asset_public_url(value: str) -> str:
     return f"{base}{urllib.parse.quote(text, safe='/:?&=%#.-_~')}{public_media_url_suffix()}"
 
 async def openai_video_proxy_public_reference_url(ref) -> str:
-    """异步生图（openai-video-proxy）的参考图公网化。
+    """把本地参考素材上传为公网 URL，供异步图片/视频协议使用。
     不走公网隧道（暴露本机服务风险高）：本地文件上传图床（Litterbox/temp.sh，72h 短链），
     与 RS 模式同一通道；真正的公网 URL 原样透传；若手动配置了 PUBLIC_MEDIA_BASE_URL 则作为兜底。"""
     raw = ref.get("url", "") if isinstance(ref, dict) else ref
@@ -9687,7 +9691,7 @@ async def openai_video_proxy_public_reference_url(ref) -> str:
             local_path = urllib.parse.unquote(parsed.path or "")
         else:
             return text
-    elif text.startswith(("/output/", "/assets/")):
+    elif text.startswith(LOCAL_MEDIA_URL_PREFIXES):
         local_path = text
     if local_path and output_file_from_url(local_path):
         upload_error = ""
@@ -9703,9 +9707,9 @@ async def openai_video_proxy_public_reference_url(ref) -> str:
             return public_url
         raise HTTPException(
             status_code=400,
-            detail=f"参考图上传图床失败，无法转成公网 URL：{upload_error[:200] or '未知错误'}。请检查网络后重试。"
+            detail=f"参考素材上传云端失败，无法转成公网 URL：{upload_error[:200] or '未知错误'}。请检查网络后重试。"
         )
-    raise HTTPException(status_code=400, detail=f"参考图不是公网 URL，无法传给上游：{text[:160]}")
+    raise HTTPException(status_code=400, detail=f"参考素材不是公网 URL，无法传给上游：{text[:160]}")
 
 
 async def megabyai_image_public_reference_url(ref) -> str:
@@ -9819,7 +9823,7 @@ def openai_video_proxy_local_image_path(ref) -> str:
         host = (parsed.hostname or "").lower()
         if host in {"127.0.0.1", "localhost", "::1"} or re.match(r"^(192\.168\.|10\.|172\.(1[6-9]|2\d|3[01])\.)", host):
             local_path = urllib.parse.unquote(parsed.path or "")
-    elif text.startswith(("/output/", "/assets/")):
+    elif text.startswith(LOCAL_MEDIA_URL_PREFIXES):
         local_path = text
     path = output_file_from_url(local_path) if local_path else None
     if not path:
@@ -9836,7 +9840,7 @@ def apimart_video_reference_error(value: str) -> str:
     text = str(value or "").strip()
     if not text:
         return "空的视频地址"
-    if text.startswith(("/output/", "/assets/")):
+    if text.startswith(LOCAL_MEDIA_URL_PREFIXES):
         if not output_file_from_url(text):
             return "这是本地画布文件路径，但后端没有找到对应文件，请重新上传视频后再试。"
         return (
@@ -10421,11 +10425,11 @@ def local_media_path_for_cloud_upload(ref_url: str, allowed_prefixes=("image/", 
     normalized_url = cloud_upload_local_url_path(ref_url)
     if normalized_url is None:
         return ""
-    if normalized_url != ref_url and not normalized_url.startswith(("/output/", "/assets/")):
-        raise HTTPException(status_code=400, detail="内网媒体 URL 必须指向画布内的 /assets 或 /output 文件")
+    if normalized_url != ref_url and not normalized_url.startswith(LOCAL_MEDIA_URL_PREFIXES):
+        raise HTTPException(status_code=400, detail="内网媒体 URL 必须指向画布内的受控媒体文件")
     ref_url = normalized_url
-    if not (ref_url.startswith("/output/") or ref_url.startswith("/assets/")):
-        raise HTTPException(status_code=400, detail="云端上传只支持画布里的本地图片或视频文件")
+    if not ref_url.startswith(LOCAL_MEDIA_URL_PREFIXES):
+        raise HTTPException(status_code=400, detail="云端上传只支持画布里的本地图片、视频或音频文件")
     path = output_file_from_url(ref_url)
     if not path:
         raise HTTPException(status_code=404, detail="本地媒体文件不存在或已被删除")
@@ -10578,7 +10582,7 @@ def canvas_video_material_local_source(value: str) -> str:
         normalized = cloud_upload_local_url_path(text)
     except HTTPException:
         return ""
-    if normalized and normalized.startswith(("/assets/", "/output/")):
+    if normalized and normalized.startswith(LOCAL_MEDIA_URL_PREFIXES):
         return text
     return ""
 
@@ -10742,7 +10746,7 @@ async def save_ai_image_to_output(image_data, prefix="online_", category="output
         except Exception as exc:
             raise HTTPException(status_code=502, detail=f"上游图片数据无效：{exc}") from exc
     value = str(image_data["value"] or "").strip()
-    if value.startswith(("/output/", "/assets/", "/api/storage-files/")):
+    if value.startswith(LOCAL_MEDIA_URL_PREFIXES):
         return ensure_existing_local_media_url(value)
     value = rewrite_runninghub_file_url(value)
     if not value.startswith(("http://", "https://")):
@@ -10810,7 +10814,7 @@ def same_http_origin(left: str, right: str) -> bool:
 async def save_remote_video_to_output(url, prefix="video_", category="output", provider=None):
     if not url:
         return ""
-    if url.startswith(("/output/", "/assets/", "/api/storage-files/")):
+    if url.startswith(LOCAL_MEDIA_URL_PREFIXES):
         return ensure_existing_local_media_url(url)
     parsed = urllib.parse.urlparse(str(url or "").strip())
     if parsed.scheme not in ("http", "https") or not parsed.netloc:

@@ -57,6 +57,35 @@ class PublicHttpProbeTests(unittest.IsolatedAsyncioTestCase):
 
 
 class VideoMaterialPreflightTests(unittest.IsolatedAsyncioTestCase):
+    async def test_storage_materials_are_uploaded_before_video_submission(self):
+        cases = (
+            ("image", "/api/storage-files/upload/reference.png", "https://files.example/reference.png"),
+            ("video", "/api/storage-files/generated/reference.mp4", "https://files.example/reference.mp4"),
+            ("audio", "/api/storage-files/local/reference.mp3", "https://files.example/reference.mp3"),
+        )
+        for kind, local_url, public_url in cases:
+            with self.subTest(kind=kind):
+                material = main.CanvasVideoMaterialPreflightItem(
+                    url=local_url,
+                    source_url=local_url,
+                    kind=kind,
+                )
+                upload = AsyncMock(return_value={
+                    "url": public_url,
+                    "source": local_url,
+                    "service": "litterbox",
+                })
+                with (
+                    patch("main.upload_local_video_to_cloud", new=upload),
+                    patch("main.public_http_probe", new=AsyncMock(return_value={"status_code": 200})),
+                ):
+                    result = await main.preflight_canvas_video_material(material)
+
+                self.assertTrue(result["refreshed"])
+                self.assertEqual(result["url"], public_url)
+                self.assertEqual(result["kind"], kind)
+                upload.assert_awaited_once_with(local_url, "auto")
+
     async def test_valid_public_material_keeps_existing_url(self):
         material = main.CanvasVideoMaterialPreflightItem(
             url="https://files.example/material.png",

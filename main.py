@@ -10753,6 +10753,65 @@ def canvas_video_material_local_source(value: str) -> str:
     return ""
 
 
+CANVAS_VIDEO_MATERIAL_GENERIC_CONTENT_TYPES = {
+    "",
+    "application/octet-stream",
+    "binary/octet-stream",
+}
+CANVAS_VIDEO_MATERIAL_EXTRA_CONTENT_TYPES = {
+    "video": {
+        "application/dash+xml",
+        "application/ogg",
+        "application/vnd.apple.mpegurl",
+        "application/x-matroska",
+        "application/x-mpegurl",
+    },
+    "audio": {
+        "application/ogg",
+    },
+}
+
+
+def canvas_video_material_content_type_mismatch(
+    probe: Dict[str, Any],
+    kind: str,
+) -> str:
+    expected_kind = str(kind or "").strip().lower()
+    if expected_kind not in {"image", "video", "audio"}:
+        return ""
+    content_type = str((probe or {}).get("content_type") or "")
+    content_type = content_type.split(";", 1)[0].strip().lower()
+    if content_type in CANVAS_VIDEO_MATERIAL_GENERIC_CONTENT_TYPES:
+        return ""
+    if content_type.startswith(f"{expected_kind}/"):
+        return ""
+    if content_type in CANVAS_VIDEO_MATERIAL_EXTRA_CONTENT_TYPES.get(expected_kind, set()):
+        return ""
+    return content_type
+
+
+def canvas_video_material_content_type_error(
+    kind: str,
+    content_type: str,
+    *,
+    uploaded: bool = False,
+) -> HTTPException:
+    kind_labels = {
+        "image": ("图片", "image"),
+        "video": ("视频", "video"),
+        "audio": ("音频", "audio"),
+    }
+    label, label_en = kind_labels.get(kind, ("媒体", "media"))
+    prefix = "素材上传后的公网链接" if uploaded else "素材公网链接"
+    prefix_en = "The uploaded public material URL" if uploaded else "The public material URL"
+    return canvas_video_material_error(
+        f"{prefix}返回 `{content_type}`，不是可用的{label}内容，已停止创建视频任务。",
+        f"{prefix_en} returned `{content_type}`, which is not valid {label_en} content. The video task was not created.",
+        status_code=502 if uploaded else 400,
+        code="material_content_type_mismatch",
+    )
+
+
 async def limited_canvas_video_material_probe(
     url: str,
     semaphore: Optional[asyncio.Semaphore] = None,
@@ -10802,21 +10861,30 @@ async def preflight_canvas_video_material(
 
     current_local_source = canvas_video_material_local_source(url)
     probe_reason = ""
+    probe_content_type_mismatch = ""
     if not current_local_source and re.match(r"^https?://", url, re.I):
         try:
             probe = await limited_canvas_video_material_probe(url, probe_semaphore)
             status_code = int(probe.get("status_code") or 0)
             if 200 <= status_code < 300:
-                return {
-                    "url": url,
-                    "source": material.source_url or "",
-                    "kind": kind,
-                    "refreshed": False,
-                    "service": "existing",
-                    "expires": "",
-                    "status_code": status_code,
-                }
-            probe_reason = f"HTTP {status_code or 'unknown'}"
+                probe_content_type_mismatch = canvas_video_material_content_type_mismatch(
+                    probe,
+                    kind,
+                )
+                if not probe_content_type_mismatch:
+                    return {
+                        "url": url,
+                        "source": material.source_url or "",
+                        "kind": kind,
+                        "refreshed": False,
+                        "service": "existing",
+                        "expires": "",
+                        "status_code": status_code,
+                        "content_type": str(probe.get("content_type") or ""),
+                    }
+                probe_reason = f"响应类型为 {probe_content_type_mismatch}"
+            else:
+                probe_reason = f"HTTP {status_code or 'unknown'}"
         except (UnsafePublicUrlError, httpx.HTTPError, OSError) as exc:
             probe_reason = str(exc) or exc.__class__.__name__
     elif current_local_source:
@@ -10826,6 +10894,11 @@ async def preflight_canvas_video_material(
         probe_reason = "素材 URL 不是可探测的公网 HTTP/HTTPS 地址"
 
     if not source_url:
+        if probe_content_type_mismatch:
+            raise canvas_video_material_content_type_error(
+                kind,
+                probe_content_type_mismatch,
+            )
         raise canvas_video_material_error(
             f"素材已失效或无法加载（{probe_reason}），且找不到可重新上传的本地副本，已停止创建视频任务。",
             "The material is expired or unreachable and no local copy is available for re-upload. The video task was not created.",
@@ -10857,16 +10930,26 @@ async def preflight_canvas_video_material(
         )
 
     uploaded_error = None
+    uploaded_type_mismatch = ""
     try:
         uploaded_probe = await limited_canvas_video_material_probe(
             uploaded_url,
             probe_semaphore,
         )
         uploaded_status = int(uploaded_probe.get("status_code") or 0)
+        if 200 <= uploaded_status < 300:
+            uploaded_type_mismatch = canvas_video_material_content_type_mismatch(
+                uploaded_probe,
+                kind,
+            )
     except (UnsafePublicUrlError, httpx.HTTPError, OSError) as exc:
         uploaded_status = 0
         uploaded_error = exc
-    if (uploaded_error or not 200 <= uploaded_status < 300) and uploaded.get("cache_hit"):
+    if (
+        uploaded_error
+        or uploaded_type_mismatch
+        or not 200 <= uploaded_status < 300
+    ) and uploaded.get("cache_hit"):
         forget_canvas_video_upload(str(uploaded.get("cache_key") or ""))
         try:
             uploaded = await limited_canvas_video_material_upload(
@@ -10890,12 +10973,18 @@ async def preflight_canvas_video_material(
                 code="material_reupload_url_missing",
             )
         uploaded_error = None
+        uploaded_type_mismatch = ""
         try:
             uploaded_probe = await limited_canvas_video_material_probe(
                 uploaded_url,
                 probe_semaphore,
             )
             uploaded_status = int(uploaded_probe.get("status_code") or 0)
+            if 200 <= uploaded_status < 300:
+                uploaded_type_mismatch = canvas_video_material_content_type_mismatch(
+                    uploaded_probe,
+                    kind,
+                )
         except (UnsafePublicUrlError, httpx.HTTPError, OSError) as exc:
             uploaded_status = 0
             uploaded_error = exc
@@ -10906,6 +10995,12 @@ async def preflight_canvas_video_material(
             status_code=502,
             code="material_reupload_unreachable",
         ) from uploaded_error
+    if uploaded_type_mismatch:
+        raise canvas_video_material_content_type_error(
+            kind,
+            uploaded_type_mismatch,
+            uploaded=True,
+        )
     if not 200 <= uploaded_status < 300:
         raise canvas_video_material_error(
             f"素材重新上传后仍无法加载（HTTP {uploaded_status}），已停止创建视频任务。",
@@ -10922,6 +11017,7 @@ async def preflight_canvas_video_material(
         "kind": kind,
         "refreshed": True,
         "status_code": uploaded_status,
+        "content_type": str(uploaded_probe.get("content_type") or ""),
     }
 
 

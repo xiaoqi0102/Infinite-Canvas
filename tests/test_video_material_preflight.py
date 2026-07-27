@@ -2,7 +2,7 @@ import asyncio
 import os
 import tempfile
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 os.environ.setdefault("INFINITE_CANVAS_SKIP_STATIC_SYNC", "1")
 
@@ -469,6 +469,139 @@ class VideoMaterialPreflightTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(result), len(materials))
         self.assertGreater(max_active, 1)
         self.assertLessEqual(max_active, 2)
+
+    async def test_public_material_rejects_mismatched_content_type(self):
+        material = main.CanvasVideoMaterialPreflightItem(
+            url="https://files.example/material.png",
+            kind="image",
+        )
+        with patch(
+            "main.public_http_probe",
+            new=AsyncMock(return_value={
+                "status_code": 200,
+                "content_type": "text/html; charset=utf-8",
+            }),
+        ):
+            with self.assertRaises(main.HTTPException) as caught:
+                await main.preflight_canvas_video_material(material)
+
+        self.assertEqual(caught.exception.status_code, 400)
+        self.assertEqual(
+            caught.exception.detail["code"],
+            "material_content_type_mismatch",
+        )
+        self.assertIn("text/html", caught.exception.detail["message"])
+
+    async def test_public_material_accepts_generic_binary_content_type(self):
+        material = main.CanvasVideoMaterialPreflightItem(
+            url="https://files.example/material.mp4",
+            kind="video",
+        )
+        with patch(
+            "main.public_http_probe",
+            new=AsyncMock(return_value={
+                "status_code": 200,
+                "content_type": "application/octet-stream",
+            }),
+        ):
+            result = await main.preflight_canvas_video_material(material)
+
+        self.assertEqual(result["url"], material.url)
+        self.assertFalse(result["refreshed"])
+
+    async def test_mismatched_public_material_reuploads_local_copy(self):
+        material = main.CanvasVideoMaterialPreflightItem(
+            url="https://files.example/material.mp4",
+            source_url="/assets/material.mp4",
+            kind="video",
+        )
+        upload = AsyncMock(return_value={
+            "url": "https://files.example/refreshed.mp4",
+            "service": "litterbox",
+        })
+        probe = AsyncMock(side_effect=[
+            {"status_code": 200, "content_type": "image/png"},
+            {"status_code": 200, "content_type": "video/mp4"},
+        ])
+        with (
+            patch("main.cached_canvas_video_upload", return_value=None),
+            patch("main.upload_local_video_to_cloud", new=upload),
+            patch(
+                "main.remember_canvas_video_upload",
+                side_effect=lambda source_url, _service, uploaded: uploaded,
+            ),
+            patch("main.public_http_probe", new=probe),
+        ):
+            result = await main.preflight_canvas_video_material(material)
+
+        self.assertTrue(result["refreshed"])
+        self.assertEqual(result["url"], "https://files.example/refreshed.mp4")
+        upload.assert_awaited_once_with(material.source_url, "auto")
+
+    async def test_uploaded_material_rejects_mismatched_content_type(self):
+        material = main.CanvasVideoMaterialPreflightItem(
+            url="/assets/material.mp3",
+            source_url="/assets/material.mp3",
+            kind="audio",
+        )
+        upload = AsyncMock(return_value={
+            "url": "https://files.example/material.mp3",
+            "service": "litterbox",
+        })
+        with (
+            patch("main.cached_canvas_video_upload", return_value=None),
+            patch("main.upload_local_video_to_cloud", new=upload),
+            patch(
+                "main.public_http_probe",
+                new=AsyncMock(return_value={
+                    "status_code": 200,
+                    "content_type": "application/json",
+                }),
+            ),
+        ):
+            with self.assertRaises(main.HTTPException) as caught:
+                await main.preflight_canvas_video_material(material)
+
+        self.assertEqual(caught.exception.status_code, 502)
+        self.assertEqual(
+            caught.exception.detail["code"],
+            "material_content_type_mismatch",
+        )
+
+    async def test_mismatched_cached_content_type_forces_new_upload(self):
+        material = main.CanvasVideoMaterialPreflightItem(
+            url="/assets/material.mp4",
+            source_url="/assets/material.mp4",
+            kind="video",
+        )
+        upload = AsyncMock(return_value={
+            "url": "https://files.example/refreshed.mp4",
+            "service": "litterbox",
+        })
+        forget = Mock()
+        probe = AsyncMock(side_effect=[
+            {"status_code": 200, "content_type": "text/html"},
+            {"status_code": 200, "content_type": "video/mp4"},
+        ])
+        with (
+            patch("main.cached_canvas_video_upload", return_value={
+                "url": "https://files.example/cached.mp4",
+                "cache_hit": True,
+                "cache_key": "cached-key",
+            }),
+            patch("main.forget_canvas_video_upload", new=forget),
+            patch("main.upload_local_video_to_cloud", new=upload),
+            patch(
+                "main.remember_canvas_video_upload",
+                side_effect=lambda source_url, _service, uploaded: uploaded,
+            ),
+            patch("main.public_http_probe", new=probe),
+        ):
+            result = await main.preflight_canvas_video_material(material)
+
+        self.assertEqual(result["url"], "https://files.example/refreshed.mp4")
+        forget.assert_called_once_with("cached-key")
+        upload.assert_awaited_once_with(material.source_url, "auto")
 
 
 if __name__ == "__main__":

@@ -412,6 +412,7 @@ PROMPT_LIBRARY_PATH = os.path.join(DATA_DIR, "prompt_libraries.json")
 API_PROVIDERS_FILE = os.path.join(DATA_DIR, "api_providers.json")
 RUNNINGHUB_WORKFLOW_STORE_FILE = os.path.join(DATA_DIR, "runninghub_workflows.json")
 CANVAS_VIDEO_TASKS_FILE = os.path.join(DATA_DIR, "canvas_video_tasks.json")
+CANVAS_VIDEO_UPLOAD_CACHE_FILE = os.path.join(DATA_DIR, "canvas_video_upload_cache.json")
 SHARED_FOLDERS_FILE = os.path.join(DATA_DIR, "shared_folders.json")
 CLOUD_SYNC_CONFIG_FILE = os.path.join(DATA_DIR, "cloud_sync_config.json")
 CLOUD_SYNC_BACKUP_DIR = os.path.join(DATA_DIR, "cloud_sync_backups")
@@ -986,6 +987,10 @@ APIMART_IMAGE_POLL_INTERVAL = float(os.getenv("APIMART_IMAGE_POLL_INTERVAL", "5"
 APIMART_IMAGE_INITIAL_POLL_DELAY = float(os.getenv("APIMART_IMAGE_INITIAL_POLL_DELAY", "10"))
 VIDEO_POLL_TIMEOUT = float(os.getenv("VIDEO_POLL_TIMEOUT", "7200"))
 VIDEO_POLL_INTERVAL = 25.0
+VIDEO_MATERIAL_UPLOAD_CACHE_TTL = max(
+    0.0,
+    float(os.getenv("VIDEO_MATERIAL_UPLOAD_CACHE_TTL", str(24 * 60 * 60))),
+)
 ONLINE_IMAGE_PROMPT_MAX_LENGTH = int(os.getenv("ONLINE_IMAGE_PROMPT_MAX_LENGTH", "20000"))
 VIDEO_PROMPT_MAX_LENGTH = int(os.getenv("VIDEO_PROMPT_MAX_LENGTH", "4000"))
 LLM_MESSAGE_MAX_LENGTH = int(os.getenv("LLM_MESSAGE_MAX_LENGTH", "20000"))
@@ -10561,6 +10566,159 @@ async def upload_local_video_to_temp_sh(ref_url: str) -> Dict[str, str]:
     return await upload_local_video_to_cloud(ref_url, "auto")
 
 
+CANVAS_VIDEO_UPLOAD_CACHE_LOCK = RLock()
+CANVAS_VIDEO_UPLOAD_CACHE_MAX_ENTRIES = 500
+
+
+def canvas_video_upload_cache_context(source_url: str, service: str) -> Tuple[str, str]:
+    path = local_media_path_for_cloud_upload(source_url)
+    stat = os.stat(path)
+    requested_service = str(service or "auto").strip().lower() or "auto"
+    identity = json.dumps({
+        "path": os.path.normcase(os.path.abspath(path)),
+        "size": stat.st_size,
+        "mtime_ns": stat.st_mtime_ns,
+        "service": requested_service,
+    }, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest(), path
+
+
+def load_canvas_video_upload_cache() -> Dict[str, Dict[str, Any]]:
+    if not os.path.exists(CANVAS_VIDEO_UPLOAD_CACHE_FILE):
+        return {}
+    try:
+        with open(CANVAS_VIDEO_UPLOAD_CACHE_FILE, "r", encoding="utf-8") as handle:
+            raw = json.load(handle)
+    except Exception as exc:
+        print(f"读取视频素材上传缓存失败: {exc}")
+        return {}
+    entries = raw.get("entries") if isinstance(raw, dict) else {}
+    if not isinstance(entries, dict):
+        return {}
+    return {
+        str(key): dict(value)
+        for key, value in entries.items()
+        if key and isinstance(value, dict)
+    }
+
+
+def write_canvas_video_upload_cache(entries: Dict[str, Dict[str, Any]]) -> None:
+    ordered = sorted(
+        entries.items(),
+        key=lambda item: float(item[1].get("created_at") or 0),
+        reverse=True,
+    )[:CANVAS_VIDEO_UPLOAD_CACHE_MAX_ENTRIES]
+    write_json_atomic(CANVAS_VIDEO_UPLOAD_CACHE_FILE, {
+        "version": 1,
+        "entries": dict(ordered),
+    })
+
+
+def canvas_video_upload_expires_at(uploaded: Dict[str, Any], now: float) -> float:
+    try:
+        explicit = float(uploaded.get("expires_at") or 0)
+    except (TypeError, ValueError):
+        explicit = 0.0
+    if explicit > now:
+        return explicit
+    text = str(uploaded.get("expires") or "").strip().lower()
+    match = re.fullmatch(r"(\d+(?:\.\d+)?)\s*(s|sec|secs|second|seconds|m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days)", text)
+    if match:
+        value = float(match.group(1))
+        unit = match.group(2)
+        multiplier = (
+            86400 if unit in {"d", "day", "days"}
+            else 3600 if unit in {"h", "hr", "hrs", "hour", "hours"}
+            else 60 if unit in {"m", "min", "mins", "minute", "minutes"}
+            else 1
+        )
+        return now + value * multiplier
+    return now + VIDEO_MATERIAL_UPLOAD_CACHE_TTL
+
+
+def cached_canvas_video_upload(source_url: str, service: str) -> Optional[Dict[str, Any]]:
+    try:
+        cache_key, _ = canvas_video_upload_cache_context(source_url, service)
+    except (HTTPException, OSError):
+        return None
+    now = time.time()
+    try:
+        with CANVAS_VIDEO_UPLOAD_CACHE_LOCK:
+            entries = load_canvas_video_upload_cache()
+            cached = dict(entries.get(cache_key) or {})
+            expires_at = float(cached.get("expires_at") or 0)
+            if not cached.get("url") or expires_at <= now + max(300.0, VIDEO_POLL_TIMEOUT):
+                if cache_key in entries:
+                    entries.pop(cache_key, None)
+                    write_canvas_video_upload_cache(entries)
+                return None
+    except (OSError, TypeError, ValueError) as exc:
+        print(f"读取视频素材上传缓存条目失败: {exc}")
+        return None
+    return {
+        **cached,
+        "source": source_url,
+        "cache_key": cache_key,
+        "cache_hit": True,
+    }
+
+
+def remember_canvas_video_upload(
+    source_url: str,
+    service: str,
+    uploaded: Dict[str, Any],
+) -> Dict[str, Any]:
+    try:
+        cache_key, path = canvas_video_upload_cache_context(source_url, service)
+        now = time.time()
+        entry = {
+            "url": str(uploaded.get("url") or "").strip(),
+            "service": str(uploaded.get("service") or service or "auto").strip(),
+            "expires": str(uploaded.get("expires") or "").strip(),
+            "expires_at": canvas_video_upload_expires_at(uploaded, now),
+            "created_at": now,
+            "name": str(uploaded.get("name") or os.path.basename(path)).strip(),
+        }
+        with CANVAS_VIDEO_UPLOAD_CACHE_LOCK:
+            entries = load_canvas_video_upload_cache()
+            entries[cache_key] = entry
+            write_canvas_video_upload_cache(entries)
+    except HTTPException:
+        return {
+            **uploaded,
+            "source": source_url,
+            "cache_hit": False,
+        }
+    except (OSError, TypeError, ValueError) as exc:
+        print(f"保存视频素材上传缓存失败: {exc}")
+        return {
+            **uploaded,
+            "source": source_url,
+            "cache_hit": False,
+        }
+    return {
+        **uploaded,
+        **entry,
+        "source": source_url,
+        "cache_key": cache_key,
+        "cache_hit": False,
+    }
+
+
+def forget_canvas_video_upload(cache_key: str) -> None:
+    if not cache_key:
+        return
+    try:
+        with CANVAS_VIDEO_UPLOAD_CACHE_LOCK:
+            entries = load_canvas_video_upload_cache()
+            if cache_key not in entries:
+                return
+            entries.pop(cache_key, None)
+            write_canvas_video_upload_cache(entries)
+    except OSError as exc:
+        print(f"清理视频素材上传缓存失败: {exc}")
+
+
 def canvas_video_material_error(
     message: str,
     message_en: str,
@@ -10643,7 +10801,9 @@ async def preflight_canvas_video_material(
         )
 
     try:
-        uploaded = await upload_local_video_to_cloud(source_url, service)
+        uploaded = cached_canvas_video_upload(source_url, service)
+        if not uploaded:
+            uploaded = await upload_local_video_to_cloud(source_url, service)
     except HTTPException as exc:
         raise canvas_video_material_error(
             f"素材已失效，自动重新上传失败：{exc.detail}",
@@ -10659,16 +10819,47 @@ async def preflight_canvas_video_material(
             status_code=502,
             code="material_reupload_url_missing",
         )
+
+    uploaded_error = None
     try:
         uploaded_probe = await public_http_probe(uploaded_url)
         uploaded_status = int(uploaded_probe.get("status_code") or 0)
     except (UnsafePublicUrlError, httpx.HTTPError, OSError) as exc:
+        uploaded_status = 0
+        uploaded_error = exc
+    if (uploaded_error or not 200 <= uploaded_status < 300) and uploaded.get("cache_hit"):
+        forget_canvas_video_upload(str(uploaded.get("cache_key") or ""))
+        try:
+            uploaded = await upload_local_video_to_cloud(source_url, service)
+        except HTTPException as exc:
+            raise canvas_video_material_error(
+                f"素材已失效，自动重新上传失败：{exc.detail}",
+                "The material is expired, and the automatic re-upload failed.",
+                status_code=exc.status_code,
+                code="material_reupload_failed",
+            ) from exc
+        uploaded_url = str(uploaded.get("url") or "").strip()
+        if not uploaded_url or uploaded_url == source_url:
+            raise canvas_video_material_error(
+                "素材已失效，但云端上传没有返回新的公网链接，已停止创建视频任务。",
+                "The material is expired, but the cloud upload did not return a new public URL. The video task was not created.",
+                status_code=502,
+                code="material_reupload_url_missing",
+            )
+        uploaded_error = None
+        try:
+            uploaded_probe = await public_http_probe(uploaded_url)
+            uploaded_status = int(uploaded_probe.get("status_code") or 0)
+        except (UnsafePublicUrlError, httpx.HTTPError, OSError) as exc:
+            uploaded_status = 0
+            uploaded_error = exc
+    if uploaded_error:
         raise canvas_video_material_error(
-            f"素材重新上传后仍无法加载：{exc}",
+            f"素材重新上传后仍无法加载：{uploaded_error}",
             "The material is still unreachable after re-upload.",
             status_code=502,
             code="material_reupload_unreachable",
-        ) from exc
+        ) from uploaded_error
     if not 200 <= uploaded_status < 300:
         raise canvas_video_material_error(
             f"素材重新上传后仍无法加载（HTTP {uploaded_status}），已停止创建视频任务。",
@@ -10676,6 +10867,8 @@ async def preflight_canvas_video_material(
             status_code=502,
             code="material_reupload_unreachable",
         )
+    if not uploaded.get("cache_hit"):
+        uploaded = remember_canvas_video_upload(source_url, service, uploaded)
     return {
         **uploaded,
         "url": uploaded_url,

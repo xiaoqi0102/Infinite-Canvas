@@ -1,4 +1,5 @@
 import os
+import tempfile
 import unittest
 from unittest.mock import AsyncMock, patch
 
@@ -256,6 +257,122 @@ class VideoMaterialPreflightTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(set(main.CANVAS_TASKS), task_ids_before)
         persist.assert_not_called()
         create_task.assert_not_called()
+
+    async def test_local_material_reuses_persisted_upload_cache(self):
+        material = main.CanvasVideoMaterialPreflightItem(
+            url="/assets/reference.png",
+            source_url="/assets/reference.png",
+            kind="image",
+        )
+        uploaded_url = "https://files.example/reference.png"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            media_path = os.path.join(temp_dir, "reference.png")
+            cache_path = os.path.join(temp_dir, "canvas_video_upload_cache.json")
+            with open(media_path, "wb") as handle:
+                handle.write(b"image")
+            upload = AsyncMock(return_value={
+                "url": uploaded_url,
+                "source": material.source_url,
+                "service": "litterbox",
+                "expires": "72h",
+            })
+            with (
+                patch("main.CANVAS_VIDEO_UPLOAD_CACHE_FILE", cache_path),
+                patch("main.local_media_path_for_cloud_upload", return_value=media_path),
+                patch("main.upload_local_video_to_cloud", new=upload),
+                patch(
+                    "main.public_http_probe",
+                    new=AsyncMock(return_value={"status_code": 200}),
+                ),
+            ):
+                first = await main.preflight_canvas_video_material(material)
+                second = await main.preflight_canvas_video_material(material)
+
+        self.assertFalse(first["cache_hit"])
+        self.assertTrue(second["cache_hit"])
+        self.assertEqual(second["url"], uploaded_url)
+        upload.assert_awaited_once_with(material.source_url, "auto")
+
+    async def test_local_file_change_invalidates_upload_cache(self):
+        material = main.CanvasVideoMaterialPreflightItem(
+            url="/assets/reference.png",
+            source_url="/assets/reference.png",
+            kind="image",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            media_path = os.path.join(temp_dir, "reference.png")
+            cache_path = os.path.join(temp_dir, "canvas_video_upload_cache.json")
+            with open(media_path, "wb") as handle:
+                handle.write(b"first")
+            upload = AsyncMock(side_effect=[
+                {
+                    "url": "https://files.example/first.png",
+                    "service": "litterbox",
+                    "expires": "72h",
+                },
+                {
+                    "url": "https://files.example/second.png",
+                    "service": "litterbox",
+                    "expires": "72h",
+                },
+            ])
+            with (
+                patch("main.CANVAS_VIDEO_UPLOAD_CACHE_FILE", cache_path),
+                patch("main.local_media_path_for_cloud_upload", return_value=media_path),
+                patch("main.upload_local_video_to_cloud", new=upload),
+                patch(
+                    "main.public_http_probe",
+                    new=AsyncMock(return_value={"status_code": 200}),
+                ),
+            ):
+                first = await main.preflight_canvas_video_material(material)
+                with open(media_path, "ab") as handle:
+                    handle.write(b"-changed")
+                second = await main.preflight_canvas_video_material(material)
+
+        self.assertEqual(first["url"], "https://files.example/first.png")
+        self.assertEqual(second["url"], "https://files.example/second.png")
+        self.assertEqual(upload.await_count, 2)
+
+    async def test_unreachable_cached_url_is_reuploaded(self):
+        material = main.CanvasVideoMaterialPreflightItem(
+            url="/assets/reference.png",
+            source_url="/assets/reference.png",
+            kind="image",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            media_path = os.path.join(temp_dir, "reference.png")
+            cache_path = os.path.join(temp_dir, "canvas_video_upload_cache.json")
+            with open(media_path, "wb") as handle:
+                handle.write(b"image")
+            upload = AsyncMock(side_effect=[
+                {
+                    "url": "https://files.example/expired.png",
+                    "service": "litterbox",
+                    "expires": "72h",
+                },
+                {
+                    "url": "https://files.example/refreshed.png",
+                    "service": "litterbox",
+                    "expires": "72h",
+                },
+            ])
+            probe = AsyncMock(side_effect=[
+                {"status_code": 200},
+                {"status_code": 404},
+                {"status_code": 200},
+            ])
+            with (
+                patch("main.CANVAS_VIDEO_UPLOAD_CACHE_FILE", cache_path),
+                patch("main.local_media_path_for_cloud_upload", return_value=media_path),
+                patch("main.upload_local_video_to_cloud", new=upload),
+                patch("main.public_http_probe", new=probe),
+            ):
+                await main.preflight_canvas_video_material(material)
+                result = await main.preflight_canvas_video_material(material)
+
+        self.assertEqual(result["url"], "https://files.example/refreshed.png")
+        self.assertEqual(upload.await_count, 2)
 
 
 if __name__ == "__main__":

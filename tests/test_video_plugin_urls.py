@@ -856,16 +856,18 @@ class CloudMediaUploadTests(unittest.IsolatedAsyncioTestCase):
 
     def test_configured_sudashui_provider_requires_complete_configuration_and_prefers_primary(self):
         providers = [
-            {"id": "disabled", "enabled": False, "base_url": "https://api.example.com", "video_request_mode": main.SUDASHUI_VIDEO_REQUEST_MODE},
+            {"id": "disabled", "enabled": False, "base_url": "https://api.sudashuiapi.com", "video_request_mode": main.SUDASHUI_VIDEO_REQUEST_MODE},
             {"id": "no-base", "enabled": True, "base_url": "", "video_request_mode": main.SUDASHUI_VIDEO_REQUEST_MODE},
-            {"id": "no-key", "enabled": True, "base_url": "https://api.example.com", "video_request_mode": main.SUDASHUI_VIDEO_REQUEST_MODE},
-            {"id": "secondary", "enabled": True, "primary": False, "base_url": "https://api.example.com", "video_request_mode": main.SUDASHUI_VIDEO_REQUEST_MODE},
-            {"id": "primary", "enabled": True, "primary": True, "base_url": "https://api.example.com", "video_request_mode": main.SUDASHUI_VIDEO_REQUEST_MODE},
+            {"id": "no-key", "enabled": True, "base_url": "https://api.sudashuiapi.com", "video_request_mode": main.SUDASHUI_VIDEO_REQUEST_MODE},
+            # 非官方域的第三方中转即使选了 sudashui 模式也不得进入上传列表,防止密钥外发
+            {"id": "third-party", "enabled": True, "base_url": "https://api.example.com", "video_request_mode": main.SUDASHUI_VIDEO_REQUEST_MODE},
+            {"id": "secondary", "enabled": True, "primary": False, "base_url": "https://api.sudashuiapi.com", "video_request_mode": main.SUDASHUI_VIDEO_REQUEST_MODE},
+            {"id": "primary", "enabled": True, "primary": True, "base_url": "https://api.sudashuiapi.com", "video_request_mode": main.SUDASHUI_VIDEO_REQUEST_MODE},
         ]
 
         with (
             patch.object(main, "load_api_providers", return_value=providers),
-            patch.object(main, "provider_env_key_value", side_effect=lambda provider_id: "key" if provider_id in {"disabled", "no-base", "secondary", "primary"} else ""),
+            patch.object(main, "provider_env_key_value", side_effect=lambda provider_id: "key" if provider_id in {"disabled", "no-base", "third-party", "secondary", "primary"} else ""),
         ):
             configured = main.configured_sudashui_upload_providers()
 

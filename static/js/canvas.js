@@ -6446,7 +6446,11 @@ function renderPendingOutput(pending){
             <button class="output-del" title="${tr('common.delete')}">×</button>
         </div>`;
     }
-    return `<div class="output-img-wrap loading-wrap" data-pending-id="${escapeAttr(pending.id)}"${pendingOutputStyle(pending)}><span class="output-time-pill running">${formatRunDuration(nowMs() - Number(pending.startedAt || nowMs()))}</span><div class="output-spinner"></div><button class="output-del" title="${tr('common.delete')}">×</button></div>`;
+    // 瞬断重试中：给用户可见提示，恢复后自动清除
+    const retrySub = pending?.networkRetry
+        ? `<div class="output-pending-state"><div class="output-pending-sub">${escapeHtml(tr('canvas.videoNetworkRetrying'))}</div></div>`
+        : '';
+    return `<div class="output-img-wrap loading-wrap" data-pending-id="${escapeAttr(pending.id)}"${pendingOutputStyle(pending)}><span class="output-time-pill running">${formatRunDuration(nowMs() - Number(pending.startedAt || nowMs()))}</span><div class="output-spinner"></div>${retrySub}<button class="output-del" title="${tr('common.delete')}">×</button></div>`;
 }
 function captureOutputScrolls(){
     const state = new Map();
@@ -14480,21 +14484,50 @@ async function pollCanvasVideoTask(taskId, options={}){
     if(!taskId) return 'failed';
     if(activeCanvasTaskPolls.has(taskId)) return 'running';
     activeCanvasTaskPolls.add(taskId);
+    // 瞬断容错：与后端连接连续失败按 5/10/20/30/30 秒退避，连续 5 次耗尽才终态化
+    const retryDelays = [5000, 10000, 20000, 30000, 30000];
+    // 轮询软上限：超过后转入可恢复失败（任务未丢失，可稍后手动查询）
+    const pollDeadlineMs = 7260 * 1000;
+    const pollStartedAt = nowMs();
+    let networkFailures = 0;
+    let lastLogSignature = '';
     try {
         while(true){
             const found = findPendingTask(taskId);
             if(!found) return 'missing';
             const cascadeTargetId = String(options?.cascadeTargetId || found?.pending?.cascadeTargetId || '');
-            if(cascadeTargetId) ensureCascadeActive(cascadeTargetId);
-            const res = await cascadeFetch(`/api/canvas-video-tasks/${encodeURIComponent(taskId)}`, {}, {cascadeTargetId});
-            if(!res.ok){
-                if(res.status === 404){
-                    failCanvasVideoTask(taskId, cascadeBackendRestartMessage(), missingCanvasVideoTaskData());
+            let data = null;
+            try {
+                if(cascadeTargetId) ensureCascadeActive(cascadeTargetId);
+                const res = await cascadeFetch(`/api/canvas-video-tasks/${encodeURIComponent(taskId)}`, {}, {cascadeTargetId});
+                if(!res.ok){
+                    if(res.status === 404){
+                        failCanvasVideoTask(taskId, cascadeBackendRestartMessage(), missingCanvasVideoTaskData());
+                        return 'failed';
+                    }
+                    throw new Error(await responseErrorMessage(res, tr('canvas.videoFailed')));
+                }
+                data = await res.json();
+            } catch(pollErr) {
+                // 级联中止直接交给外层统一处理，不计入瞬断次数
+                if(isCascadeAbortError(pollErr)) throw pollErr;
+                networkFailures += 1;
+                if(networkFailures >= retryDelays.length){
+                    // 不带终态 taskData：走可恢复保留分支，任务未丢失
+                    failCanvasVideoTask(taskId, tr('canvas.videoNetworkRetryExhausted'));
                     return 'failed';
                 }
-                throw new Error(await responseErrorMessage(res, tr('canvas.videoFailed')));
+                found.pending.networkRetry = {count:networkFailures};
+                refreshNodes([found.host.id]);
+                await sleep(retryDelays[networkFailures - 1]);
+                continue;
             }
-            const data = await res.json();
+            networkFailures = 0;
+            let retryStateCleared = false;
+            if(found.pending.networkRetry){
+                delete found.pending.networkRetry;
+                retryStateCleared = true;
+            }
             found.pending.canvasTaskStatus = data.status || 'polling';
             found.pending.recoverTaskId = data.upstream_task_id || data.task_id || data.submit_id || found.pending.recoverTaskId || '';
             found.pending.retryAfter = data.retry_after || null;
@@ -14507,13 +14540,21 @@ async function pollCanvasVideoTask(taskId, options={}){
                 provider_id:data.provider_id || found.pending.providerId || '',
             };
             pendingRun.requestDetails = data.request_details || pendingRun.requestDetails || null;
-            addGenerationLog({
-                run:pendingRun,
-                outputs:[],
-                runMs:nowMs() - Number(found.pending.startedAt || nowMs()),
-                status:data.status || 'polling',
-                error:data.status === 'failed' ? (data.error || tr('canvas.videoFailed')) : '',
-            });
+            // 与图片轮询同构：状态签名未变化时不重复刷日志与节点，避免刷屏
+            const attempts = data.request_details?.attempts || [];
+            const latestAttempt = attempts[attempts.length - 1] || {};
+            const logSignature = JSON.stringify([data.status || 'polling', attempts.length, latestAttempt.response || null, data.error || '']);
+            const signatureChanged = logSignature !== lastLogSignature;
+            if(signatureChanged){
+                lastLogSignature = logSignature;
+                addGenerationLog({
+                    run:pendingRun,
+                    outputs:[],
+                    runMs:nowMs() - Number(found.pending.startedAt || nowMs()),
+                    status:data.status || 'polling',
+                    error:data.status === 'failed' ? (data.error || tr('canvas.videoFailed')) : '',
+                });
+            }
             if(data.status === 'succeeded'){
                 completeCanvasVideoTask(taskId, data.result || data);
                 return 'succeeded';
@@ -14522,13 +14563,22 @@ async function pollCanvasVideoTask(taskId, options={}){
                 failCanvasVideoTask(taskId, data.error || tr('canvas.videoFailed'), data);
                 return 'failed';
             }
+            let failStateCleared = false;
             if(found.pending.failed){
                 found.pending.failed = false;
                 found.pending.querying = false;
                 found.pending.error = '';
+                failStateCleared = true;
             }
-            refreshNodes([found.host.id]);
-            await sleep(5000);
+            if(signatureChanged || retryStateCleared || failStateCleared) refreshNodes([found.host.id]);
+            if(nowMs() - pollStartedAt > pollDeadlineMs){
+                // 软上限：不带终态数据，转入可恢复保留
+                failCanvasVideoTask(taskId, tr('canvas.videoPollTimeout'));
+                return 'failed';
+            }
+            // 正常轮询间隔：后端 retry_after 夹在 [5s,30s]，缺省 5s
+            const retryAfterMs = Math.min(30000, Math.max(5000, (Number(data.retry_after) || 5) * 1000));
+            await sleep(retryAfterMs);
         }
     } catch(err) {
         const message = normalizeCanvasTaskError(err, tr('canvas.videoFailed'));

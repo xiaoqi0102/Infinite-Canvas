@@ -627,6 +627,64 @@ async function testPollTerminalAndRecoverableErrors() {
     assert.equal(network.calls.fail[0][2], undefined, '网络异常不能伪装成不可恢复终态');
 }
 
+function createPollRetrySandbox(fetchImpl) {
+    const calls = {fail:[], complete:[], fetches:0};
+    const pending = {canvasTaskId:'task-1'};
+    const sandbox = {
+        activeCanvasTaskPolls:new Set(),
+        findPendingTask:() => ({host:{id:'output-1'}, out:{id:'output-1'}, pending}),
+        ensureCascadeActive:() => {},
+        cascadeFetch:async () => {
+            calls.fetches += 1;
+            return fetchImpl(calls.fetches);
+        },
+        cascadeBackendRestartMessage:() => 'missing task',
+        missingCanvasVideoTaskData:() => ({status:'failed', status_code:404}),
+        responseErrorMessage:async () => 'http error',
+        tr:key => key,
+        normalizeCanvasTaskError:err => err.message,
+        isCascadeAbortError:err => Boolean(err?.isCascadeAbort),
+        detachCanvasVideoTaskFromCascade:() => true,
+        continueCanvasVideoPollDetached:() => {},
+        failCanvasVideoTask:(...args) => calls.fail.push(args),
+        completeCanvasVideoTask:(...args) => calls.complete.push(args),
+        refreshNodes:() => {},
+        addGenerationLog:() => {},
+        nowMs:() => 0,
+        sleep:async () => {},
+    };
+    vm.runInNewContext(
+        sourceBetween('async function pollCanvasVideoTask', 'async function waitCanvasVideoTaskResult'),
+        sandbox,
+    );
+    return {sandbox, calls, pending};
+}
+
+async function testPollTransientErrorRecovery() {
+    const state = createPollRetrySandbox(count => {
+        if(count <= 2) throw new Error('Failed to fetch');
+        return {ok:true, json:async () => ({status:'succeeded', result:{videos:['/output/retry.mp4']}})};
+    });
+    const status = await state.sandbox.pollCanvasVideoTask('task-1', {});
+    assert.equal(status, 'succeeded', '瞬断两次后恢复必须走成功终态');
+    assert.equal(state.calls.fetches, 3, '两次瞬断加一次成功共三次请求');
+    assert.equal(state.calls.fail.length, 0, '瞬断未耗尽不能触发失败清理');
+    assert.equal(state.calls.complete.length, 1);
+    assert.ok(!state.pending.networkRetry, '恢复后必须清除重试提示状态');
+}
+
+async function testPollTransientErrorExhaustion() {
+    const state = createPollRetrySandbox(() => {
+        throw new Error('Failed to fetch');
+    });
+    const status = await state.sandbox.pollCanvasVideoTask('task-1', {});
+    assert.equal(status, 'failed');
+    assert.equal(state.calls.fetches, 5, '连续错误必须恰好尝试 5 次后放弃');
+    assert.equal(state.calls.fail.length, 1);
+    assert.equal(state.calls.fail[0][1], 'canvas.videoNetworkRetryExhausted');
+    assert.equal(state.calls.fail[0][2], undefined, '瞬断耗尽不能伪装成不可恢复终态');
+}
+
 function testPendingDeletePersists() {
     const pending = {id:'pending-1', run:{node:{id:'video-1'}}};
     const output = {id:'output-1', type:'output', _pending:[pending]};
@@ -732,6 +790,8 @@ function testRefreshRunNodesRefreshesConnectedGeneratorInputs() {
     testDetachedTaskRemainsTracked();
     testConcurrentPendingStateAggregation();
     await testPollTerminalAndRecoverableErrors();
+    await testPollTransientErrorRecovery();
+    await testPollTransientErrorExhaustion();
     testPendingDeletePersists();
     testRenderOutputMediaVideoUsesItemMetadata();
     testRefreshRunNodesRefreshesConnectedGeneratorInputs();

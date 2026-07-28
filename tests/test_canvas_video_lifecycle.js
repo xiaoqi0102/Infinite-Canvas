@@ -598,7 +598,7 @@ async function runPollScenario({response, thrown, cascadeAbort=false}) {
         sleep:async () => {},
     };
     vm.runInNewContext(
-        sourceBetween('async function pollCanvasVideoTask', 'async function waitCanvasVideoTaskResult'),
+        sourceBetween('async function pollCanvasVideoTask', 'function completeCanvasVideoTask'),
         sandbox,
     );
     const status = await sandbox.pollCanvasVideoTask('task-1', {cascadeTargetId:'cascade-1'});
@@ -654,7 +654,7 @@ function createPollRetrySandbox(fetchImpl) {
         sleep:async () => {},
     };
     vm.runInNewContext(
-        sourceBetween('async function pollCanvasVideoTask', 'async function waitCanvasVideoTaskResult'),
+        sourceBetween('async function pollCanvasVideoTask', 'function completeCanvasVideoTask'),
         sandbox,
     );
     return {sandbox, calls, pending};

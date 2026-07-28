@@ -14592,42 +14592,6 @@ async function pollCanvasVideoTask(taskId, options={}){
         activeCanvasTaskPolls.delete(taskId);
     }
 }
-async function waitCanvasVideoTaskResult(taskId, options={}){
-    if(!taskId) throw new Error(tr('canvas.videoFailed'));
-    while(true){
-        const cascadeTargetId = cascadeTargetIdFromOptions(options);
-        if(cascadeTargetId) ensureCascadeActive(cascadeTargetId);
-        const res = await cascadeFetch(`/api/canvas-video-tasks/${encodeURIComponent(taskId)}`, {}, {cascadeTargetId});
-        if(!res.ok){
-            if(res.status === 404) throw new Error(cascadeBackendRestartMessage());
-            throw new Error(await responseErrorMessage(res, tr('canvas.videoFailed')));
-        }
-        const data = await res.json();
-        if(options?.run){
-            options.run.localTaskId = taskId;
-            options.run.request = {
-                ...(options.run.request || {}),
-                task_id:data.upstream_task_id || data.task_id || taskId,
-                provider_id:data.provider_id || '',
-            };
-            options.run.requestDetails = data.request_details || options.run.requestDetails || null;
-            addGenerationLog({
-                run:options.run,
-                outputs:[],
-                runMs:nowMs() - Number(options.startedAt || nowMs()),
-                status:data.status || 'polling',
-                error:data.status === 'failed' ? (data.error || tr('canvas.videoFailed')) : '',
-            });
-        }
-        if(data.status === 'succeeded') return data.result || data;
-        if(data.status === 'failed'){
-            const error = new Error(data.error || tr('canvas.videoFailed'));
-            error.requestDetails = data.request_details || null;
-            throw error;
-        }
-        await sleep(5000);
-    }
-}
 function completeCanvasVideoTask(taskId, result){
     const found = findPendingTask(taskId);
     if(!found) return;

@@ -98,7 +98,6 @@ git status
 - `resume_canvas_video_tasks_on_startup`
 - `createCanvasVideoTask`
 - `pollCanvasVideoTask`
-- `waitCanvasVideoTaskResult`
 - `completeCanvasVideoTask`
 - `failCanvasVideoTask`
 - `createSmartCanvasVideoTask`
@@ -363,7 +362,6 @@ INFINITE_CANVAS_SKIP_STATIC_SYNC
 ```text
 createCanvasVideoTask
 pollCanvasVideoTask
-waitCanvasVideoTaskResult
 completeCanvasVideoTask
 failCanvasVideoTask
 canvasTaskType:'online-video'

@@ -12083,7 +12083,13 @@ async function runVideoNode(nodeId, opts={}){
     const node = nodes.find(n => n.id === nodeId);
     if(!node) return;
     const existingVideoTasks = canvasVideoBlockingTasksForNode(nodeId);
-    if(existingVideoTasks.some(item => String(item.pending.canvasTaskStatus || '').toLowerCase() === 'preflight')) return;
+    if(existingVideoTasks.some(item => String(item.pending.canvasTaskStatus || '').toLowerCase() === 'preflight')){
+        const preflightMessage = tr('canvas.videoPendingExists');
+        // 级联模式下素材预检未完成不能静默返回，否则上游会把本节点误标为已完成
+        if(opts.cascade) throw new Error(preflightMessage);
+        setStatus(preflightMessage);
+        return;
+    }
     let allowConcurrentVideoRun = false;
     if(existingVideoTasks.length){
         syncCanvasVideoNodeState(node);

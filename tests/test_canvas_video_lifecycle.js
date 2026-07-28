@@ -196,6 +196,32 @@ async function testCascadeRejectsBlockingPending() {
     assert.equal(createCalls, 0, '已有未分离任务时级联不能重复提交');
 }
 
+async function testCascadeRejectsPreflightPending() {
+    const node = {id:'video-preflight', type:'video', running:false};
+    let createCalls = 0;
+    const sandbox = {
+        nodes:[node],
+        tr:key => key,
+        canvasVideoBlockingTasksForNode:() => [{pending:{canvasTaskId:'', canvasTaskStatus:'preflight'}}],
+        syncCanvasVideoNodeState:() => {},
+        setStatus:() => {},
+        createCanvasVideoTask:async () => {
+            createCalls += 1;
+        },
+    };
+    vm.runInNewContext(
+        sourceBetween('async function runVideoNode', 'async function uploadCanvasUrlToComfy'),
+        sandbox,
+    );
+
+    await assert.rejects(
+        sandbox.runVideoNode(node.id, {cascade:true}),
+        error => error.message === 'canvas.videoPendingExists',
+        '素材预检未完成时级联必须抛错而不是静默返回',
+    );
+    assert.equal(createCalls, 0, '预检未完成时不能重复提交任务');
+}
+
 async function testManualConcurrentVideoRunKeepsExistingPoll() {
     const node = {
         id:'video-concurrent',
@@ -783,6 +809,7 @@ function testRefreshRunNodesRefreshesConnectedGeneratorInputs() {
     testParallelFailureContextKeepsOriginalNode();
     await testIntermediateVideoTaskIsPersistedOnGenerator();
     await testCascadeRejectsBlockingPending();
+    await testCascadeRejectsPreflightPending();
     await testManualConcurrentVideoRunKeepsExistingPoll();
     await testRunningVideoNodeCanReachConcurrentGuard();
     testNodeHostedVideoTaskCompletesAndResumes();

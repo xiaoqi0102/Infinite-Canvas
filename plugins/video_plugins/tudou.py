@@ -21,6 +21,7 @@ import httpx
 from .common import (
     UnsafePublicUrlError,
     canonical_video_api_root,
+    humanize_video_task_failure,
     public_http_get,
     resolve_video_download_url,
     submit_video_http_request,
@@ -609,7 +610,7 @@ async def _poll_video(
             "next_poll_at": time.time() + delay,
         })
         if state in _FAILURE_STATUSES or _has_business_error(raw):
-            raise TudouProtocolError(502, f"Tudou 视频任务失败：{_failure_reason(raw)}")
+            raise TudouProtocolError(502, f"Tudou 视频任务失败：{humanize_video_task_failure(_failure_reason(raw))}")
         urls = _video_urls(raw, base_url)
         if state in _SUCCESS_STATUSES or (not state and urls):
             return await _save_result(raw, task_id, model, base_url, save_video)
@@ -662,7 +663,7 @@ async def generate_tudou_video(
     raw = _json_response(response, "创建任务")
     state = _status(raw)
     if state in _FAILURE_STATUSES or _has_business_error(raw):
-        raise TudouProtocolError(502, f"Tudou 视频任务失败：{_failure_reason(raw)}")
+        raise TudouProtocolError(502, f"Tudou 视频任务失败：{humanize_video_task_failure(_failure_reason(raw))}")
     task_id = _task_id(raw)
     urls = _video_urls(raw, root)
     if urls:

@@ -174,8 +174,10 @@ function bindCanvasPreviewImageFallbacks(root=document){
     root.querySelectorAll?.('video[data-remote-src]:not([data-remote-fallback-bound])').forEach(bindCanvasVideoSourceFallback);
 }
 const CANVAS_SELECTED_HIGH_RES_DELAY = 320;
+const CANVAS_HIGH_RES_ZOOM_THRESHOLD = 0.86;
 let canvasSelectedHighResTimer = 0;
 let canvasSelectedHighResSeq = 0;
+let canvasImageResolutionSyncTimer = 0;
 const canvasSelectedHighResLoaded = new Set();
 const canvasSelectedHighResLoading = new Map();
 function canvasImageEditorIsOpen(){
@@ -198,15 +200,27 @@ function preloadCanvasSelectedHighRes(src){
     canvasSelectedHighResLoading.set(src, task);
     return task;
 }
+function canvasViewportWantsHighRes(){
+    return Number(viewport?.scale || 1) >= CANVAS_HIGH_RES_ZOOM_THRESHOLD;
+}
+function canvasImageNearViewport(img){
+    if(!img?.isConnected || !board) return false;
+    const boardRect = board.getBoundingClientRect();
+    const rect = img.getBoundingClientRect();
+    const margin = 220;
+    return rect.right >= boardRect.left - margin
+        && rect.left <= boardRect.right + margin
+        && rect.bottom >= boardRect.top - margin
+        && rect.top <= boardRect.bottom + margin;
+}
 function syncCanvasSelectedImageResolution(root=nodesEl){
     const selectedImages = [];
+    const wantHighRes = canvasViewportWantsHighRes();
     root.querySelectorAll?.('.node img[data-preview-src][data-original-src]').forEach(img => {
         if(img.dataset.previewKind === 'video') return;
-        const nodeEl = img.closest('.node');
-        const selectedNode = Boolean(nodeEl?.dataset?.id && selected.has(nodeEl.dataset.id));
         const preview = img.dataset.previewSrc || '';
         const original = img.dataset.originalSrc || img.dataset.url || '';
-        if(!selectedNode){
+        if(!wantHighRes || !canvasImageNearViewport(img)){
             delete img.dataset.selectedHighResTarget;
             if(preview && img.getAttribute('src') !== preview) img.src = preview;
             return;
@@ -231,11 +245,17 @@ function syncCanvasSelectedImageResolution(root=nodesEl){
         if(seq !== canvasSelectedHighResSeq || canvasImageEditorIsOpen()) return;
         selectedImages.forEach(({img, target}) => {
             if(!img.isConnected || img.dataset.selectedHighResTarget !== target) return;
-            const nodeEl = img.closest('.node');
-            if(!nodeEl?.dataset?.id || !selected.has(nodeEl.dataset.id)) return;
+            if(!canvasViewportWantsHighRes() || !canvasImageNearViewport(img)) return;
             if(canvasSelectedHighResLoaded.has(target) && img.getAttribute('src') !== target) img.src = target;
         });
     }, CANVAS_SELECTED_HIGH_RES_DELAY);
+}
+function scheduleCanvasImageResolutionSync(root=nodesEl, delay=120){
+    if(canvasImageResolutionSyncTimer) clearTimeout(canvasImageResolutionSyncTimer);
+    canvasImageResolutionSyncTimer = setTimeout(() => {
+        canvasImageResolutionSyncTimer = 0;
+        syncCanvasSelectedImageResolution(root);
+    }, Math.max(0, Number(delay) || 0));
 }
 function applyLanguage(lang){
     if(lang && window.StudioI18n) StudioI18n.set(lang);
@@ -1323,6 +1343,7 @@ function applyViewport(){
     hidePromptMentionPreview();
     world.style.transform = `translate(${viewport.x}px, ${viewport.y}px) scale(${viewport.scale})`;
     scheduleMinimapViewportUpdate();
+    scheduleCanvasImageResolutionSync(nodesEl, 120);
 }
 function estimatedNodeRect(n){
     const el = nodesEl?.querySelector?.(`.node[data-id="${CSS.escape(n.id)}"]`);

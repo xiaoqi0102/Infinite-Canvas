@@ -334,6 +334,7 @@ async function testSmartCanvasCloudUploadBypassesTransientCache() {
         localDisplayUrlForMediaItem:ref => ref?.originalLocalUrl || ref?.sourceUrl || ref?.url || '',
         isCloudHostedMediaUrl:url => /^https?:\/\//i.test(String(url || '')),
         smartResponseErrorMessage:async () => '上传失败',
+        saveUrlsToAssetUrlLibrary:async () => {},
         fetch:async (_url, options) => {
             requests.push(JSON.parse(options.body));
             return jsonResponse({url:uploadedUrls.shift(), service:'sudashui'});
@@ -399,6 +400,7 @@ async function testSmartCanvasFailedRefreshDropsExpiredCache() {
         localDisplayUrlForMediaItem:ref => ref?.originalLocalUrl || ref?.sourceUrl || ref?.url || '',
         isCloudHostedMediaUrl:url => /^https?:\/\//i.test(String(url || '')),
         smartResponseErrorMessage:async () => '智能画布续传失败',
+        saveUrlsToAssetUrlLibrary:async () => {},
         fetch:async () => ({ok:false}),
         activeSettingsSubject:() => ({id:'smart-video-failed'}),
         savePromptDraftForCurrent:() => {},

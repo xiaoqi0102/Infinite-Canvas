@@ -77,6 +77,8 @@ let nodes = [];
 let selectedId = '';
 let selectedIds = [];
 let selectedImage = {nodeId:'', index:-1};
+const localUnsyncedNodeIds = new Set();
+const localDeletedNodeIds = new Set();
 let dragState = null;
 let loopInsertPreview = null;
 let selectionState = null;
@@ -104,6 +106,7 @@ let apiProviders = [];
 let comfyWorkflows = [];
 let comfyInstanceCount = 1;
 let assetLibrary = {categories:[]};
+let assetUrlLibrary = {items:[], updated_at:0};
 let assetLibraryOpen = false;
 let assetTab = 'image';
 let activeAssetCategoryId = '';
@@ -438,15 +441,11 @@ async function clipboardMatchesText(value){
 async function copyTextToClipboard(text){
     const value = String(text || '');
     if(!value) return false;
-    if(copyTextWithCopyEvent(value) || copyTextWithTextarea(value)){
-        const verified = await clipboardMatchesText(value);
-        return verified !== false;
-    }
+    if(copyTextWithCopyEvent(value) || copyTextWithTextarea(value)) return true;
     try {
         if(navigator.clipboard?.writeText && window.isSecureContext !== false){
             await navigator.clipboard.writeText(value);
-            const verified = await clipboardMatchesText(value);
-            return verified !== false;
+            return true;
         }
     } catch(_) {}
     return false;
@@ -656,9 +655,11 @@ function bindSmartPreviewImageFallbacks(root=document){
     root.querySelectorAll?.('video[data-remote-src]:not([data-remote-fallback-bound])').forEach(bindSmartVideoSourceFallback);
 }
 const SMART_SELECTED_HIGH_RES_DELAY = 320;
+const SMART_HIGH_RES_ZOOM_THRESHOLD = 0.86;
 let smartSelectedHighResTimer = 0;
 let smartSelectedHighResSeq = 0;
 let smartSelectedHighResNodeIds = new Set();
+let smartImageResolutionSyncTimer = 0;
 const smartSelectedHighResLoaded = new Set();
 const smartSelectedHighResLoading = new Map();
 function smartImageEditorIsOpen(){
@@ -693,20 +694,30 @@ function smartNodeElementsByIds(ids){
 }
 function smartNodeElementsForHighResSync(root){
     if(root && root !== world) return [root];
-    const ids = new Set([...smartSelectedHighResNodeIds, ...selectedNodeIds()]);
-    return smartNodeElementsByIds(ids);
+    return [world];
+}
+function smartViewportWantsHighRes(){
+    return Number(viewport?.scale || 1) >= SMART_HIGH_RES_ZOOM_THRESHOLD;
+}
+function smartImageNearViewport(img){
+    if(!img?.isConnected || !shell) return false;
+    const shellRect = shell.getBoundingClientRect();
+    const rect = img.getBoundingClientRect();
+    const margin = 220;
+    return rect.right >= shellRect.left - margin
+        && rect.left <= shellRect.right + margin
+        && rect.bottom >= shellRect.top - margin
+        && rect.top <= shellRect.bottom + margin;
 }
 function syncSmartSelectedImageResolution(root=null){
     const selectedImages = [];
+    const wantHighRes = smartViewportWantsHighRes();
     smartNodeElementsForHighResSync(root).forEach(scope => {
-        const nodeEl = scope?.classList?.contains('image-node') ? scope : scope?.closest?.('.image-node');
-        const nodeId = nodeEl?.dataset?.id || '';
-        const selectedNode = Boolean(nodeId && isNodeSelected(nodeId));
         scope.querySelectorAll?.('img[data-preview-src][data-original-src]').forEach(img => {
             if(img.dataset.previewKind === 'video') return;
             const preview = img.dataset.previewSrc || '';
             const original = img.dataset.originalSrc || '';
-            if(!selectedNode){
+            if(!wantHighRes || !smartImageNearViewport(img)){
                 delete img.dataset.selectedHighResTarget;
                 if(preview && img.getAttribute('src') !== preview) img.src = preview;
                 return;
@@ -724,7 +735,6 @@ function syncSmartSelectedImageResolution(root=null){
     });
     if(smartSelectedHighResTimer) clearTimeout(smartSelectedHighResTimer);
     const seq = ++smartSelectedHighResSeq;
-    smartSelectedHighResNodeIds = new Set(selectedNodeIds());
     if(!selectedImages.length || smartImageEditorIsOpen()) return;
     smartSelectedHighResTimer = setTimeout(async () => {
         smartSelectedHighResTimer = 0;
@@ -733,11 +743,17 @@ function syncSmartSelectedImageResolution(root=null){
         if(seq !== smartSelectedHighResSeq || smartImageEditorIsOpen()) return;
         selectedImages.forEach(({img, target}) => {
             if(!img.isConnected || img.dataset.selectedHighResTarget !== target) return;
-            const nodeEl = img.closest('.image-node');
-            if(!nodeEl?.dataset?.id || !isNodeSelected(nodeEl.dataset.id)) return;
+            if(!smartViewportWantsHighRes() || !smartImageNearViewport(img)) return;
             if(smartSelectedHighResLoaded.has(target) && img.getAttribute('src') !== target) img.src = target;
         });
     }, SMART_SELECTED_HIGH_RES_DELAY);
+}
+function scheduleSmartImageResolutionSync(root=world, delay=120){
+    if(smartImageResolutionSyncTimer) clearTimeout(smartImageResolutionSyncTimer);
+    smartImageResolutionSyncTimer = setTimeout(() => {
+        smartImageResolutionSyncTimer = 0;
+        syncSmartSelectedImageResolution(root);
+    }, Math.max(0, Number(delay) || 0));
 }
 function cloneSmartSettings(source=settings){
     try {
@@ -802,6 +818,7 @@ function mediaItemForStorage(item){
 function canvasForStorage(){
     const clean = JSON.parse(JSON.stringify(canvas || {}));
     clean.settings = settingsForStorage(canvasDefaultSmartSettings || initialSmartSettings);
+    clean.deleted_node_ids = [...localDeletedNodeIds].slice(-2000);
     // 日志预览的临时节点（编辑器打开期间临时塞进 nodes）绝不能被持久化，否则刷新后会留下幽灵节点。
     if(Array.isArray(clean.nodes)) clean.nodes = clean.nodes.filter(node => node.id !== SMART_LOG_PREVIEW_NODE_ID);
     (clean.nodes || []).forEach(node => {
@@ -2193,6 +2210,7 @@ function applyViewport(){
     // 观感几乎无差），让卡片随矢量重新栅格化，保持清晰。
     world.classList.toggle('canvas-scaled', Math.abs(viewport.scale - 1) > 0.001);
     scheduleSmartMinimapViewportUpdate();
+    scheduleSmartImageResolutionSync(world, 120);
 }
 function screenToWorld(event){
     const rect = shell.getBoundingClientRect();
@@ -2875,8 +2893,6 @@ function renderVideoTrustedAssetControl(){
     const src = ['library','cloud','manual'].includes(settings.videoTrustedSource) ? settings.videoTrustedSource : 'library';
     html += `<div class="trusted-source-row">
         <button type="button" class="smart-pill trusted-src-pill ${src === 'library' ? 'active' : ''}" data-trusted-source="library" title="使用素材库中已注册的认证素材链接（asset://）"><i data-lucide="library"></i><span>素材库链接</span></button>
-        <button type="button" class="smart-pill trusted-src-pill ${src === 'cloud' ? 'active' : ''}" data-trusted-source="cloud" title="把当前输入图片/视频上传到云端直链"><i data-lucide="upload-cloud"></i><span>上传云端</span></button>
-        <button type="button" class="smart-pill trusted-src-pill ${src === 'manual' ? 'active' : ''}" data-trusted-source="manual" title="手动输入媒体 URL 或 asset:// 地址"><i data-lucide="link"></i><span>输入网址</span></button>
     </div>`;
     return html;
 }
@@ -3898,7 +3914,7 @@ function currentSmartMediaLinks(node=null){
     }).filter(Boolean);
 }
 function clearManualSmartVideoUrl(){
-    settings.videoTempShLinks = (settings.videoTempShLinks || []).filter(item => item?.manual !== true);
+    settings.videoTempShLinks = (settings.videoTempShLinks || []).filter(item => item?.manual !== true || item?.uploaded === true);
 }
 function splitManualMediaUrls(text){
     return String(text || '')
@@ -3933,6 +3949,13 @@ async function uploadMediaRefToCloud(ref){
         ),
         {source:sourceUrl, url:uploadedUrl, expires:data.expires || '', service:data.service || '', kind}
     ];
+    settings.videoTempShLinks = [
+        ...(settings.videoTempShLinks || []).filter(item => item?.source !== sourceUrl),
+        {source:sourceUrl, url:uploadedUrl, manual:true, uploaded:true, expires:data.expires || '3 days', kind}
+    ];
+    saveUrlsToAssetUrlLibrary([uploadedUrl], [ref.name || data.name || fileNameFromUrl(uploadedUrl) || 'cloud-url']).catch(() => {});
+    persistActiveSmartSettings();
+    scheduleSave();
     return uploadedUrl;
 }
 function updateSmartVideoMaterialCache(runSettings, ref, prepared){
@@ -4055,16 +4078,27 @@ async function setCurrentSmartManualVideoUrl(){
         toast('请输入 http/https 媒体网址或 asset:// 火山素材 URI');
         return '';
     }
+    pushUndo();
+    urls.forEach((url, index) => {
+        addManualReferenceToNode(node, {
+            url,
+            name:fileNameFromUrl(url) || `URL ${index + 1}`,
+            kind:smartManualUrlKind(url, 'image'),
+            mediaInstanceId:uid('manual_url')
+        }, {undo:false, closePicker:false, render:false, save:false});
+    });
     clearManualSmartVideoUrl();
     const targets = refs.length ? refs : [firstAny].filter(Boolean);
     urls.forEach((url, index) => {
         const target = targets[index] || targets[targets.length - 1] || {url};
         applyManualVideoUrlToSmartRef(target, url);
     });
+    saveUrlsToAssetUrlLibrary(urls).catch(() => {});
     persistActiveSmartSettings();
     scheduleSave();
+    renderInputThumbsRow(node);
     render();
-    toast(`已设置 ${urls.length} 个媒体网址`);
+    toast(`已添加 ${urls.length} 个 URL 参考素材`);
     return urls[0] || '';
 }
 async function uploadCurrentSmartVideosToCloud(){
@@ -5360,11 +5394,13 @@ function setActiveAssetTabCategory(categoryId=''){
 }
 async function loadAssetLibrary(){
     try {
-        const [data, localData] = await Promise.all([
+        const [data, localData, urlData] = await Promise.all([
             fetch('/api/asset-library').then(r => r.json()),
-            fetch('/api/local-assets').then(r => r.ok ? r.json() : {items:[], tree:null}).catch(() => ({items:[], tree:null}))
+            fetch('/api/local-assets').then(r => r.ok ? r.json() : {items:[], tree:null}).catch(() => ({items:[], tree:null})),
+            fetch('/api/asset-url-library').then(r => r.ok ? r.json() : {library:{items:[], updated_at:0}}).catch(() => ({library:{items:[], updated_at:0}}))
         ]);
         localAssetLibrary = {items:Array.isArray(localData.items) ? localData.items : [], tree:localData.tree || null};
+        assetUrlLibrary = urlData.library || urlData || {items:[], updated_at:0};
         setAssetLibraryFromResponse(data, {render:false});
         renderAssetLibrary();
     } catch(e) {
@@ -5598,8 +5634,10 @@ function mergeSmartNodeLists(localNodes, remoteNodes){
     (localNodes || []).forEach(n => { if(!seen.has(n.id)){ seen.add(n.id); order.push(n.id); } });
     (remoteNodes || []).forEach(n => { if(!seen.has(n.id)){ seen.add(n.id); order.push(n.id); } });
     return order.map(id => {
+        if(localDeletedNodeIds.has(id)) return null;
         const local = localById.get(id);
         const remote = remoteById.get(id);
+        if(local && !remote && localUnsyncedNodeIds.has(id)) return local;
         if(local && !remote) return local;     // 仅本地存在：保留（我新建的节点；对方删了也宁可复活也不丢结果）
         if(remote && !local) return remote;     // 仅对方存在：加入对方新建的节点
         return mergeSmartNode(local, remote);
@@ -5619,6 +5657,10 @@ function mergeSmartConnections(localConns, remoteConns, nodeIds){
 }
 function applyMergedServerCanvas(serverCanvas){
     if(!serverCanvas || !canvas) return false;
+    (serverCanvas.deleted_node_ids || []).forEach(id => {
+        const value = String(id || '').trim();
+        if(value) localDeletedNodeIds.add(value);
+    });
     const remoteNodes = (Array.isArray(serverCanvas.nodes) ? serverCanvas.nodes : []).map(normalizeLegacySmartNode).filter(Boolean);
     const mergedNodes = mergeSmartNodeLists(nodes, remoteNodes);
     const nodeIds = new Set(mergedNodes.map(n => n.id));
@@ -5755,12 +5797,25 @@ function assetMediaKind(item){
     if(item.kind === 'workflow' || item.type === 'workflow') return 'workflow';
     if(item.kind === 'video' || item.type === 'video') return 'video';
     if(item.kind === 'audio' || item.type === 'audio') return 'audio';
+    if(item.kind === 'text' || item.type === 'text') return 'text';
     const url = String(item.url || item.thumbnail || '').toLowerCase().split('?')[0];
     const name = String(item.name || '').toLowerCase();
+    if(url.includes('/video/') || name.includes('/video/')) return 'video';
+    if(url.includes('/audio/') || name.includes('/audio/')) return 'audio';
+    if(url.includes('/image/') || name.includes('/image/')) return 'image';
     if(/\.(mp4|webm|mov|m4v|avi|mkv)$/.test(url) || /\.(mp4|webm|mov|m4v|avi|mkv)$/.test(name)) return 'video';
     if(/\.(mp3|wav|m4a|aac|ogg|flac)$/.test(url) || /\.(mp3|wav|m4a|aac|ogg|flac)$/.test(name)) return 'audio';
+    if(/\.(txt|csv|srt|vtt|md)$/.test(url) || /\.(txt|csv|srt|vtt|md)$/.test(name)) return 'text';
     if(/\.(json|zip)$/.test(url) || /\.(json|zip)$/.test(name)) return 'workflow';
     return 'image';
+}
+function smartManualUrlKind(url, fallback='image'){
+    const text = String(url || '').trim().toLowerCase().split('?')[0].split('#')[0];
+    if(!text) return fallback;
+    if(text.includes('/video/') || /\.(mp4|webm|mov|m4v|avi|mkv)$/.test(text)) return 'video';
+    if(text.includes('/audio/') || /\.(mp3|wav|m4a|aac|ogg|flac)$/.test(text)) return 'audio';
+    if(text.includes('/image/') || /\.(png|jpe?g|webp|gif|bmp|tiff|avif)$/.test(text)) return 'image';
+    return fallback;
 }
 function assetNodeImageFromItem(item, fallbackName='asset'){
     const image = {
@@ -5791,6 +5846,7 @@ function assetThumbHtml(item){
 function renderAssetLibrary(){
     if(!assetPanel || !assetGrid || !assetCategorySelect) return;
     document.querySelectorAll('[data-asset-tab]').forEach(btn => btn.classList.toggle('active', btn.dataset.assetTab === assetTab));
+    const urlMode = assetTab === 'url';
     const libs = currentAssetSourceLibraries();
     if(!activeAssetLibraryId || !libs.some(lib => lib.id === activeAssetLibraryId)) activeAssetLibraryId = assetLibrary.active_library_id || assetLibraries()[0]?.id || LOCAL_ASSET_LIBRARY_ID;
     if(assetLibrarySelect){
@@ -5800,9 +5856,14 @@ function renderAssetLibrary(){
     const workflowMode = assetTab === 'workflow';
     assetImageControls.style.display = (imageMode || workflowMode) ? 'block' : 'none';
     const localMode = assetLibraryIsLocal();
-    assetDropZone.style.display = imageMode ? 'flex' : 'none';
-    assetGrid.style.display = (imageMode || workflowMode) ? 'grid' : 'none';
+    assetDropZone.style.display = (imageMode || urlMode) ? 'flex' : 'none';
+    assetDropZone.textContent = urlMode ? '把图片拖到这里上传为 URL 素材' : tr('smart.assetDropHint');
+    assetGrid.style.display = (imageMode || workflowMode || urlMode) ? 'grid' : 'none';
     workflowEmpty.style.display = 'none';
+    if(urlMode){
+        renderAssetUrlLibrary();
+        return;
+    }
     if(!imageMode && !workflowMode){ refreshIcons(); return; }
     const baseCats = workflowMode ? workflowAssetCategories() : assetCategories('image');
     const smartClassCats = imageMode && !localMode ? assetSmartClassEntries().map(entry => ({
@@ -5841,6 +5902,336 @@ function renderAssetLibrary(){
     else bindAssetItemEvents();
     bindSmartPreviewImageFallbacks(assetGrid);
     refreshIcons();
+}
+function assetUrlLibraryItems(){
+    return (Array.isArray(assetUrlLibrary?.items) ? assetUrlLibrary.items : [])
+        .filter(item => item?.url)
+        .map((item, index) => ({
+            ...item,
+            id:item.id || `url_${index}`,
+            kind:item.kind || smartManualUrlKind(item.url, 'image'),
+            name:item.name || fileNameFromUrl(item.url || '') || `URL ${index + 1}`
+        }));
+}
+function setAssetUrlLibraryFromResponse(data, options={}){
+    assetUrlLibrary = data.library || data || {items:[], updated_at:0};
+    if(options.render !== false) renderAssetLibrary();
+}
+async function saveUrlsToAssetUrlLibrary(urls=[], names=[]){
+    const cleanUrls = (urls || []).map(url => String(url || '').trim()).filter(Boolean);
+    if(!cleanUrls.length) return [];
+    const saved = [];
+    for(const [index, url] of cleanUrls.entries()){
+        const payload = {
+            url,
+            name:String(names[index] || fileNameFromUrl(url) || `URL ${assetUrlLibraryItems().length + index + 1}`).trim(),
+            kind:smartManualUrlKind(url, 'image')
+        };
+        const data = await fetch('/api/asset-url-library/items', {
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body:JSON.stringify(payload)
+        }).then(async r => {
+            if(!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || '保存 URL 失败');
+            return r.json();
+        });
+        setAssetUrlLibraryFromResponse(data, {render:false});
+        saved.push(data.item || payload);
+    }
+    if(assetTab === 'url') renderAssetLibrary();
+    return saved;
+}
+function parseAssetUrlEditText(text, fallback={}){
+    const lines = String(text || '').split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+    if(!lines.length) return null;
+    const firstUrlIndex = lines.findIndex(line => isRemoteVideoReferenceUrl(line));
+    const url = firstUrlIndex >= 0 ? lines[firstUrlIndex] : (fallback.url || '');
+    const name = firstUrlIndex === 0
+        ? (fallback.name || fileNameFromUrl(url) || 'URL')
+        : (lines[0] || fallback.name || fileNameFromUrl(url) || 'URL');
+    return url ? {url, name} : null;
+}
+function assetUrlLibraryControlsHtml(){
+    const count = assetUrlLibraryItems().length;
+    return `<div class="asset-url-controls">
+        <button class="asset-url-add" type="button" data-add-asset-url>
+            <i data-lucide="link"></i><span>添加 URL</span>
+        </button>
+        <button class="asset-url-add" type="button" data-upload-asset-url-images>
+            <i data-lucide="upload-cloud"></i><span>上传图片</span>
+        </button>
+        <span class="asset-url-count">${escapeHtml(count ? `${count} 个链接素材` : '保存公网图 / 视频链接')}</span>
+    </div>`;
+}
+function renderAssetUrlLibrary(){
+    const items = assetUrlLibraryItems();
+    assetGrid.innerHTML = `${assetUrlLibraryControlsHtml()}${items.length ? items.map(item => `
+        <div class="asset-item asset-url-item" draggable="true" data-asset-url-id="${escapeHtml(item.id)}" data-url="${escapeHtml(item.url)}" data-name="${escapeHtml(item.name || 'URL')}" data-kind="${escapeHtml(assetMediaKind(item))}" title="${escapeHtml(item.url)}">
+            ${assetThumbHtml(item)}
+            <div class="asset-meta">
+                <span class="asset-name">${escapeHtml(item.name || 'URL')}</span>
+                <button class="asset-mini-btn" type="button" data-copy-asset-url="${escapeHtml(item.id)}" title="复制 URL"><i data-lucide="copy"></i></button>
+                <button class="asset-mini-btn" type="button" data-refresh-asset-url="${escapeHtml(item.id)}" title="重新上传并覆盖 URL"><i data-lucide="upload-cloud"></i></button>
+                <button class="asset-mini-btn" type="button" data-edit-asset-url="${escapeHtml(item.id)}" title="${escapeHtml(tr('smart.assetRename'))}"><i data-lucide="pencil"></i></button>
+                <button class="asset-mini-btn" type="button" data-delete-asset-url="${escapeHtml(item.id)}" title="${escapeHtml(tr('common.delete'))}"><i data-lucide="trash-2"></i></button>
+            </div>
+        </div>
+    `).join('') : `<div class="asset-empty">暂无 URL 素材，添加公网图片或视频链接后会显示在这里</div>`}`;
+    bindAssetUrlLibraryEvents();
+    bindSmartPreviewImageFallbacks(assetGrid);
+    refreshIcons();
+}
+function bindAssetUrlLibraryEvents(){
+    assetGrid.querySelector('[data-add-asset-url]')?.addEventListener('click', async event => {
+        event.preventDefault();
+        event.stopPropagation();
+        const value = await openAssetNameDialog({
+            title:'添加 URL 素材',
+            value:'',
+            placeholder:'每行一个 http/https 链接或 asset:// 素材 URI',
+            cancelValue:null,
+            multiline:true
+        });
+        if(value === null) return;
+        const urls = splitManualMediaUrls(value);
+        const invalid = urls.find(url => !isRemoteVideoReferenceUrl(url));
+        if(!urls.length || invalid){
+            toast(invalid ? '请输入 http/https 媒体网址或 asset:// 火山素材 URI' : '请输入 URL');
+            return;
+        }
+        try {
+            await saveUrlsToAssetUrlLibrary(urls);
+            toast(`已保存 ${urls.length} 个 URL 素材`);
+        } catch(err){
+            toast(err.message || '保存 URL 失败');
+        }
+    });
+    assetGrid.querySelector('[data-upload-asset-url-images]')?.addEventListener('click', async event => {
+        event.preventDefault();
+        event.stopPropagation();
+        const files = await pickAssetUrlImageFiles(true);
+        if(!files.length) return;
+        const btn = event.currentTarget;
+        btn.disabled = true;
+        try {
+            await addUploadedImagesToAssetUrlLibrary(files);
+        } catch(err){
+            toast(err.message || '上传图片失败');
+        } finally {
+            btn.disabled = false;
+        }
+    });
+    assetGrid.querySelectorAll('.asset-url-item').forEach(el => {
+        const item = assetUrlLibraryItems().find(x => x.id === el.dataset.assetUrlId) || {url:el.dataset.url, name:el.dataset.name, kind:el.dataset.kind};
+        el.addEventListener('dragstart', event => {
+            event.dataTransfer.effectAllowed = 'copy';
+            event.dataTransfer.setData('application/x-smart-asset', JSON.stringify(assetNodeImageFromItem(item, 'URL')));
+            event.dataTransfer.setData('text/plain', item.url || '');
+        });
+    });
+    assetGrid.querySelectorAll('[data-copy-asset-url]').forEach(btn => {
+        btn.onclick = async event => {
+            event.preventDefault();
+            event.stopPropagation();
+            const item = assetUrlLibraryItems().find(x => x.id === btn.dataset.copyAssetUrl);
+            if(!item?.url) return;
+            await copyTextToClipboard(item.url);
+            toast('已复制 URL');
+        };
+    });
+    assetGrid.querySelectorAll('[data-edit-asset-url]').forEach(btn => {
+        btn.onclick = async event => {
+            event.preventDefault();
+            event.stopPropagation();
+            const item = assetUrlLibraryItems().find(x => x.id === btn.dataset.editAssetUrl);
+            if(!item) return;
+            const value = await openAssetNameDialog({
+                title:'编辑 URL 素材',
+                value:`${item.name || 'URL'}\n${item.url || ''}`,
+                placeholder:'第一行名称，第二行 URL',
+                cancelValue:null,
+                multiline:true
+            });
+            if(value === null) return;
+            const parsed = parseAssetUrlEditText(value, item);
+            if(!parsed || !isRemoteVideoReferenceUrl(parsed.url)){
+                toast('请输入 http/https 媒体网址或 asset:// 火山素材 URI');
+                return;
+            }
+            btn.disabled = true;
+            try {
+                const data = await fetch(`/api/asset-url-library/items/${encodeURIComponent(item.id)}`, {
+                    method:'PATCH',
+                    headers:{'Content-Type':'application/json'},
+                    body:JSON.stringify({...parsed, kind:smartManualUrlKind(parsed.url, item.kind || 'image')})
+                }).then(async r => {
+                    if(!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || '更新 URL 失败');
+                    return r.json();
+                });
+                setAssetUrlLibraryFromResponse(data);
+            } catch(err){
+                btn.disabled = false;
+                toast(err.message || '更新 URL 失败');
+            }
+        };
+    });
+    assetGrid.querySelectorAll('[data-refresh-asset-url]').forEach(btn => {
+        btn.onclick = async event => {
+            event.preventDefault();
+            event.stopPropagation();
+            const item = assetUrlLibraryItems().find(x => x.id === btn.dataset.refreshAssetUrl);
+            if(!item) return;
+            const files = await pickAssetUrlImageFiles(false);
+            if(!files.length) return;
+            btn.disabled = true;
+            try {
+                await refreshAssetUrlItemFromImageFile(item, files[0]);
+            } catch(err){
+                toast(err.message || '覆盖 URL 失败');
+            } finally {
+                btn.disabled = false;
+            }
+        };
+    });
+    assetGrid.querySelectorAll('[data-delete-asset-url]').forEach(btn => {
+        btn.onclick = async event => {
+            event.preventDefault();
+            event.stopPropagation();
+            btn.disabled = true;
+            try {
+                const data = await fetch(`/api/asset-url-library/items/${encodeURIComponent(btn.dataset.deleteAssetUrl)}`, {method:'DELETE'}).then(async r => {
+                    if(!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || '删除 URL 失败');
+                    return r.json();
+                });
+                setAssetUrlLibraryFromResponse(data);
+            } catch(err){
+                btn.disabled = false;
+                toast(err.message || '删除 URL 失败');
+            }
+        };
+    });
+}
+function isAssetUrlImageUploadFile(file){
+    const type = String(file?.type || '').toLowerCase();
+    const name = String(file?.name || '').toLowerCase();
+    return type.startsWith('image/') || /\.(png|jpe?g|webp|gif|bmp|tiff|avif)(\?|$)/.test(name);
+}
+function pickAssetUrlImageFiles(multiple=true){
+    return new Promise(resolve => {
+        const input = document.createElement('input');
+        input.type = 'file';
+        input.accept = 'image/*';
+        input.multiple = Boolean(multiple);
+        input.style.display = 'none';
+        input.onchange = () => {
+            const files = [...(input.files || [])].filter(isAssetUrlImageUploadFile);
+            input.remove();
+            resolve(files);
+        };
+        input.oncancel = () => {
+            input.remove();
+            resolve([]);
+        };
+        document.body.appendChild(input);
+        input.click();
+    });
+}
+async function uploadAssetUrlImageFilesToLocal(files=[]){
+    const clean = [...(files || [])].filter(isAssetUrlImageUploadFile);
+    if(!clean.length) return [];
+    const form = new FormData();
+    form.append('folder', 'url-library');
+    clean.forEach(file => form.append('files', file, file.name || 'image'));
+    const data = await fetch('/api/local-assets/upload', {method:'POST', body:form}).then(async r => {
+        if(!r.ok) throw new Error(await smartResponseErrorMessage(r, '本地保存图片失败'));
+        return r.json();
+    });
+    return Array.isArray(data.files) ? data.files : [];
+}
+async function uploadLocalAssetItemToCloud(item){
+    const localUrl = item?.url || '';
+    if(!localUrl) throw new Error('本地图片保存失败，没有得到文件地址');
+    const response = await fetch('/api/cloud-video/upload', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({url:localUrl, service:'auto'})
+    });
+    if(!response.ok) throw new Error(await smartResponseErrorMessage(response, '云端上传失败'));
+    const data = await response.json();
+    const url = data.url || '';
+    if(!url) throw new Error('云端上传没有返回 URL');
+    return {
+        url,
+        name:item.name || fileNameFromUrl(localUrl) || fileNameFromUrl(url) || 'image',
+        sourceUrl:localUrl,
+        expires:data.expires || '',
+        service:data.service || ''
+    };
+}
+async function uploadImageFilesToCloudUrlItems(files=[]){
+    const localItems = await uploadAssetUrlImageFilesToLocal(files);
+    const uploaded = [];
+    for(const [index, item] of localItems.entries()){
+        toast(`正在上传云端 ${index + 1}/${localItems.length}...`);
+        uploaded.push(await uploadLocalAssetItemToCloud(item));
+    }
+    return uploaded;
+}
+async function addUploadedImagesToAssetUrlLibrary(files=[]){
+    const uploaded = await uploadImageFilesToCloudUrlItems(files);
+    if(!uploaded.length){
+        toast('没有可上传的图片');
+        return [];
+    }
+    await saveUrlsToAssetUrlLibrary(
+        uploaded.map(item => item.url),
+        uploaded.map(item => item.name)
+    );
+    toast(`已上传并保存 ${uploaded.length} 个 URL 素材`);
+    return uploaded;
+}
+async function refreshAssetUrlItemFromImageFile(item, file){
+    const uploaded = await uploadImageFilesToCloudUrlItems([file]);
+    const next = uploaded[0];
+    if(!next?.url) throw new Error('云端上传没有返回 URL');
+    const data = await fetch(`/api/asset-url-library/items/${encodeURIComponent(item.id)}`, {
+        method:'PATCH',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({
+            url:next.url,
+            name:item.name || next.name,
+            kind:'image',
+            note:item.note || ''
+        })
+    }).then(async r => {
+        if(!r.ok) throw new Error(await smartResponseErrorMessage(r, '覆盖 URL 失败'));
+        return r.json();
+    });
+    setAssetUrlLibraryFromResponse(data);
+    toast('已重新上传并覆盖 URL');
+    return next;
+}
+async function addMediaItemsToAssetUrlLibrary(items=[]){
+    const list = (items || []).filter(item => item?.url);
+    if(!list.length){
+        toast('没有可上传的图片');
+        return [];
+    }
+    const uploaded = [];
+    for(const [index, item] of list.entries()){
+        toast(`正在上传云端 ${index + 1}/${list.length}...`);
+        const next = await uploadLocalAssetItemToCloud(item);
+        uploaded.push({
+            ...next,
+            name:item.name || next.name || smartImageNameFromUrl(next.url)
+        });
+    }
+    await saveUrlsToAssetUrlLibrary(
+        uploaded.map(item => item.url),
+        uploaded.map(item => item.name)
+    );
+    toast(`已上传并保存 ${uploaded.length} 个 URL 素材`);
+    return uploaded;
 }
 function openAssetNameDialog({title='', value='', placeholder='', cancelValue='', multiline=false }={}){
     if(!assetDialogBackdrop || !assetDialogInput || !assetDialogOk || !assetDialogCancel) return Promise.resolve(cancelValue);
@@ -6208,6 +6599,11 @@ async function loadCanvas(){
         canvasUsesConnections = Object.prototype.hasOwnProperty.call(canvas || {}, 'connections');
         document.title = canvas.title || tr('canvas.smartCanvas');
         document.getElementById('smartTitle').textContent = canvas.title || tr('canvas.smartCanvas');
+        localDeletedNodeIds.clear();
+        (canvas.deleted_node_ids || []).forEach(id => {
+            const value = String(id || '').trim();
+            if(value) localDeletedNodeIds.add(value);
+        });
         nodes = (Array.isArray(canvas.nodes) ? canvas.nodes : []).map(normalizeLegacySmartNode).filter(Boolean);
         migrateSmartGroupImageMembers();
         canvas.connections = Array.isArray(canvas.connections) ? canvas.connections : [];
@@ -6287,13 +6683,23 @@ async function saveCanvas(){
                 viewport:storageCanvas.viewport || {x:0,y:0,scale:1},
                 logs:storageCanvas.logs || [],
                 settings:storageCanvas.settings,
+                deleted_node_ids:storageCanvas.deleted_node_ids || [],
                 base_updated_at:storageCanvas.updated_at || canvas.updated_at || 0,
                 client_id:smartClientId
             })
         });
         if(res.ok){
             const data = await res.json();
-            if(data.canvas && data.canvas.updated_at) canvas.updated_at = data.canvas.updated_at;
+            if(data.canvas){
+                if(data.canvas.updated_at) canvas.updated_at = data.canvas.updated_at;
+                (data.canvas.deleted_node_ids || []).forEach(id => {
+                    const value = String(id || '').trim();
+                    if(value) localDeletedNodeIds.add(value);
+                });
+                (data.canvas.nodes || []).forEach(node => {
+                    if(node?.id) localUnsyncedNodeIds.delete(node.id);
+                });
+            }
             smartCanvasDirty = Boolean(smartSaveAgain);
             smartSaveRetryDelay = 1000;
             clearTimeout(smartSaveRetryTimer);
@@ -6374,6 +6780,8 @@ function createNode(x, y, images=[], options={}){
     node.scale = nodeImages.length > 1 ? MEDIA_GROUP_DEFAULT_SCALE : mediaNodeDefaultScale(node);
     inheritNodeMetaFromImage(node);
     nodes.push(node);
+    localUnsyncedNodeIds.add(node.id);
+    localDeletedNodeIds.delete(node.id);
     if(options.select !== false) selectedId = node.id;
     render();
     scheduleSave();
@@ -6401,6 +6809,8 @@ function createPromptNode(x, y, options={}){
         llmInstruction:'',
         created_at:Date.now()
     };
+    localUnsyncedNodeIds.add(node.id);
+    localDeletedNodeIds.delete(node.id);
     nodes.push(node);
     if(options.select !== false) selectedId = node.id;
     render();
@@ -9206,6 +9616,12 @@ function deleteNode(id){
     const deleteIds = new Set([id]);
     nodes.forEach(node => {
         if(isHistoryGroupNode(node) && node.historyFor === id) deleteIds.add(node.id);
+    });
+    deleteIds.forEach(nodeId => {
+        if(nodeId){
+            localDeletedNodeIds.add(nodeId);
+            localUnsyncedNodeIds.delete(nodeId);
+        }
     });
     nodes = nodes.filter(node => !deleteIds.has(node.id));
     if(canvas) canvas.connections = (canvas.connections || []).filter(c => !deleteIds.has(c.from) && !deleteIds.has(c.to));
@@ -13324,6 +13740,7 @@ function rememberRoundOutputs(ctx, node, outputs){
 }
 function inputRefKey(img){
     if(!img?.url) return '';
+    if(img.mediaInstanceId) return `manual|${img.mediaInstanceId}`;
     const nodeId = img.nodeId || '';
     const imageIndex = Number.isFinite(Number(img.imageIndex)) ? String(Number(img.imageIndex)) : '';
     if(nodeId && imageIndex !== '') return `${nodeId}|${imageIndex}`;
@@ -13336,6 +13753,7 @@ function manualReferenceImagesFor(node){
     if(!node || !Array.isArray(node.manualInputRefs)) return [];
     return node.manualInputRefs.filter(img => img?.url).map((img, index) => ({
         ...img,
+        mediaInstanceId:img.mediaInstanceId || img.instanceId || '',
         kind:img.kind || mediaKindForItem(img),
         name:img.name || `图${index + 1}`,
         imageIndex:Number.isFinite(Number(img.imageIndex)) ? Number(img.imageIndex) : index,
@@ -13440,8 +13858,9 @@ function uniqueReferenceImages(images){
     const refs = [];
     const seen = new Set();
     (images || []).forEach((img, index) => {
-        if(!img?.url || seen.has(img.url)) return;
-        seen.add(img.url);
+        const key = inputRefKey(img) || `url|${img?.url || ''}`;
+        if(!img?.url || seen.has(key)) return;
+        seen.add(key);
         if(refs.length >= SMART_REFERENCE_IMAGE_MAX) return;
         refs.push({
             ...img,
@@ -13462,8 +13881,9 @@ function inputMentionCandidateImages(node){
     const current = node ? [...lineImagesFor(node), ...manualReferenceImagesFor(node)] : [];
     const seen = new Set();
     return current.filter(img => {
-        if(!img?.url || seen.has(img.url)) return false;
-        seen.add(img.url);
+        const key = inputRefKey(img) || `url|${img?.url || ''}`;
+        if(!img?.url || seen.has(key)) return false;
+        seen.add(key);
         return true;
     }).map((img, index) => ({
         ...img,
@@ -13481,14 +13901,31 @@ function assetRegisteredUris(item){
     });
     return out;
 }
+function assetUrlMentionCandidateImages(){
+    return assetUrlLibraryItems().map((item, index) => ({
+        url:item.url,
+        kind:assetMediaKind(item),
+        name:item.name || `URL ${index + 1}`,
+        alias:item.name || `URL ${index + 1}`,
+        role:'url-asset',
+        categoryName:'URL',
+        asset_uris:{},
+        mentionId:`asset_url_${index}_${Math.random().toString(36).slice(2, 7)}`
+    }));
+}
 function assetMentionCandidateImages(categoryId=''){
     const cats = assetCategories('image');
     const cat = cats.find(c => c.id === categoryId) || assetCategoryForMention();
-    if(!cat) return [];
-    mentionAssetCategoryId = cat.id;
-    const items = (cat.items || []).map(item => ({...item, categoryName:cat.name || '', categoryId:cat.id}));
+    const urlItems = assetUrlMentionCandidateImages();
+    if(cat) mentionAssetCategoryId = cat.id;
+    const items = cat ? (cat.items || []).map(item => ({...item, categoryName:cat.name || '', categoryId:cat.id})) : [];
     const seen = new Set();
-    return items.filter(item => {
+    const extraUrlItems = urlItems.filter(item => {
+        if(!item?.url || seen.has(item.url)) return false;
+        seen.add(item.url);
+        return true;
+    });
+    const normalItems = items.filter(item => {
         if(!item?.url || seen.has(item.url)) return false;
         seen.add(item.url);
         return true;
@@ -13502,6 +13939,7 @@ function assetMentionCandidateImages(categoryId=''){
         asset_uris:assetRegisteredUris(item),
         mentionId:`asset_${index}_${Math.random().toString(36).slice(2, 7)}`
     }));
+    return [...extraUrlItems, ...normalItems];
 }
 function mentionCandidateImages(node, source=mentionSource){
     return source === 'asset' ? assetMentionCandidateImages(mentionAssetCategoryId) : inputMentionCandidateImages(node);
@@ -13537,8 +13975,9 @@ function renderMentionPicker(source){
     if(!activeAssetLibraryId || !assetLibs.some(lib => lib.id === activeAssetLibraryId)) activeAssetLibraryId = assetLibrary.active_library_id || assetLibs[0]?.id || '';
     const libraryWithMentionAssets = assetLibs.find(lib => (lib.categories || []).some(cat => (cat.type || 'image') === 'image' && (cat.items || []).some(item => item?.url)));
     const assetCats = assetCategories('image');
+    const hasUrlAssets = assetUrlLibraryItems().length > 0;
     const hasInput = inputItems.length > 0;
-    const hasAssets = Boolean(libraryWithMentionAssets);
+    const hasAssets = Boolean(libraryWithMentionAssets) || hasUrlAssets;
     mentionSource = source || (hasInput ? 'input' : 'asset');
     if(mentionSource === 'asset' && hasAssets && !assetCats.some(cat => (cat.items || []).some(item => item?.url)) && libraryWithMentionAssets){
         activeAssetLibraryId = libraryWithMentionAssets.id;
@@ -13662,39 +14101,45 @@ function toggleAssetMentionPickerFromThumbs(){
     mentionAnchorEl = inputThumbsRow?.querySelector('[data-input-add-reference]') || inputThumbsRow;
     renderMentionPicker('asset');
 }
-function addManualReferenceToSelectedNode(img){
-    const node = selectedNode();
-    if(!node || !img?.url) return;
+function manualReferenceFromMediaItem(img){
     const kind = img.kind || mediaKindForItem(img);
     const ref = {
         url:img.url,
         name:img.alias || img.name || (kind === 'audio' ? '音频' : kind === 'video' ? '视频' : '图片'),
         kind,
+        mediaInstanceId:img.mediaInstanceId || uid('manual_url'),
         nodeId:img.nodeId || '',
         imageIndex:Number.isFinite(Number(img.imageIndex)) ? Number(img.imageIndex) : '',
         asset_uris:img.asset_uris || {},
         manualAdded:true
     };
     if(img.originalLocalUrl) ref.originalLocalUrl = img.originalLocalUrl;
+    return ref;
+}
+function addManualReferenceToNode(node, img, options={}){
+    if(!node || !img?.url) return;
+    const ref = manualReferenceFromMediaItem(img);
     const refs = Array.isArray(node.manualInputRefs) ? node.manualInputRefs.slice() : [];
     const key = inputRefKey(ref);
-    const exists = refs.some(item => inputRefKey(item) === key || item.url === ref.url);
-    if(exists){
-        closeMentionPicker();
+    if(options.allowDuplicate === false && refs.some(item => inputRefKey(item) === key)){
+        if(options.closePicker !== false) closeMentionPicker();
         return;
     }
-    pushUndo();
+    if(options.undo !== false) pushUndo();
     refs.push(ref);
     node.manualInputRefs = refs;
-    closeMentionPicker();
-    renderInputThumbsRow(node);
-    scheduleSave();
+    if(options.closePicker !== false) closeMentionPicker();
+    if(options.render !== false) renderInputThumbsRow(node);
+    if(options.save !== false) scheduleSave();
+}
+function addManualReferenceToSelectedNode(img){
+    addManualReferenceToNode(selectedNode(), img);
 }
 function removeManualReferenceFromSelectedNode(key){
     const node = selectedNode();
     if(!node || !key || !Array.isArray(node.manualInputRefs)) return;
     const refs = node.manualInputRefs.slice();
-    const index = refs.findIndex(ref => inputRefKey(ref) === key || ref?.url === key.replace(/^url\|/, ''));
+    const index = refs.findIndex(ref => inputRefKey(ref) === key);
     if(index < 0) return;
     pushUndo();
     refs.splice(index, 1);
@@ -13790,6 +14235,7 @@ function insertMentionToken(img){
     token.dataset.url = img.url;
     token.dataset.kind = mediaKindForItem(img);
     token.dataset.name = img.alias || img.name || (token.dataset.kind === 'audio' ? '音频' : token.dataset.kind === 'video' ? '视频' : '图片');
+    token.dataset.mediaInstanceId = img.mediaInstanceId || '';
     token.dataset.nodeId = img.nodeId || '';
     token.dataset.imageIndex = String(img.imageIndex ?? '');
     token.dataset.assetUris = JSON.stringify(img.asset_uris || {});
@@ -13836,6 +14282,7 @@ function collectPromptParts(){
                 kind,
                 url:sourceItem?.url || node.dataset.url || '',
                 name:node.dataset.name || (kind === 'audio' ? '音频' : '图片'),
+                mediaInstanceId:sourceItem?.mediaInstanceId || node.dataset.mediaInstanceId || '',
                 nodeId,
                 imageIndex,
                 asset_uris:assetUris,
@@ -13879,7 +14326,7 @@ function buildPromptRequest(node, overrideDefaultImages=null, consumeDefault=fal
     const refs = defaultRefs.map((img, index) => ({...img, role:`image_${index + 1}`}));
     let hasMentionToken = false;
     const refMap = new Map();
-    refs.forEach((img, index) => refMap.set(img.url, index + 1));
+    refs.forEach((img, index) => refMap.set(inputRefKey(img) || `url|${img.url}`, index + 1));
     let body = '';
     parts.forEach(part => {
         if(part.type === 'text'){
@@ -13893,15 +14340,17 @@ function buildPromptRequest(node, overrideDefaultImages=null, consumeDefault=fal
             body += `@${part.name || '图片'}`;
             return;
         }
-        if(!refMap.has(part.url)){
+        const partKey = inputRefKey(part) || `url|${part.url}`;
+        if(!refMap.has(partKey)){
             if(refs.length >= SMART_REFERENCE_IMAGE_MAX){
                 body += `@${part.name || '图片'}`;
                 return;
             }
-            refMap.set(part.url, refs.length + 1);
+            refMap.set(partKey, refs.length + 1);
             refs.push({
                 url:part.url,
                 name:part.name || `图${refs.length + 1}`,
+                mediaInstanceId:part.mediaInstanceId || '',
                 nodeId:part.nodeId,
                 imageIndex:part.imageIndex,
                 kind:part.kind || 'image',
@@ -13912,7 +14361,7 @@ function buildPromptRequest(node, overrideDefaultImages=null, consumeDefault=fal
             });
         }
         const labelledRefs = smartLabelledRefs(refs);
-        body += labelledRefs[refMap.get(part.url) - 1]?.label || `@${part.name || '图片'}`;
+        body += labelledRefs[refMap.get(partKey) - 1]?.label || `@${part.name || '图片'}`;
     });
     body = body.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
     const groupPrompt = isSmartGroupNode(node) ? textForNode(node, ctx).trim() : '';
@@ -13931,6 +14380,7 @@ function buildPromptRequest(node, overrideDefaultImages=null, consumeDefault=fal
             refs:refs.map((img, index) => ({
                 url:img.url,
                 name:img.name || `图${index + 1}`,
+                mediaInstanceId:img.mediaInstanceId || '',
                 nodeId:img.nodeId || '',
                 imageIndex:img.imageIndex ?? '',
                 kind:img.kind || mediaKindForItem(img),
@@ -13948,6 +14398,7 @@ function buildPromptRequest(node, overrideDefaultImages=null, consumeDefault=fal
         refs:refs.map((img, index) => ({
             url:img.url,
             name:img.name || `图${index + 1}`,
+            mediaInstanceId:img.mediaInstanceId || '',
             nodeId:img.nodeId || '',
             imageIndex:img.imageIndex ?? '',
             kind:img.kind || mediaKindForItem(img),
@@ -17935,6 +18386,28 @@ async function handleAssetPanelDrop(e){
     e.stopPropagation();
     setAssetDragOver(false);
     const raw = e.dataTransfer.getData('application/x-smart-canvas-image');
+    if(assetTab === 'url'){
+        try {
+            if(raw){
+                const payload = JSON.parse(raw);
+                if(payload?.url) await addMediaItemsToAssetUrlLibrary([{url:payload.url, name:payload.name || smartImageNameFromUrl(payload.url)}]);
+                return;
+            }
+            const payload = await resolveSmartImageDropPayload(e.dataTransfer);
+            if(payload.type === 'files'){
+                await addUploadedImagesToAssetUrlLibrary(payload.files);
+            } else if(payload.type === 'localPaths'){
+                const imported = await importSmartLocalImages(payload.localPaths);
+                await addMediaItemsToAssetUrlLibrary(imported);
+            } else if(payload.type === 'url'){
+                await saveUrlsToAssetUrlLibrary([payload.url], [smartImageNameFromUrl(payload.url)]);
+                toast('已保存 URL 素材');
+            }
+        } catch(err) {
+            toast(err.message || '上传图片失败');
+        }
+        return;
+    }
     if(raw){
         try {
             const payload = JSON.parse(raw);

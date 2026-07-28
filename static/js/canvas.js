@@ -16255,8 +16255,23 @@ function startNodeDrag(e, node){
 }
 function onNodeDrag(e){
     if(!dragNode) return;
-    const dx = (e.clientX - dragNode.sx) / viewport.scale;
-    const dy = (e.clientY - dragNode.sy) / viewport.scale;
+    let dx = (e.clientX - dragNode.sx) / viewport.scale;
+    let dy = (e.clientY - dragNode.sy) / viewport.scale;
+    // 智能对齐吸附：按被拖集合的整体包围盒对齐周围节点，修正统一位移；
+    // children 沿用同一 delta，成员相对位置天然保持。
+    if(window.CanvasAlignSnap){
+        if(!dragNode.alignSnap) dragNode.alignSnap = buildAlignSnapshot();
+        const snap = dragNode.alignSnap;
+        const res = CanvasAlignSnap.resolve({
+            moving:{left:snap.left + dx, top:snap.top + dy, width:snap.width, height:snap.height},
+            candidates:snap.candidates,
+            threshold:6 / viewport.scale,   // 约 6 屏幕像素
+            extend:8 / viewport.scale,
+        });
+        dx += res.dx;
+        dy += res.dy;
+        renderAlignGuides(res.guides);
+    }
     dragNode.node.x = dragNode.ox + dx;
     dragNode.node.y = dragNode.oy + dy;
     const el = nodesEl.querySelector(`.node[data-id="${dragNode.node.id}"]`);
@@ -16441,6 +16456,7 @@ function endDrag(event=null){
         const draggedGroup = moved.some(n => n.type === 'group' || n.type === 'promptGroup');
         if(!draggedGroup) updateGroupMembership(moved);
     }
+    clearAlignGuides();
     dragNode = null;
     dragBoard = null;
     minimapDrag = false;
@@ -16480,6 +16496,59 @@ function nodeRect(n){
     const w = el?.offsetWidth || n.w || 260;
     const h = el?.offsetHeight || n.h || 200;
     return {x:n.x, y:n.y, w, h, cx:n.x + w/2, cy:n.y + h/2};
+}
+// 拖动吸附快照：被拖集合（主节点 + children）的起始包围盒 + 视野内候选矩形。
+// 在首次 move 时惰性构建（Alt 复制在 startNodeDrag 内已 render()，此时 DOM 尺寸可用），
+// 拖动全程只读一次 DOM，避免逐帧 offsetWidth 引发强制回流。
+function buildAlignSnapshot(){
+    const parts = [{node:dragNode.node, ox:dragNode.ox, oy:dragNode.oy},
+        ...(dragNode.children || [])];
+    const movingIds = new Set(parts.map(p => p.node.id));
+    let x1 = Infinity, y1 = Infinity, x2 = -Infinity, y2 = -Infinity;
+    parts.forEach(p => {
+        const r = nodeRect(p.node);
+        x1 = Math.min(x1, p.ox);
+        y1 = Math.min(y1, p.oy);
+        x2 = Math.max(x2, p.ox + r.w);
+        y2 = Math.max(y2, p.oy + r.h);
+    });
+    // 候选限定当前视野（外扩一段），拖动中途缩放出现的新节点本次拖动不参与吸附
+    const view = currentWorldViewRect();
+    const pad = 120 / viewport.scale;
+    const candidates = nodes
+        .filter(n => !movingIds.has(n.id))
+        .map(n => nodeRect(n))
+        .filter(r => r.x + r.w >= view.x - pad && r.x <= view.x + view.w + pad
+            && r.y + r.h >= view.y - pad && r.y <= view.y + view.h + pad)
+        .map(r => ({left:r.x, top:r.y, width:r.w, height:r.h}));
+    return {left:x1, top:y1, width:x2 - x1, height:y2 - y1, candidates};
+}
+// 对齐参考线层：#world 内世界坐标 SVG，随视口 transform 自动跟随；
+// 线条用 non-scaling-stroke 保持任意缩放下屏幕 1px，层不响应鼠标（见 canvas.css）。
+function ensureAlignGuideLayer(){
+    let svg = world.querySelector(':scope > svg.align-guide-layer');
+    if(!svg){
+        svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+        svg.setAttribute('class', 'align-guide-layer');
+        svg.setAttribute('aria-hidden', 'true');
+        world.appendChild(svg);
+    }
+    return svg;
+}
+function renderAlignGuides(guides){
+    const v = guides?.v || [];
+    const h = guides?.h || [];
+    const line = (a, b, c, d) =>
+        `<line x1="${a}" y1="${b}" x2="${c}" y2="${d}" vector-effect="non-scaling-stroke"></line>`;
+    const html = v.map(g => line(g.x, g.y1, g.x, g.y2)).join('')
+        + h.map(g => line(g.x1, g.y, g.x2, g.y)).join('');
+    const svg = ensureAlignGuideLayer();
+    if(svg.__guideHtml === html) return;   // 内容未变则跳过重建，避免逐帧扰动 DOM
+    svg.__guideHtml = html;
+    svg.innerHTML = html;
+}
+function clearAlignGuides(){
+    renderAlignGuides(null);
 }
 function connectedClusterIds(seedId){
     const ids = new Set(nodes.map(n => n.id));

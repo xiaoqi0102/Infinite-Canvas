@@ -6711,6 +6711,62 @@ function moveNodeElementsDuringDrag(){
     }
     scheduleInteractionLayerRefresh();
 }
+// 拖动吸附快照：被拖集合的起始包围盒 + 视野内候选矩形。首次 move 时惰性构建，
+// 拖动全程只读一次布局，避免逐帧取 nodeRect 的开销；group 兜底写法与 move 分支一致，
+// 兼容缩略图拖出（thumbDetached）中途重建的精简 dragState——重建后快照丢失，下次 move 自动重建。
+function buildSmartAlignSnapshot(){
+    if(!dragState) return null;
+    const group = dragState.group || [{id:dragState.id, ox:dragState.ox, oy:dragState.oy}];
+    const movingIds = new Set(group.map(item => item.id));
+    let x1 = Infinity, y1 = Infinity, x2 = -Infinity, y2 = -Infinity;
+    group.forEach(item => {
+        const n = nodes.find(x => x.id === item.id);
+        if(!n) return;
+        const r = nodeRect(n);   // 图片节点尺寸由 node.scale + imageLayout() 推导
+        x1 = Math.min(x1, item.ox);
+        y1 = Math.min(y1, item.oy);
+        x2 = Math.max(x2, item.ox + r.width);
+        y2 = Math.max(y2, item.oy + r.height);
+    });
+    if(!Number.isFinite(x1)) return null;
+    // 候选限定当前视野（外扩一段），拖动中途缩放出现的新节点本次拖动不参与吸附
+    const view = smartWorldViewRect();
+    const pad = 120 / viewport.scale;
+    const candidates = nodes
+        .filter(n => !movingIds.has(n.id))
+        .map(n => nodeRect(n))
+        .filter(r => r.x + r.width >= view.x - pad && r.x <= view.x + view.width + pad
+            && r.y + r.height >= view.y - pad && r.y <= view.y + view.height + pad)
+        .map(r => ({left:r.x, top:r.y, width:r.width, height:r.height}));
+    return {left:x1, top:y1, width:x2 - x1, height:y2 - y1, candidates};
+}
+// 对齐参考线层：#world 内世界坐标 SVG，随视口 transform 自动跟随；
+// 线条用 non-scaling-stroke 保持任意缩放下屏幕 1px，层不响应鼠标（见 smart-canvas.css）。
+function ensureSmartAlignGuideLayer(){
+    let svg = world.querySelector(':scope > svg.align-guide-layer');
+    if(!svg){
+        svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+        svg.setAttribute('class', 'align-guide-layer');
+        svg.setAttribute('aria-hidden', 'true');
+        world.appendChild(svg);
+    }
+    return svg;
+}
+function renderSmartAlignGuides(guides){
+    const v = guides?.v || [];
+    const h = guides?.h || [];
+    const line = (a, b, c, d) =>
+        `<line x1="${a}" y1="${b}" x2="${c}" y2="${d}" vector-effect="non-scaling-stroke"></line>`;
+    const html = v.map(g => line(g.x, g.y1, g.x, g.y2)).join('')
+        + h.map(g => line(g.x1, g.y, g.x2, g.y)).join('');
+    const svg = ensureSmartAlignGuideLayer();
+    if(svg.__guideHtml === html) return;   // 内容未变则跳过重建，避免逐帧扰动 DOM
+    svg.__guideHtml = html;
+    svg.innerHTML = html;
+}
+function clearSmartAlignGuides(){
+    renderSmartAlignGuides(null);
+}
 function updateNodeElementDuringResize(node){
     if(!node) return;
     const el = world.querySelector(`.image-node[data-id="${CSS.escape(node.id)}"]`);
@@ -17146,8 +17202,25 @@ window.onmousemove = e => {
     if(!dragState) return;
     const node = nodes.find(n => n.id === dragState.id);
     if(!node) return;
-    const moveDx = (e.clientX - dragState.startX) / viewport.scale;
-    const moveDy = (e.clientY - dragState.startY) / viewport.scale;
+    let moveDx = (e.clientX - dragState.startX) / viewport.scale;
+    let moveDy = (e.clientY - dragState.startY) / viewport.scale;
+    // 智能对齐吸附：按被拖集合的整体包围盒对齐周围节点，修正统一位移；
+    // Ctrl 拖是连线/入组手势，不参与摆位吸附。
+    if(window.CanvasAlignSnap && !dragState.ctrlGroup){
+        if(!dragState.alignSnap) dragState.alignSnap = buildSmartAlignSnapshot();
+        const snap = dragState.alignSnap;
+        if(snap){
+            const res = CanvasAlignSnap.resolve({
+                moving:{left:snap.left + moveDx, top:snap.top + moveDy, width:snap.width, height:snap.height},
+                candidates:snap.candidates,
+                threshold:6 / viewport.scale,   // 约 6 屏幕像素
+                extend:8 / viewport.scale,
+            });
+            moveDx += res.dx;
+            moveDy += res.dy;
+            renderSmartAlignGuides(res.guides);
+        }
+    }
     (dragState.group || [{id:dragState.id, ox:dragState.ox, oy:dragState.oy}]).forEach(item => {
         const n = nodes.find(x => x.id === item.id);
         if(!n) return;
@@ -17160,6 +17233,7 @@ window.onmousemove = e => {
             setAssetDragOver(true);
             clearDropHighlight();
             setAssetDragOver(true);
+            clearSmartAlignGuides();   // 悬停资产面板是"存入素材"意图，隐藏对齐参考线
             return;
         }
         setAssetDragOver(false);
@@ -17268,6 +17342,7 @@ window.onmouseup = e => {
             setAssetDragOver(false);
             discardPendingUndo();
             clearDropHighlight();
+            clearSmartAlignGuides();
             dragState = null;
             document.body.classList.remove('smart-node-drag');
             render();
@@ -17357,6 +17432,7 @@ window.onmouseup = e => {
         if(stateChanged || dragState.thumbDetached) suppressNodeClickUntil = Date.now() + 180;
         clearDropHighlight();
         loopInsertPreview = null;
+        clearSmartAlignGuides();
         dragState = null;
         scheduleSave();
         scheduleConnectionLayerRefresh();

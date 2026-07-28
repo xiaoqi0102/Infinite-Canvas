@@ -901,3 +901,21 @@ git config core.excludesfile "E:/Infinite-Canvas/.git/info/exclude"
 - `video_request_mode_patch.py` 需要识别 `plugins/video_plugins/sudashui.py` 的插件化实现；不能继续只校验旧的 `main.py` 内联函数锚点。
 
 本次自动验证结果：93 个 Python 测试通过，视频工具与生成日志详情 JavaScript 测试通过，全量 JavaScript 语法检查、Python 编译、i18n 校验、用户数据目录断言、桌面配置断言和视频补丁 dry-run 均通过。未执行安装包构建与发布文件在线验证。
+
+## 11. 2026-07-28 上游合并记录
+
+本次从共同祖先 `486bd8e` 合并 `upstream/main@96c0085`，上游新增 2 个提交（`f6960e9`、`96c0085`），主要包含素材 URL 公网库、grok 协议、APIMart Gemini 协议修复与画布缩放高清懒加载。实际冲突文件为 `main.py`、`static/js/api-settings.js`、`static/js/canvas.js`、`static/js/smart-canvas.js`、`static/css/smart-canvas.css`、`VERSION`、`static/update-notes.json` 及大量静态 HTML 的 `?v=` 版本号。
+
+本次新增的合并注意事项：
+
+- 上游把 `is_apimart` 提前到 gemini 分支之前并加 `and not is_apimart` 分流；合并时必须同时保留本地各图片分支的 `progress, request_attempts` 传参。
+- 上游给 APIMart 图片新增 modalities 计费错误后的 `official_fallback` 重试；本地已把请求统一改为 `logged_post`，重试分支也必须走 `logged_post`，不能回退裸 `client.post`。
+- 上游 `SUPPORTED_IMAGE_REQUEST_MODES` 仍是旧的四值集合；合并时保留本地含 `AICOST_IMAGE_REQUEST_MODE` 的集合和整个 `SUPPORTED_VIDEO_REQUEST_MODES`，只吸收上游新增的 `grok` 协议。
+- 上游智能画布新增 `mediaInstanceId`（手动 URL 素材去重键）和 `localDeletedNodeIds` / `localUnsyncedNodeIds` 节点同步跟踪；提示词 refMap 必须统一用 `inputRefKey` 作键，同时保留本地 `smartLabelledRefs` 短编号显示和 `originalLocalUrl` / `sourceUrl` 字段超集。
+- 上游 `applyViewport` 仍调用 `renderMinimap()` 全量重绘；本地已优化为 `scheduleMinimapViewportUpdate()` / `scheduleSmartMinimapViewportUpdate()`，合并时保留本地优化并追加上游新增的 `scheduleCanvasImageResolutionSync` / `scheduleSmartImageResolutionSync` 调用。
+- 上游与本地各自独立实现了输入缩略图区的"上传云端/手动链接"按钮；本地版本带 `showCloudUpload` 门控且为超集，取本地并吸收上游 `.smart-pill` 的新 hover 样式。
+- 上游在 `uploadMediaRefToCloud` 中新增 `saveUrlsToAssetUrlLibrary()` 调用，`tests/test_cloud_media_reupload.js` 的 vm 沙箱抽取片段不含该函数定义，需要在 smart 沙箱中补 `saveUrlsToAssetUrlLibrary:async () => {}` stub。
+- `VERSION` 与 `static/update-notes.json` 是 fork 自有版本线，合并时一律取本地；上游的四段版本号（如 `2026.07.28.1`）不符合本仓库裸三段约定，不得带入。
+- 本地已从 `gpt-chat.html` 移除未使用的 `tailwindcss-cdn.js` 引用，上游冲突侧只是版本号变化，注意不要借冲突恢复该引用。
+
+本次自动验证结果：132 个 Python 测试通过（1 跳过），JavaScript 测试除 `test_canvas_save_resilience.js` 的既有基线失败（合并前 `main` 上即失败）外全部通过，全量 JavaScript 语法检查、Python 编译、i18n 校验（1237 键）、云同步配置断言、用户数据目录断言和视频补丁 dry-run 均通过。未执行安装包构建与发布文件在线验证。

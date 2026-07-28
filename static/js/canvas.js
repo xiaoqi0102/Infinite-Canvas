@@ -4140,24 +4140,24 @@ async function setCanvasManualVideoUrl(nodeId){
     const firstLocal = refs.find(ref => ref?.url && !isRemoteVideoReferenceUrl(ref.url));
     const firstAny = firstLocal || refs[0] || null;
     const current = manualVideoUrlForNode(node) || currentCanvasMediaLinks(node)[0] || (firstAny ? tempShUploadedUrlForNode(node, firstAny.url) : '');
-    const value = prompt('输入媒体网址 / 火山素材 URI', isRemoteVideoReferenceUrl(current) ? current : '');
+    const value = prompt(tr('canvas.manualUrlPrompt'), isRemoteVideoReferenceUrl(current) ? current : '');
     if(value === null) return '';
     const url = String(value || '').trim();
     if(!url){
         clearManualVideoUrlForNode(node);
         refreshNodes([node.id]);
         scheduleSave();
-        showErrorModal('已清除手动网址。', '输入网址');
+        showErrorModal(tr('canvas.manualUrlCleared'), tr('canvas.manualUrlTitle'));
         return '';
     }
     if(!isRemoteVideoReferenceUrl(url)){
-        showErrorModal('请输入 http/https 媒体网址或 asset:// 火山素材 URI', '输入网址');
+        showErrorModal(tr('canvas.manualUrlInvalid'), tr('canvas.manualUrlTitle'));
         return '';
     }
     applyManualVideoUrlToCanvasRef(node, firstAny, url);
     refreshNodes([node.id, firstAny?.nodeId].filter(Boolean));
     scheduleSave();
-    showErrorModal('已设置视频网址。', '输入网址');
+    showErrorModal(tr('canvas.manualUrlSet'), tr('canvas.manualUrlTitle'));
     return url;
 }
 function audioRefsOnly(refs){
@@ -14295,7 +14295,7 @@ async function queryRecoverPendingOutput(pendingId){
         ? (pending.canvasTaskId || pending.recoverTaskId || '')
         : (pending.recoverTaskId || extractUpstreamTaskId(pending.error || ''));
     if(!taskId){
-        showErrorModal('没有任务 ID，无法查询结果', tr('canvas.apiFailed'));
+        showErrorModal(tr('canvas.noTaskIdForQuery'), tr('canvas.apiFailed'));
         return;
     }
     pending.querying = true;
@@ -14326,7 +14326,7 @@ async function queryRecoverPendingOutput(pendingId){
                 pending.failed = false;
                 pending.error = '';
                 pending.canvasTaskStatus = data.status || 'polling';
-                setStatus(data.message || '视频任务仍在生成中');
+                setStatus(data.message || tr('canvas.videoTaskStillRunning'));
                 pollCanvasVideoTask(taskId, {cascadeTargetId:pending.cascadeTargetId || ''});
             }
         } catch(err) {
@@ -14358,7 +14358,7 @@ async function queryRecoverPendingOutput(pendingId){
             pending.error = data.error || tr('canvas.generationFailed');
             showErrorModal(pending.error, tr('canvas.apiFailed'));
         } else {
-            pending.error = data.message || '任务仍在生成中，请稍后再查询';
+            pending.error = data.message || tr('canvas.taskStillRunningRetryLater');
             setStatus(pending.error);
         }
     } catch(err) {

@@ -988,6 +988,10 @@ APIMART_IMAGE_POLL_INTERVAL = float(os.getenv("APIMART_IMAGE_POLL_INTERVAL", "5"
 APIMART_IMAGE_INITIAL_POLL_DELAY = float(os.getenv("APIMART_IMAGE_INITIAL_POLL_DELAY", "10"))
 VIDEO_POLL_TIMEOUT = float(os.getenv("VIDEO_POLL_TIMEOUT", "7200"))
 VIDEO_POLL_INTERVAL = 25.0
+# 轮询查询单次请求的超时：不能沿用 client 级 7200s,否则上游挂起会拖住整个任务
+VIDEO_POLL_REQUEST_TIMEOUT = httpx.Timeout(connect=20.0, read=60.0, write=30.0, pool=20.0)
+# 轮询遇到非终态错误(网络抖动/瞬时 5xx)时的连续失败上限,达到才判任务失败
+VIDEO_POLL_TRANSIENT_MAX = 5
 VIDEO_MATERIAL_UPLOAD_CACHE_TTL = max(
     0.0,
     float(os.getenv("VIDEO_MATERIAL_UPLOAD_CACHE_TTL", str(24 * 60 * 60))),
@@ -17205,6 +17209,7 @@ async def wait_for_video_task(client, provider, task_id, submit_url="", on_progr
     poll_interval = video_poll_interval(provider)
     delay = poll_interval
     last_payload = {}
+    transient_poll_failures = 0
     while deadline is None or time.monotonic() < deadline:
         await asyncio.sleep(delay)
         raw = None
@@ -17212,7 +17217,7 @@ async def wait_for_video_task(client, provider, task_id, submit_url="", on_progr
         retry_after_delay = None
         for task_url in task_urls:
             try:
-                response = await client.get(task_url, headers=api_headers(provider=provider))
+                response = await client.get(task_url, headers=api_headers(provider=provider), timeout=VIDEO_POLL_REQUEST_TIMEOUT)
                 retry_after_delay = video_retry_after_seconds(response) or retry_after_delay
                 if response.status_code >= 400 and is_video_terminal_error(response):
                     try:
@@ -17251,10 +17256,24 @@ async def wait_for_video_task(client, provider, task_id, submit_url="", on_progr
                     "raw_last": last_payload,
                 })
                 continue
-            if last_error:
-                raise last_error
-            raise HTTPException(status_code=502, detail=f"视频任务查询失败：{task_id}")
+            # 瞬时网络/网关错误不再一次判死：连续失败计数 + 指数退避,仅达到上限才向上抛
+            transient_poll_failures += 1
+            if transient_poll_failures >= VIDEO_POLL_TRANSIENT_MAX:
+                if last_error:
+                    raise last_error
+                raise HTTPException(status_code=502, detail=f"视频任务查询失败：{task_id}")
+            delay = max(poll_interval, min(120.0, 10.0 * (2 ** (transient_poll_failures - 1))))
+            if deadline is not None:
+                delay = min(delay, max(0.0, deadline - time.monotonic()))
+            if delay <= 0:
+                break
+            report_canvas_video_progress(on_progress, {
+                "status": "polling",
+                "next_poll_at": time.time() + delay,
+            })
+            continue
         last_payload = raw
+        transient_poll_failures = 0
         report_canvas_video_progress(on_progress, {"status": "polling", "raw_last": raw})
         if not isinstance(raw, dict):
             raise HTTPException(status_code=502, detail=f"视频任务查询返回非 JSON 对象：{raw}")
@@ -17346,6 +17365,7 @@ async def wait_for_agnes_video_task(client, provider, video_id, model, on_progre
     deadline = time.monotonic() + VIDEO_POLL_TIMEOUT
     delay = VIDEO_POLL_INTERVAL
     last_payload = {}
+    transient_poll_failures = 0
     while time.monotonic() < deadline:
         await asyncio.sleep(delay)
         raw = None
@@ -17353,7 +17373,7 @@ async def wait_for_agnes_video_task(client, provider, video_id, model, on_progre
         retry_after_delay = None
         for url in (query_url, legacy_url):
             try:
-                response = await client.get(url, headers=api_headers(provider=provider, model=model))
+                response = await client.get(url, headers=api_headers(provider=provider, model=model), timeout=VIDEO_POLL_REQUEST_TIMEOUT)
                 retry_after_delay = video_retry_after_seconds(response) or retry_after_delay
                 if response.status_code >= 400 and is_video_terminal_error(response):
                     try:
@@ -17389,10 +17409,25 @@ async def wait_for_agnes_video_task(client, provider, video_id, model, on_progre
                     "raw_last": last_payload,
                 })
                 continue
-            if last_error:
-                raise last_error
-            raise HTTPException(status_code=502, detail=f"Agnes 视频任务查询失败：{video_id}")
+            # 与 wait_for_video_task 一致:瞬时错误按连续失败计数退避,不再一次判死
+            transient_poll_failures += 1
+            if transient_poll_failures >= VIDEO_POLL_TRANSIENT_MAX:
+                if last_error:
+                    raise last_error
+                raise HTTPException(status_code=502, detail=f"Agnes 视频任务查询失败：{video_id}")
+            delay = min(
+                max(VIDEO_POLL_INTERVAL, min(120.0, 10.0 * (2 ** (transient_poll_failures - 1)))),
+                max(0.0, deadline - time.monotonic()),
+            )
+            if delay <= 0:
+                break
+            report_canvas_video_progress(on_progress, {
+                "status": "polling",
+                "next_poll_at": time.time() + delay,
+            })
+            continue
         last_payload = raw
+        transient_poll_failures = 0
         report_canvas_video_progress(on_progress, {"status": "polling", "raw_last": raw})
         if not isinstance(raw, dict):
             raise HTTPException(status_code=502, detail=f"Agnes 视频任务查询返回非 JSON 对象：{raw}")

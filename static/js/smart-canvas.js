@@ -16334,7 +16334,7 @@ async function runApiVideoGeneration(prompt, refs, runSettings=settings, logCont
         const refVideos = manualVideo ? manualSmartMediaLinks(runSettings).map(item => item.url).filter(Boolean) : videoRefsOnly(uploadedRefs).map(ref => effUrl(ref)).filter(Boolean);
         const allRefAudios = audioRefsOnly(uploadedRefs).map(ref => effUrl(ref)).filter(Boolean);
         const refAudios = profile.isSudashui ? allRefAudios : allRefAudios.slice(0, 3);
-        if(mismatchedAsset) toast('部分认证素材属于其它平台，已回退为普通素材。切换到对应平台的视频接口才能用 asset:// 认证地址。');
+        if(mismatchedAsset) toast(tr('smart.trustedAssetMismatch'));
         const issue = window.StudioVideoApi?.videoProtocolReferenceIssue?.(profile, {image:refImages.length, video:refVideos.length, audio:refAudios.length});
         if(issue?.code === 'image_required') throw new Error(trf('smart.videoImageRequired', {count:issue.count}));
         if(issue?.code === 'unsupported') throw new Error(trf('smart.videoReferenceUnsupported', {kind:tr(`canvas.mentionKind.${issue.kind}`)}));
@@ -16704,7 +16704,7 @@ async function queryJimengNow(nodeId){
         const data = await fetchJimengQuery(submitId, kind);
         applyJimengQueryResult(node, data);
     } catch(e){
-        toast((e.message || '查询失败').slice(0, 160));
+        toast((e.message || tr('smart.queryFailed')).slice(0, 160));
     } finally {
         if(node.jimengPending) node.jimengPending.querying = false;
         render();
@@ -16744,7 +16744,7 @@ async function querySmartImageTaskNow(nodeId, localTaskId){
         ? (task.recoverTaskId || task.taskId || localTaskId || extractUpstreamTaskId(task.error || ''))
         : (task.recoverTaskId || extractUpstreamTaskId(task.error || ''));
     if(!recoverTaskId){
-        toast('没有任务 ID，无法查询');
+        toast(tr('smart.noTaskIdForQuery'));
         return;
     }
     task.querying = true;
@@ -16782,7 +16782,7 @@ async function querySmartImageTaskNow(nodeId, localTaskId){
                 toast(task.error.slice(0, 160));
             } else {
                 task.failed = false;
-                task.error = data.message || '视频任务仍在生成中';
+                task.error = data.message || tr('smart.videoTaskStillRunning');
                 toast(task.error);
                 pollSmartCanvasVideoTask(task.taskId || localTaskId).then(result => {
                     const media = resultMediaUrls(result?.videos?.length ? result.videos : (result?.result || result));
@@ -16822,11 +16822,11 @@ async function querySmartImageTaskNow(nodeId, localTaskId){
             task.error = data.error || tr('smart.errRunFailed');
             toast(task.error.slice(0, 160));
         } else {
-            task.error = data.message || '任务仍在生成中，请稍后再查询';
+            task.error = data.message || tr('smart.taskStillRunningRetryLater');
             toast(task.error);
         }
     } catch(e){
-        const message = e.message || '查询失败';
+        const message = e.message || tr('smart.queryFailed');
         if(task.kind === 'video' && e?.canvasTaskFailed){
             liveSmartNode(node).lastVideoTaskError = {error:message, at:Date.now()};
             removeSmartPendingTask(node, task.taskId || localTaskId);
@@ -17117,7 +17117,7 @@ async function resumeSmartPendingNode(node, logContext={}){
                 node.running = false;
                 node.pending = Math.max(1, smartPendingTasks(node).length);
                 logTaskFailure(currentTask.error, currentTask);
-                toast('任务未丢失，可稍后手动查询结果');
+                toast(tr('smart.taskPreservedQueryLater'));
                 render();
                 scheduleSave();
                 return;
@@ -17126,7 +17126,7 @@ async function resumeSmartPendingNode(node, logContext={}){
                 node = preserveSmartVideoPendingTask(node, task.taskId, e) || node;
                 e.smartPendingPreserved = true;
                 failures.push(e);
-                toast('任务未丢失，可稍后手动查询结果');
+                toast(tr('smart.taskPreservedQueryLater'));
                 render();
                 scheduleSave();
                 return;

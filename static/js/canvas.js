@@ -14641,7 +14641,8 @@ function completeCanvasVideoTask(taskId, result){
     meta.run.requestDetails = result?.request_details || null;
     const outputUrls = canvasVideoOutputItems(result);
     if(!outputUrls.length){
-        failCanvasVideoTask(taskId, tr('canvas.videoFailed'));
+        // 上游报成功但没有可用媒体地址：按不可恢复终态处理并明确提示，避免卡在可恢复态反复查询
+        failCanvasVideoTask(taskId, tr('canvas.videoNoMediaReturned'), {status:'failed'});
         return;
     }
     host._pending = (host._pending || []).filter(p => p.id !== pending.id);

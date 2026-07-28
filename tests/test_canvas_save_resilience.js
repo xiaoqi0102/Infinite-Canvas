@@ -82,6 +82,7 @@ async function testSmartCanvasSaveRetry() {
     },
     clearTimeout() {},
     fetch: async () => replies.shift(),
+    smartFetchWithTimeout: async () => replies.shift(),
     canvasId: 'smart-1',
     canvas: {id: 'smart-1', title: 'Smart', nodes: [], connections: [], logs: [], updated_at: 20},
     canvasSyncInFlight: false,

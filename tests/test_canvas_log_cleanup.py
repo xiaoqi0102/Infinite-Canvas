@@ -26,6 +26,7 @@ class CanvasLogCleanupTests(unittest.IsolatedAsyncioTestCase):
         self.history = self.root / "history.json"
         self.global_config = self.root / "global_config.json"
         self.asset_library = self.data / "asset_library.json"
+        self.image_tasks = self.data / "canvas_image_tasks.json"
         self.video_tasks = self.data / "canvas_video_tasks.json"
         self.history.write_text("[]", encoding="utf-8")
         self.global_config.write_text("{}", encoding="utf-8")
@@ -40,6 +41,7 @@ class CanvasLogCleanupTests(unittest.IsolatedAsyncioTestCase):
             patch.object(main, "HISTORY_FILE", str(self.history)),
             patch.object(main, "GLOBAL_CONFIG_FILE", str(self.global_config)),
             patch.object(main, "ASSET_LIBRARY_PATH", str(self.asset_library)),
+            patch.object(main, "CANVAS_IMAGE_TASKS_FILE", str(self.image_tasks)),
             patch.object(main, "CANVAS_VIDEO_TASKS_FILE", str(self.video_tasks)),
         ]
         for item in self.patches:

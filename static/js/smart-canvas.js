@@ -15571,7 +15571,12 @@ async function runLoopRoundIntoSlot(loopNode, rootNode, outputSlot, loopIndex, c
         settings = previousSettings;
         let result;
         if(isApiLikeEngine(runSettings.engine) && runSettings.apiKind !== 'video'){
-            const taskResult = await runApiGeneration(prompt, request.refs || [], runSettings);
+            const taskResult = await runApiGeneration(
+                prompt,
+                request.refs || [],
+                runSettings,
+                {run:runLog, startedAt:runLogStart, pendingNode:outputSlot}
+            );
             const taskIds = Array.isArray(taskResult?.taskIds) ? taskResult.taskIds : [];
             if(!taskIds.length) throw new Error(tr('smart.errRunFailed'));
             const existing = cleanHistoryImages(outputSlot.images || []);
@@ -15585,7 +15590,14 @@ async function runLoopRoundIntoSlot(loopNode, rootNode, outputSlot, loopIndex, c
                 delete history.h;
                 outputSlot.images = [];
             }
-            outputSlot.pendingTasks = taskIds.map(taskId => ({taskId, kind:'image', providerId:taskResult.providerId, model:taskResult.model}));
+            outputSlot.pendingTasks = taskIds.map(taskId => ({
+                taskId,
+                kind:'image',
+                providerId:taskResult.providerId,
+                model:taskResult.model,
+                logRun:runLog,
+                logStartedAt:runLogStart,
+            }));
             outputSlot.pending = Math.max(taskIds.length, Number(outputSlot.pending || 0) || taskIds.length);
             outputSlot.running = false;
             render();
@@ -16216,7 +16228,12 @@ async function runApiGeneration(prompt, refs, runSettings=settings, logContext={
         if(!r.ok) throw new Error(await r.text());
         return r.json();
     })));
-    return {taskIds:tasks.map(task => task.task_id).filter(Boolean), count, providerId:payload.provider_id, model:payload.model};
+    const taskIds = tasks.map(task => task.task_id).filter(Boolean);
+    if(taskIds.length && logContext?.run){
+        logContext.run.taskIds = taskIds.slice();
+        updateSmartTaskGenerationLog(logContext, taskIds[0], {...tasks[0], provider_id:payload.provider_id}, 'image');
+    }
+    return {taskIds, count, providerId:payload.provider_id, model:payload.model};
 }
 async function runRunningHubGeneration(prompt, refs, runSettings=settings){
     const ref = selectedRunningHubRef(runSettings);

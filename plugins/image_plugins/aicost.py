@@ -65,6 +65,7 @@ _IMAGE_CONTAINER_KEYS = {
 
 ResolveLocalPath = Callable[[str], Optional[str]]
 ContentTypeForPath = Callable[[str], str]
+ImageProgress = Optional[Callable[[Mapping[str, Any]], None]]
 ImagePayload = Dict[str, Any]
 
 
@@ -441,6 +442,7 @@ async def _poll_task(
     headers: Mapping[str, str],
     timeout: float,
     interval: float,
+    progress: ImageProgress = None,
 ) -> Dict[str, Any]:
     deadline = time.monotonic() + timeout
     last_payload: Dict[str, Any] = {}
@@ -456,6 +458,12 @@ async def _poll_task(
             await asyncio.sleep(min(interval, max(0.0, deadline - time.monotonic())))
             continue
         status = _status(last_payload)
+        if callable(progress):
+            progress({
+                "status": "polling",
+                "upstream_task_id": task_id,
+                "raw_last": last_payload,
+            })
         if status in _FAILURE_STATUSES:
             raise AICostImageProtocolError(
                 502,
@@ -591,6 +599,7 @@ async def generate_aicost_image(
     request_timeout: Any = 3600.0,
     poll_timeout: float = 3600.0,
     poll_interval: float = 2.0,
+    progress: ImageProgress = None,
 ) -> Tuple[ImagePayload, Dict[str, Any]]:
     """提交一次 aicost 图片请求，必要时轮询，并返回首张图片与最终原始响应。"""
     timeout = _timeout_seconds(poll_timeout, 3600.0, "图片轮询")
@@ -632,6 +641,12 @@ async def generate_aicost_image(
                 502,
                 "aicost 图片接口未返回图片或任务 ID，已停止处理以避免重复扣费",
             )
+        if callable(progress):
+            progress({
+                "status": "polling",
+                "upstream_task_id": task_id,
+                "raw_submit": raw,
+            })
         raw = await _poll_task(
             client,
             task_id,
@@ -639,6 +654,7 @@ async def generate_aicost_image(
             headers=headers,
             timeout=timeout,
             interval=interval,
+            progress=progress,
         )
         images = _extract_images(raw)
         if not images:

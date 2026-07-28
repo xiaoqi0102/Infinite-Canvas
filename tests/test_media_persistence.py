@@ -28,9 +28,11 @@ class MediaPersistenceTests(unittest.IsolatedAsyncioTestCase):
             path.mkdir(parents=True, exist_ok=True)
         self.history = root / "history.json"
         self.asset_library = self.data / "asset_library.json"
+        self.image_tasks = self.data / "canvas_image_tasks.json"
         self.video_tasks = self.data / "canvas_video_tasks.json"
         self.history.write_text("[]", encoding="utf-8")
         self.asset_library.write_text("{}", encoding="utf-8")
+        self.image_tasks.write_text("{}", encoding="utf-8")
         self.video_tasks.write_text("{}", encoding="utf-8")
         self.patches = [
             patch.object(main, "ASSETS_DIR", str(self.assets)),
@@ -44,6 +46,7 @@ class MediaPersistenceTests(unittest.IsolatedAsyncioTestCase):
             patch.object(main, "MEDIA_PREVIEW_DIR", str(self.previews)),
             patch.object(main, "HISTORY_FILE", str(self.history)),
             patch.object(main, "ASSET_LIBRARY_PATH", str(self.asset_library)),
+            patch.object(main, "CANVAS_IMAGE_TASKS_FILE", str(self.image_tasks)),
             patch.object(main, "CANVAS_VIDEO_TASKS_FILE", str(self.video_tasks)),
         ]
         for item in self.patches:
@@ -99,6 +102,34 @@ class MediaPersistenceTests(unittest.IsolatedAsyncioTestCase):
         value = json.loads((self.canvases / "canvas.json").read_text(encoding="utf-8"))
         self.assertEqual(value["nodes"][0]["url"], f"{new_url}?v=1#thumb")
         self.assertTrue(path.exists())
+
+    async def test_image_task_snapshot_urls_are_rewritten_in_memory_and_on_disk(self):
+        path, old_url = self.media_file("task-old.png")
+        new_url = main.output_url_for("task-new.png")
+        task_id = "canvas_img_media_rewrite"
+        task = {
+            "id": task_id,
+            "type": "online-image",
+            "status": "succeeded",
+            "updated_at": 1,
+            "result": {"images": [old_url]},
+        }
+        self.image_tasks.write_text(json.dumps({task_id: task}), encoding="utf-8")
+        with main.CANVAS_TASK_LOCK:
+            original_tasks = dict(main.CANVAS_TASKS)
+            main.CANVAS_TASKS[task_id] = dict(task)
+        try:
+            result = main.rewrite_persisted_media_urls({old_url: new_url})
+            stored = json.loads(self.image_tasks.read_text(encoding="utf-8"))
+            self.assertEqual(result["references"], 1)
+            self.assertEqual(stored[task_id]["result"]["images"], [new_url])
+            with main.CANVAS_TASK_LOCK:
+                self.assertEqual(main.CANVAS_TASKS[task_id]["result"]["images"], [new_url])
+        finally:
+            with main.CANVAS_TASK_LOCK:
+                main.CANVAS_TASKS.clear()
+                main.CANVAS_TASKS.update(original_tasks)
+            path.unlink(missing_ok=True)
 
     def test_invalid_image_and_video_payloads_are_rejected(self):
         with self.assertRaises(ValueError):

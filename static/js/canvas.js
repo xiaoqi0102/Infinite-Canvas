@@ -11303,6 +11303,11 @@ async function runRhModelNode(node, opts={}){
     }
     try {
         const taskInfos = await Promise.all(Array.from({length:count}, () => createCanvasImageTask(payload, {cascadeTargetId})));
+        if(taskInfos[0]?.task_id){
+            run.localTaskId = taskInfos[0].task_id;
+            run.request = {...(run.request || {}), task_id:taskInfos[0].task_id, provider_id:payload.provider_id};
+            addGenerationLog({run, outputs:[], runMs:nowMs() - startedAt, status:taskInfos[0].status || 'queued'});
+        }
         if(!out){
             let outputs = [];
             for(const task of taskInfos){
@@ -11960,6 +11965,11 @@ async function runGenerator(genId, opts={}){
     }
     try {
         const taskInfos = await Promise.all(Array.from({length:count}, () => createCanvasImageTask(payload, {cascadeTargetId})));
+        if(taskInfos[0]?.task_id){
+            run.localTaskId = taskInfos[0].task_id;
+            run.request = {...(run.request || {}), task_id:taskInfos[0].task_id, provider_id:payload.provider_id};
+            addGenerationLog({run, outputs:[], runMs:nowMs() - startedAt, status:taskInfos[0].status || 'queued'});
+        }
         if(!out){
             let outputs = [];
             for(const task of taskInfos){
@@ -14020,6 +14030,7 @@ function addGenerationLog({run, outputs=[], runMs=0, error='', status=''}) {
     if(existingIndex >= 0) canvas.logs.splice(existingIndex, 1);
     canvas.logs = [entry, ...canvas.logs].slice(0, 500);
     if(document.getElementById('logList')) renderCanvasLog();
+    scheduleSave();
 }
 function renderCanvasLog(){
     const list = document.getElementById('logList') || (typeof logList !== 'undefined' ? logList : null);

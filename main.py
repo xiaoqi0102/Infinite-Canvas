@@ -250,6 +250,10 @@ async def startup_event():
     except Exception as exc:
         print(f"纠正图片扩展名失败: {exc}")
     try:
+        await resume_canvas_image_tasks_on_startup()
+    except Exception as exc:
+        print(f"恢复图片任务失败: {exc}")
+    try:
         await resume_canvas_video_tasks_on_startup()
     except Exception as exc:
         print(f"恢复视频任务失败: {exc}")
@@ -413,6 +417,7 @@ ASSET_URL_LIBRARY_PATH = os.path.join(DATA_DIR, "asset_url_library.json")
 PROMPT_LIBRARY_PATH = os.path.join(DATA_DIR, "prompt_libraries.json")
 API_PROVIDERS_FILE = os.path.join(DATA_DIR, "api_providers.json")
 RUNNINGHUB_WORKFLOW_STORE_FILE = os.path.join(DATA_DIR, "runninghub_workflows.json")
+CANVAS_IMAGE_TASKS_FILE = os.path.join(DATA_DIR, "canvas_image_tasks.json")
 CANVAS_VIDEO_TASKS_FILE = os.path.join(DATA_DIR, "canvas_video_tasks.json")
 CANVAS_VIDEO_UPLOAD_CACHE_FILE = os.path.join(DATA_DIR, "canvas_video_upload_cache.json")
 SHARED_FOLDERS_FILE = os.path.join(DATA_DIR, "shared_folders.json")
@@ -3231,6 +3236,12 @@ class ImageTaskQueryRequest(BaseModel):
 
 CANVAS_TASKS: Dict[str, Dict[str, Any]] = {}
 CANVAS_TASK_LOCK = Lock()
+CANVAS_IMAGE_TERMINAL_STATUSES = {"succeeded", "failed"}
+CANVAS_IMAGE_RESUMABLE_STATUSES = {"queued", "submitting", "polling", "running", "jimeng_pending"}
+CANVAS_IMAGE_TERMINAL_KEEP = 200
+CANVAS_IMAGE_PROGRESS_FLUSH_INTERVAL = 10.0
+CANVAS_IMAGE_PROGRESS_PATCH_KEYS = {"status", "raw_last", "message", "model"}
+CANVAS_IMAGE_RAW_LAST_MAX_BYTES = 20 * 1024
 CANVAS_VIDEO_TERMINAL_STATUSES = {"succeeded", "failed"}
 CANVAS_VIDEO_RESUMABLE_STATUSES = {"queued", "submitting", "polling", "running", "jimeng_pending"}
 # 终态任务只保留最近 N 条,防止内存字典与快照文件随使用无限增长
@@ -3239,6 +3250,190 @@ CANVAS_VIDEO_TERMINAL_KEEP = 200
 CANVAS_VIDEO_PROGRESS_FLUSH_INTERVAL = 10.0
 CANVAS_VIDEO_PROGRESS_PATCH_KEYS = {"status", "raw_last", "retry_after", "next_poll_at", "message", "model"}
 CANVAS_VIDEO_RAW_LAST_MAX_BYTES = 20 * 1024
+
+
+def prune_canvas_image_tasks_mapping(items):
+    """终态图片任务仅保留最近记录，进行中任务全部保留。"""
+    kept: Dict[str, Dict[str, Any]] = {}
+    terminal = []
+    for task_id, task in items.items():
+        if not isinstance(task, dict):
+            continue
+        if str(task.get("status") or "") in CANVAS_IMAGE_TERMINAL_STATUSES:
+            terminal.append((task_id, task))
+        else:
+            kept[task_id] = task
+    terminal.sort(key=lambda kv: float(kv[1].get("updated_at") or 0.0), reverse=True)
+    for task_id, task in terminal[:CANVAS_IMAGE_TERMINAL_KEEP]:
+        kept[task_id] = task
+    return kept
+
+
+def canvas_image_task_snapshot_unlocked():
+    return prune_canvas_image_tasks_mapping({
+        task_id: task
+        for task_id, task in CANVAS_TASKS.items()
+        if isinstance(task, dict) and task.get("type") == "online-image"
+    })
+
+
+def write_canvas_image_tasks_snapshot(snapshot):
+    write_json_atomic(CANVAS_IMAGE_TASKS_FILE, snapshot)
+
+
+def persist_canvas_image_tasks():
+    with CANVAS_TASK_LOCK:
+        snapshot = canvas_image_task_snapshot_unlocked()
+    write_canvas_image_tasks_snapshot_serialized(snapshot)
+
+
+def load_persisted_canvas_image_tasks():
+    if not os.path.exists(CANVAS_IMAGE_TASKS_FILE):
+        return {}
+    try:
+        with open(CANVAS_IMAGE_TASKS_FILE, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+    except Exception as exc:
+        print(f"读取图片任务状态失败: {exc}")
+        return {}
+    if isinstance(raw, list):
+        items = {str(item.get("id") or ""): item for item in raw if isinstance(item, dict)}
+    elif isinstance(raw, dict):
+        items = {str(key): value for key, value in raw.items() if isinstance(value, dict)}
+    else:
+        return {}
+    return prune_canvas_image_tasks_mapping({task_id: task for task_id, task in items.items() if task_id})
+
+
+def load_canvas_image_tasks_into_memory():
+    restored = load_persisted_canvas_image_tasks()
+    if not restored:
+        return {}
+    with CANVAS_TASK_LOCK:
+        for task_id, task in restored.items():
+            current = CANVAS_TASKS.get(task_id)
+            if isinstance(current, dict) and current.get("status") not in CANVAS_IMAGE_TERMINAL_STATUSES:
+                continue
+            task.setdefault("id", task_id)
+            task.setdefault("type", "online-image")
+            CANVAS_TASKS[task_id] = task
+    return restored
+
+
+_canvas_image_snapshot_state = {"scheduled": 0, "written": 0}
+_canvas_image_snapshot_write_lock = Lock()
+_canvas_image_snapshot_file_lock = Lock()
+_canvas_image_last_persist_at = 0.0
+
+
+def invalidate_pending_canvas_image_snapshot_writes():
+    """使已排队但尚未写入的图片任务快照失效。"""
+    with _canvas_image_snapshot_write_lock:
+        _canvas_image_snapshot_state["scheduled"] += 1
+        generation = _canvas_image_snapshot_state["scheduled"]
+        _canvas_image_snapshot_state["written"] = max(_canvas_image_snapshot_state["written"], generation)
+
+
+def write_canvas_image_tasks_snapshot_serialized(snapshot):
+    with _canvas_image_snapshot_file_lock:
+        invalidate_pending_canvas_image_snapshot_writes()
+        write_canvas_image_tasks_snapshot(snapshot)
+
+
+def schedule_canvas_image_snapshot_write(snapshot):
+    """异步运行时在线程中写入最新图片任务快照。"""
+    with _canvas_image_snapshot_write_lock:
+        _canvas_image_snapshot_state["scheduled"] += 1
+        generation = _canvas_image_snapshot_state["scheduled"]
+
+    def _write():
+        with _canvas_image_snapshot_file_lock:
+            with _canvas_image_snapshot_write_lock:
+                stale = generation <= _canvas_image_snapshot_state["written"] or generation < _canvas_image_snapshot_state["scheduled"]
+            if stale:
+                return
+            write_canvas_image_tasks_snapshot(snapshot)
+            with _canvas_image_snapshot_write_lock:
+                _canvas_image_snapshot_state["written"] = max(_canvas_image_snapshot_state["written"], generation)
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    if loop is None:
+        _write()
+        return
+    loop.create_task(asyncio.to_thread(_write))
+
+
+def truncate_canvas_image_raw_last(value):
+    try:
+        text = json.dumps(value, ensure_ascii=False)
+    except Exception:
+        return value
+    if len(text.encode("utf-8")) <= CANVAS_IMAGE_RAW_LAST_MAX_BYTES:
+        return value
+    return {"truncated": True, "preview": text[:2048]}
+
+
+def normalize_canvas_image_task_patch(task_id: str, patch: Dict[str, Any]):
+    data = dict(patch or {})
+    upstream_task_id = str(data.get("task_id") or "").strip()
+    if upstream_task_id and upstream_task_id != task_id and not upstream_task_id.startswith("canvas_img_"):
+        data.setdefault("upstream_task_id", upstream_task_id)
+        data.pop("task_id", None)
+    if "raw_last" in data:
+        data["raw_last"] = truncate_canvas_image_raw_last(data["raw_last"])
+    return data
+
+
+def update_canvas_image_task(task_id: str, patch: Dict[str, Any], persist=True):
+    global _canvas_image_last_persist_at
+    now = time.time()
+    patch_data = normalize_canvas_image_task_patch(task_id, patch)
+    with CANVAS_TASK_LOCK:
+        task = CANVAS_TASKS.get(task_id)
+        if not isinstance(task, dict):
+            return {}
+        progress_only = (
+            set(patch_data) <= CANVAS_IMAGE_PROGRESS_PATCH_KEYS
+            and str(patch_data.get("status") or task.get("status") or "") == str(task.get("status") or "")
+        )
+        task.update(patch_data)
+        task["updated_at"] = now
+        result = dict(task)
+        managed_task = task.get("type") == "online-image"
+        should_persist = persist and managed_task and not (
+            progress_only and now - _canvas_image_last_persist_at < CANVAS_IMAGE_PROGRESS_FLUSH_INTERVAL
+        )
+        snapshot = canvas_image_task_snapshot_unlocked() if should_persist else None
+        if should_persist:
+            _canvas_image_last_persist_at = now
+    if snapshot is not None:
+        schedule_canvas_image_snapshot_write(snapshot)
+    return result
+
+
+def canvas_image_upstream_task_id(task: Dict[str, Any]):
+    for key in ("upstream_task_id", "submit_id"):
+        value = str((task or {}).get(key) or "").strip()
+        if value:
+            return value
+    legacy_task_id = str((task or {}).get("task_id") or "").strip()
+    if legacy_task_id and not legacy_task_id.startswith("canvas_img_"):
+        return legacy_task_id
+    return ""
+
+
+def canvas_image_result_with_request_details(task_id: str, result):
+    if not isinstance(result, dict):
+        return result
+    with CANVAS_TASK_LOCK:
+        request_details = (CANVAS_TASKS.get(task_id) or {}).get("request_details")
+    if not isinstance(request_details, dict) or not request_details:
+        return result
+    return {**result, "request_details": request_details}
+
 
 def prune_canvas_video_tasks_mapping(items):
     """终态视频任务按 updated_at 只保留最近 CANVAS_VIDEO_TERMINAL_KEEP 条,进行中任务全部保留。"""
@@ -7194,7 +7389,7 @@ async def jimeng_prepare_local_media(ref_url, kind="image"):
             return path, temp_paths
     raise HTTPException(status_code=400, detail=f"即梦 CLI 只支持本地文件参考素材，无法读取：{text[:120]}")
 
-async def generate_jimeng_provider_image(prompt, size, model, reference_images=None, provider=None):
+async def generate_jimeng_provider_image(prompt, size, model, reference_images=None, provider=None, progress=None):
     refs = [ref for ref in (reference_images or []) if ref.get("url")]
     temp_paths = []
     try:
@@ -7227,6 +7422,14 @@ async def generate_jimeng_provider_image(prompt, size, model, reference_images=N
             if model_version:
                 args.append(f"--model_version={model_version}")
         raw = await run_jimeng_cli(args, timeout=jimeng_poll_seconds() + 120)
+        submit_id = jimeng_submit_id(raw)
+        if submit_id and callable(progress):
+            progress({
+                "status": "polling",
+                "upstream_task_id": submit_id,
+                "submit_id": submit_id,
+                "raw_submit": raw,
+            })
         urls = await jimeng_store_outputs(raw, "image")
         return {"type": "url", "value": urls[0]}, raw
     finally:
@@ -7435,7 +7638,7 @@ async def fetch_image_task_payload(client, task_id, provider=None):
     response.raise_for_status()
     return response.json()
 
-async def wait_for_image_task(client, task_id, provider=None):
+async def wait_for_image_task(client, task_id, provider=None, progress=None):
     is_apimart = is_apimart_provider(provider)
     timeout = APIMART_IMAGE_TASK_TIMEOUT if is_apimart else IMAGE_TASK_TIMEOUT
     interval = APIMART_IMAGE_POLL_INTERVAL if is_apimart else IMAGE_POLL_INTERVAL
@@ -7449,6 +7652,12 @@ async def wait_for_image_task(client, task_id, provider=None):
             if time.monotonic() >= deadline:
                 break
         last_payload = await fetch_image_task_payload(client, task_id, provider)
+        if callable(progress):
+            progress({
+                "status": "polling",
+                "upstream_task_id": task_id,
+                "raw_last": last_payload,
+            })
         status = image_task_status(last_payload)
         if not status:
             try:
@@ -7630,7 +7839,7 @@ def collect_local_media_urls(value: Any) -> List[str]:
     return urls
 
 def persisted_media_json_paths(include_history: bool = True) -> List[str]:
-    candidates = [ASSET_LIBRARY_PATH, CANVAS_VIDEO_TASKS_FILE]
+    candidates = [ASSET_LIBRARY_PATH, CANVAS_IMAGE_TASKS_FILE, CANVAS_VIDEO_TASKS_FILE]
     if include_history:
         candidates.append(HISTORY_FILE)
     for root in (CANVAS_DIR, CONVERSATION_DIR):
@@ -7701,41 +7910,54 @@ def rewrite_persisted_media_urls(replacements: Dict[str, str]) -> Dict[str, int]
     if not normalized:
         return {"files": 0, "references": 0}
     pending = []
-    with CANVAS_LOCK, HISTORY_LOCK, CONVERSATION_LOCK, CANVAS_TASK_LOCK:
-        for path in persisted_media_json_paths():
-            try:
-                with open(path, "r", encoding="utf-8-sig") as handle:
-                    original = json.load(handle)
-            except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-                raise HTTPException(status_code=500, detail=f"无法读取引用文件，已取消移动：{path}") from exc
-            updated, count = replace_media_urls_in_json(original, normalized)
-            if count:
-                pending.append((path, original, updated, count))
-        written = []
-        try:
-            for path, original, updated, count in pending:
-                write_json_atomic(path, updated, indent=4 if same_path(path, HISTORY_FILE) else 2)
-                written.append((path, original))
-            task_entry = next((item for item in pending if same_path(item[0], CANVAS_VIDEO_TASKS_FILE)), None)
-            if task_entry:
-                # 只替换视频任务条目;进行中的图像/Comfy 任务仍在内存运行,不能被清空
-                for stale_id in [
-                    key for key, value in CANVAS_TASKS.items()
-                    if isinstance(value, dict) and value.get("type") == "online-video"
-                ]:
-                    CANVAS_TASKS.pop(stale_id, None)
-                CANVAS_TASKS.update(task_entry[2] if isinstance(task_entry[2], dict) else {})
-        except Exception:
-            for path, original in reversed(written):
+    _canvas_image_snapshot_file_lock.acquire()
+    try:
+        invalidate_pending_canvas_image_snapshot_writes()
+        with CANVAS_LOCK, HISTORY_LOCK, CONVERSATION_LOCK, CANVAS_TASK_LOCK:
+            # 媒体改写会让旧异步快照失效，先把当前内存状态写入，避免无 URL 命中时丢失最新任务进度。
+            write_canvas_image_tasks_snapshot(canvas_image_task_snapshot_unlocked())
+            for path in persisted_media_json_paths():
                 try:
-                    write_json_atomic(path, original, indent=4 if same_path(path, HISTORY_FILE) else 2)
-                except Exception as rollback_error:
-                    print(f"回滚媒体引用失败: {path}: {rollback_error}")
-            raise
+                    with open(path, "r", encoding="utf-8-sig") as handle:
+                        original = json.load(handle)
+                except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+                    raise HTTPException(status_code=500, detail=f"无法读取引用文件，已取消移动：{path}") from exc
+                updated, count = replace_media_urls_in_json(original, normalized)
+                if count:
+                    pending.append((path, original, updated, count))
+            written = []
+            try:
+                for path, original, updated, count in pending:
+                    write_json_atomic(path, updated, indent=4 if same_path(path, HISTORY_FILE) else 2)
+                    written.append((path, original))
+                image_task_entry = next((item for item in pending if same_path(item[0], CANVAS_IMAGE_TASKS_FILE)), None)
+                video_task_entry = next((item for item in pending if same_path(item[0], CANVAS_VIDEO_TASKS_FILE)), None)
+                for task_type, task_entry in (
+                    ("online-image", image_task_entry),
+                    ("online-video", video_task_entry),
+                ):
+                    if not task_entry:
+                        continue
+                    for stale_id in [
+                        key for key, value in CANVAS_TASKS.items()
+                        if isinstance(value, dict) and value.get("type") == task_type
+                    ]:
+                        CANVAS_TASKS.pop(stale_id, None)
+                    CANVAS_TASKS.update(task_entry[2] if isinstance(task_entry[2], dict) else {})
+            except Exception:
+                for path, original in reversed(written):
+                    try:
+                        write_json_atomic(path, original, indent=4 if same_path(path, HISTORY_FILE) else 2)
+                    except Exception as rollback_error:
+                        print(f"回滚媒体引用失败: {path}: {rollback_error}")
+                raise
+    finally:
+        _canvas_image_snapshot_file_lock.release()
     return {
         "files": len(pending),
         "references": sum(item[3] for item in pending),
     }
+
 
 def local_asset_url_replacements(old_rel: str, new_rel: str) -> Dict[str, str]:
     old_rel = str(old_rel or "").replace("\\", "/").lstrip("/")
@@ -11993,6 +12215,12 @@ async def generate_modelscope_provider_image(
                 return extract_image(raw), raw
             except HTTPException:
                 raise HTTPException(status_code=502, detail=f"ModelScope 未返回 task_id：{raw}")
+        if callable(progress):
+            progress({
+                "status": "polling",
+                "upstream_task_id": task_id,
+                "raw_submit": raw,
+            })
 
         deadline = time.monotonic() + AI_REQUEST_TIMEOUT
         last_payload = raw
@@ -12005,6 +12233,12 @@ async def generate_modelscope_provider_image(
             result.raise_for_status()
             data = result.json()
             last_payload = data
+            if callable(progress):
+                progress({
+                    "status": "polling",
+                    "upstream_task_id": task_id,
+                    "raw_last": data,
+                })
             status = str(data.get("task_status") or "").upper()
             if status == "SUCCEED":
                 images = data.get("output_images") or []
@@ -12783,7 +13017,7 @@ async def runninghub_upload_reference(client, provider, ref):
             return str(value)
     raise HTTPException(status_code=502, detail=f"RunningHub 上传图片未返回 download_url：{raw}")
 
-async def wait_for_runninghub_image_task(client, provider, task_id):
+async def wait_for_runninghub_image_task(client, provider, task_id, progress=None):
     query_url = runninghub_openapi_url(provider, "query")
     deadline = time.monotonic() + 1800
     last_payload = None
@@ -12793,6 +13027,12 @@ async def wait_for_runninghub_image_task(client, provider, task_id):
         response.raise_for_status()
         raw = response.json()
         last_payload = raw
+        if callable(progress):
+            progress({
+                "status": "polling",
+                "upstream_task_id": task_id,
+                "raw_last": raw,
+            })
         status = runninghub_query_status(raw)
         if status in {"success", "succeeded", "completed", "complete", "finished", "finish", "done", "3"}:
             return raw
@@ -13152,6 +13392,12 @@ async def generate_runninghub_entry_image(
         task_id = raw.get("data", {}).get("taskId") if isinstance(raw.get("data"), dict) else ""
         if not task_id:
             raise HTTPException(status_code=502, detail=f"RunningHub 未返回 taskId：{raw}")
+        if callable(progress):
+            progress({
+                "status": "polling",
+                "upstream_task_id": task_id,
+                "raw_submit": raw,
+            })
 
         query_url = runninghub_endpoint_url(provider, "/task/openapi/outputs")
         deadline = time.monotonic() + 1800
@@ -13161,6 +13407,12 @@ async def generate_runninghub_entry_image(
             query_response = await client.post(query_url, headers=runninghub_app_headers(True), json={"apiKey": api_key, "taskId": task_id})
             query_raw = query_response.json()
             last_payload = query_raw
+            if callable(progress):
+                progress({
+                    "status": "polling",
+                    "upstream_task_id": task_id,
+                    "raw_last": query_raw,
+                })
             code = query_raw.get("code") if isinstance(query_raw, dict) else None
             if code in (0, "0"):
                 outputs = runninghub_extract_outputs(query_raw.get("data"))
@@ -13254,7 +13506,13 @@ async def generate_runninghub_provider_image(
             task_id = runninghub_extract_task_id(raw)
             if not task_id:
                 raise HTTPException(status_code=502, detail=f"RunningHub 未返回 taskId 或图片结果：{raw}")
-        result = await wait_for_runninghub_image_task(client, provider, task_id)
+        if callable(progress):
+            progress({
+                "status": "polling",
+                "upstream_task_id": task_id,
+                "raw_submit": raw,
+            })
+        result = await wait_for_runninghub_image_task(client, provider, task_id, progress)
         return runninghub_extract_image(result), result
 
 async def wait_for_runninghub_openapi_task(client, provider, task_id, output_kind="", on_progress=None):
@@ -13419,11 +13677,12 @@ async def generate_ai_image(
                 request_timeout=httpx.Timeout(connect=20.0, read=3600.0, write=120.0, pool=20.0),
                 poll_timeout=3600.0,
                 poll_interval=2.0,
+                progress=progress,
             )
         except AICostImageProtocolError as exc:
             raise aicost_image_http_exception(exc) from exc
     if is_jimeng_provider(provider):
-        return await generate_jimeng_provider_image(prompt, size, model, reference_images, provider)
+        return await generate_jimeng_provider_image(prompt, size, model, reference_images, provider, progress)
     if is_runninghub_provider(provider):
         return await generate_runninghub_provider_image(
             prompt, size, model, reference_images, provider, progress, request_attempts
@@ -13740,8 +13999,14 @@ async def generate_ai_image(
             task_id = extract_task_id(raw)
             if not task_id:
                 raise
+            if callable(progress):
+                progress({
+                    "status": "polling",
+                    "upstream_task_id": task_id,
+                    "raw_submit": raw,
+                })
         try:
-            task_result = await wait_for_image_task(client, task_id, provider)
+            task_result = await wait_for_image_task(client, task_id, provider, progress)
             return extract_image(task_result), task_result
         except HTTPException as exc:
             setattr(exc, "upstream_task_id", task_id)
@@ -16496,7 +16761,25 @@ async def online_image(payload: OnlineImageRequest):
 async def query_image_task(payload: ImageTaskQueryRequest):
     provider = get_api_provider(payload.provider_id)
     task_id = str(payload.task_id or "").strip()
-    if is_runninghub_provider(provider):
+    if provider.get("id") == "modelscope":
+        token = modelscope_api_key()
+        if not token:
+            raise HTTPException(status_code=400, detail="未配置 ModelScope API Key，请在 API 设置中填写。")
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "X-ModelScope-Task-Type": "image_generation",
+        }
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(connect=20.0, read=300.0, write=60.0, pool=20.0)) as client:
+                response = await client.get(f"{modelscope_image_api_root()}/tasks/{urllib.parse.quote(task_id, safe='')}", headers=headers)
+                response.raise_for_status()
+                raw = response.json()
+        except httpx.HTTPStatusError as exc:
+            text = exc.response.text or ""
+            raise HTTPException(status_code=exc.response.status_code, detail=f"查询 ModelScope 图片任务失败：{text[:300]}") from exc
+        except httpx.HTTPError as exc:
+            raise HTTPException(status_code=502, detail=f"查询 ModelScope 图片任务失败：{exc}") from exc
+    elif is_runninghub_provider(provider):
         api_key = runninghub_api_key(provider)
         url = runninghub_endpoint_url(provider, "/task/openapi/outputs")
         try:
@@ -16559,7 +16842,9 @@ async def query_image_task(payload: ImageTaskQueryRequest):
         except httpx.HTTPError as exc:
             raise HTTPException(status_code=502, detail=f"查询 RunningHub 任务失败：{exc}") from exc
     timeout = httpx.Timeout(connect=20.0, read=300.0, write=60.0, pool=20.0)
-    if effective_image_request_mode(provider) == AICOST_IMAGE_REQUEST_MODE:
+    if provider.get("id") == "modelscope":
+        pass
+    elif effective_image_request_mode(provider) == AICOST_IMAGE_REQUEST_MODE:
         try:
             raw = await query_aicost_image_task(
                 task_id,
@@ -16582,6 +16867,11 @@ async def query_image_task(payload: ImageTaskQueryRequest):
             raise HTTPException(status_code=502, detail=f"查询上游生图任务失败：{exc}") from exc
 
     status = image_task_status(raw)
+    if provider.get("id") == "modelscope":
+        status = str(raw.get("task_status") or raw.get("status") or "").upper()
+        images = raw.get("output_images") if isinstance(raw, dict) else None
+        if isinstance(images, list) and images:
+            raw = {**raw, "data": [{"url": url} for url in images if url]}
     image_items = []
     try:
         image_items = extract_images(raw)
@@ -16615,7 +16905,7 @@ async def query_image_task(payload: ImageTaskQueryRequest):
         if GLOBAL_LOOP:
             asyncio.run_coroutine_threadsafe(manager.broadcast_new_image(result), GLOBAL_LOOP)
         return result
-    if status in IMAGE_TASK_FAILED_STATUSES:
+    if status in IMAGE_TASK_FAILED_STATUSES or status in {"REVOKED"}:
         return {
             "status": "failed",
             "task_id": task_id,
@@ -16633,90 +16923,199 @@ async def query_image_task(payload: ImageTaskQueryRequest):
         "raw": raw,
     }
 
-async def run_canvas_image_task(task_id: str, payload: OnlineImageRequest):
-    with CANVAS_TASK_LOCK:
-        if task_id in CANVAS_TASKS:
-            CANVAS_TASKS[task_id]["status"] = "running"
-            CANVAS_TASKS[task_id]["updated_at"] = time.time()
-    try:
-        def progress(patch):
-            if not isinstance(patch, dict):
-                return
-            with CANVAS_TASK_LOCK:
-                task = CANVAS_TASKS.get(task_id)
-                if isinstance(task, dict):
-                    task.update(patch)
-                    task["updated_at"] = time.time()
+def canvas_image_request_meta(payload: "OnlineImageRequest"):
+    return {
+        "provider_id": payload.provider_id,
+        "model": payload.model,
+        "prompt": str(payload.prompt or "")[:500],
+        "size": payload.size,
+        "quality": payload.quality,
+        "n": max(1, min(8, int(payload.n or 1))),
+        "reference_image_count": len([ref for ref in payload.reference_images if ref.url]),
+    }
 
-        result = await build_online_image_result(payload, progress)
-        with CANVAS_TASK_LOCK:
-            task = CANVAS_TASKS.get(task_id)
-            request_details = (task or {}).get("request_details") if isinstance(task, dict) else None
-            if isinstance(result, dict) and isinstance(request_details, dict) and request_details:
-                result = {**result, "request_details": request_details}
-            if isinstance(task, dict):
-                task.update({
-                    "status": "succeeded",
-                    "result": result,
-                    "error": "",
-                    "updated_at": time.time(),
-                })
+
+async def resume_canvas_image_task_result(task_id: str):
+    with CANVAS_TASK_LOCK:
+        task = dict(CANVAS_TASKS.get(task_id) or {})
+    if not task:
+        raise HTTPException(status_code=404, detail="图片任务不存在")
+    upstream_task_id = canvas_image_upstream_task_id(task)
+    if not upstream_task_id:
+        raise HTTPException(status_code=409, detail="服务重启前尚未拿到上游图片任务 ID，已停止自动恢复以避免重复扣费。")
+    provider_id = str(task.get("provider_id") or "").strip()
+    if task.get("jimeng_pending") or task.get("submit_id"):
+        queried = await jimeng_query_result(upstream_task_id, "image")
+        try:
+            urls = await jimeng_store_outputs(queried, "image", allow_query=False)
+        except JimengPendingError as exc:
+            setattr(exc, "raw", queried)
+            raise
+        image_items = [image_output_meta(url) for url in urls if url]
+        result = {
+            "prompt": str((task.get("request") or {}).get("prompt") or ""),
+            "images": urls,
+            "image_items": image_items,
+            "timestamp": time.time(),
+            "type": "online",
+            "model": str(task.get("model") or ""),
+            "provider_id": provider_id,
+            "provider_name": provider_id,
+            "task_id": upstream_task_id,
+            "params": task.get("request") or {},
+            "raw": queried,
+        }
+        save_to_history(result)
+        if GLOBAL_LOOP:
+            asyncio.run_coroutine_threadsafe(manager.broadcast_new_image(result), GLOBAL_LOOP)
+        result.pop("raw", None)
+        return result
+    queried = await query_image_task(ImageTaskQueryRequest(provider_id=provider_id, task_id=upstream_task_id))
+    status = str(queried.get("status") or "").lower()
+    if status == "succeeded":
+        result = dict(queried)
+        result.setdefault("prompt", str((task.get("request") or {}).get("prompt") or ""))
+        result.setdefault("model", str(task.get("model") or ""))
+        result.setdefault("params", task.get("request") or {})
+        result.pop("raw", None)
+        return result
+    if status == "failed":
+        raise HTTPException(status_code=502, detail=queried.get("error") or "图片任务失败")
+    update_canvas_image_task(task_id, {
+        "status": "polling",
+        "message": queried.get("message") or "图片任务仍在生成中",
+        "raw_last": queried.get("raw"),
+    })
+    raise ImageTaskStillPendingError(queried)
+
+
+class ImageTaskStillPendingError(Exception):
+    def __init__(self, raw=None):
+        self.raw = raw
+        super().__init__("图片任务仍在生成中")
+
+
+async def run_canvas_image_task(task_id: str, payload: Optional[OnlineImageRequest] = None, resume=False):
+    update_canvas_image_task(task_id, {"status": "polling" if resume else "running", "error": ""})
+    try:
+        if resume:
+            while True:
+                try:
+                    result = await resume_canvas_image_task_result(task_id)
+                    break
+                except ImageTaskStillPendingError:
+                    await asyncio.sleep(IMAGE_POLL_INTERVAL)
+                except JimengPendingError as exc:
+                    info = jimeng_pending_payload(exc)
+                    update_canvas_image_task(task_id, {
+                        "status": "jimeng_pending",
+                        "jimeng_pending": True,
+                        "upstream_task_id": exc.submit_id,
+                        "submit_id": exc.submit_id,
+                        "kind": exc.kind,
+                        "queue_info": exc.queue_info,
+                        "message": info["message"],
+                        "raw_last": exc.raw,
+                    })
+                    await asyncio.sleep(60)
+        else:
+            if payload is None:
+                raise HTTPException(status_code=400, detail="缺少图片任务请求")
+            result = await build_online_image_result(payload, lambda patch: update_canvas_image_task(task_id, patch))
+        result = canvas_image_result_with_request_details(task_id, result)
+        update_canvas_image_task(task_id, {
+            "status": "succeeded",
+            "result": result,
+            "error": "",
+            "message": "",
+            "jimeng_pending": False,
+            "status_code": None,
+        })
     except JimengPendingError as exc:
-        # 即梦云端还在排队：标记为 jimeng_pending，前端据 submit_id 持久续查（任务未丢失）
         info = jimeng_pending_payload(exc)
-        with CANVAS_TASK_LOCK:
-            task = CANVAS_TASKS.get(task_id)
-            if isinstance(task, dict):
-                task.update({
-                    "status": "jimeng_pending",
-                    "jimeng_pending": True,
-                    "submit_id": exc.submit_id,
-                    "kind": exc.kind,
-                    "queue_info": exc.queue_info,
-                    "message": info["message"],
-                    "error": "",
-                    "updated_at": time.time(),
-                })
+        update_canvas_image_task(task_id, {
+            "status": "jimeng_pending",
+            "jimeng_pending": True,
+            "upstream_task_id": exc.submit_id,
+            "submit_id": exc.submit_id,
+            "kind": exc.kind,
+            "queue_info": exc.queue_info,
+            "message": info["message"],
+            "error": "",
+            "raw_last": exc.raw,
+        })
     except Exception as exc:
         detail = getattr(exc, "detail", None) or str(exc)
         status_code = getattr(exc, "status_code", 500)
-        upstream_task_id = getattr(exc, "upstream_task_id", "") or extract_task_id_from_text(detail)
         with CANVAS_TASK_LOCK:
-            task = CANVAS_TASKS.get(task_id)
-            if isinstance(task, dict):
-                task.update({
-                    "status": "failed",
-                    "error": str(detail),
-                    "status_code": status_code,
-                    "upstream_task_id": upstream_task_id,
-                    "updated_at": time.time(),
-                })
+            current = dict(CANVAS_TASKS.get(task_id) or {})
+        upstream_task_id = getattr(exc, "upstream_task_id", "") or canvas_image_upstream_task_id(current) or extract_task_id_from_text(detail)
+        update_canvas_image_task(task_id, {
+            "status": "failed",
+            "error": str(detail),
+            "status_code": status_code,
+            "upstream_task_id": upstream_task_id,
+            "message": "",
+        })
+
+
+async def resume_canvas_image_tasks_on_startup():
+    restored = load_canvas_image_tasks_into_memory()
+    for task_id, task in restored.items():
+        status = str(task.get("status") or "").strip().lower()
+        if status in CANVAS_IMAGE_TERMINAL_STATUSES or status not in CANVAS_IMAGE_RESUMABLE_STATUSES:
+            continue
+        if canvas_image_upstream_task_id(task):
+            update_canvas_image_task(task_id, {
+                "status": "polling",
+                "error": "",
+                "message": "服务重启后已恢复图片任务查询",
+            })
+            asyncio.create_task(run_canvas_image_task(task_id, resume=True))
+        else:
+            update_canvas_image_task(task_id, {
+                "status": "failed",
+                "error": "服务重启前尚未拿到上游图片任务 ID，已停止自动恢复以避免重复扣费。",
+                "message": "",
+            })
+
 
 @app.post("/api/canvas-image-tasks")
 async def create_canvas_image_task(payload: OnlineImageRequest):
     task_id = f"canvas_img_{uuid.uuid4().hex}"
+    task = {
+        "id": task_id,
+        "type": "online-image",
+        "status": "queued",
+        "created_at": time.time(),
+        "updated_at": time.time(),
+        "result": None,
+        "error": "",
+        "provider_id": payload.provider_id,
+        "model": payload.model,
+        "request": canvas_image_request_meta(payload),
+        "upstream_task_id": "",
+        "message": "",
+    }
     with CANVAS_TASK_LOCK:
-        CANVAS_TASKS[task_id] = {
-            "id": task_id,
-            "type": "online-image",
-            "status": "queued",
-            "created_at": time.time(),
-            "updated_at": time.time(),
-            "result": None,
-            "error": "",
-            "provider_id": payload.provider_id,
-            "model": payload.model,
-        }
+        CANVAS_TASKS[task_id] = task
+    persist_canvas_image_tasks()
     asyncio.create_task(run_canvas_image_task(task_id, payload))
     return {"task_id": task_id, "status": "queued"}
+
 
 @app.get("/api/canvas-image-tasks/{task_id}")
 async def get_canvas_image_task(task_id: str):
     with CANVAS_TASK_LOCK:
         task = dict(CANVAS_TASKS.get(task_id) or {})
     if not task:
-        raise HTTPException(status_code=404, detail="画布任务不存在，可能服务已重启或任务已过期")
+        load_canvas_image_tasks_into_memory()
+        with CANVAS_TASK_LOCK:
+            task = dict(CANVAS_TASKS.get(task_id) or {})
+    if not task:
+        raise HTTPException(status_code=404, detail="图片任务不存在，可能已超过保留上限")
     return task
+
 
 async def run_canvas_comfy_task(task_id: str, payload: GenerateRequest):
     with CANVAS_TASK_LOCK:

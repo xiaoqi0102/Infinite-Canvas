@@ -94,6 +94,20 @@ def _provider_root(base_url: Any) -> str:
     return canonical_video_api_root(base_url)
 
 
+def is_sudashui_official_base_url(base_url: Any) -> bool:
+    """判断 Base URL 是否指向 Sudashui 官方域名。
+
+    注：官方域取 ``sudashuiapi.com``（含其子域）为合理假设，
+    与文件直链域 ``files.sudashuiapi.com`` 同根。
+    """
+    try:
+        parsed = urllib.parse.urlsplit(str(base_url or "").strip())
+    except Exception:
+        return False
+    host = (parsed.hostname or "").lower()
+    return host == "sudashuiapi.com" or host.endswith(".sudashuiapi.com")
+
+
 def _duration(value: Any) -> int:
     try:
         numeric = float(value)
@@ -232,6 +246,7 @@ async def _upload_media(
     cache: Dict[str, Tuple[str, str]],
     resolve_local_path: ResolveLocalPath,
     content_type_for_path: ContentTypeForPath,
+    upload_base_url: Optional[str] = None,
 ) -> str:
     source = str(value or "").strip()
     if not source:
@@ -244,6 +259,13 @@ async def _upload_media(
     if _source_is_public_url(source):
         cache[source] = (kind, source)
         return source
+    # 素材确需上传时校验官方域：非官方渠道禁止走文件上传，避免把密钥发往第三方文件服务
+    # upload_base_url 为 None 时保持历史行为完全不变（向后兼容，由宿主决定是否启用校验）
+    if upload_base_url is not None and not is_sudashui_official_base_url(upload_base_url):
+        raise SudashuiProtocolError(
+            400,
+            f"当前 Sudashui 渠道并非官方域名，参考{kind}不支持本地素材上传，请改用公网 http/https 素材链接",
+        )
     file_tuple = (
         _data_url_file(source, kind)
         if source.startswith("data:")
@@ -276,8 +298,12 @@ async def upload_sudashui_media(
     headers: Mapping[str, str],
     resolve_local_path: ResolveLocalPath,
     content_type_for_path: ContentTypeForPath,
+    upload_base_url: Optional[str] = None,
 ) -> str:
-    """上传单个素材并返回 Sudashui 文件服务实际响应的直链。"""
+    """上传单个素材并返回 Sudashui 文件服务实际响应的直链。
+
+    ``upload_base_url`` 传入渠道 Base URL 时会校验官方域，None 保持历史行为。
+    """
     kind = {
         "image": "图片",
         "video": "视频",
@@ -293,6 +319,7 @@ async def upload_sudashui_media(
         {},
         resolve_local_path,
         content_type_for_path,
+        upload_base_url,
     )
 
 
@@ -372,6 +399,7 @@ async def _frames_payload(
     sources: Mapping[str, Any],
     resolve_local_path: ResolveLocalPath,
     content_type_for_path: ContentTypeForPath,
+    upload_base_url: Optional[str] = None,
 ) -> Dict[str, Any]:
     image_refs = sources["image_refs"]
     roles = sources["roles"]
@@ -389,10 +417,10 @@ async def _frames_payload(
     _validate_official_sources(image_sources, official_indexes)
     cache: Dict[str, Tuple[str, str]] = {}
     first_url = await _upload_media(
-        client, headers, image_sources[0], "图片", cache, resolve_local_path, content_type_for_path
+        client, headers, image_sources[0], "图片", cache, resolve_local_path, content_type_for_path, upload_base_url
     )
     last_url = await _upload_media(
-        client, headers, image_sources[1], "图片", cache, resolve_local_path, content_type_for_path
+        client, headers, image_sources[1], "图片", cache, resolve_local_path, content_type_for_path, upload_base_url
     )
     inner: Dict[str, Any] = {
         "aspectRatio": sources["aspect_ratio"],
@@ -413,6 +441,7 @@ async def _references_payload(
     sources: Mapping[str, Any],
     resolve_local_path: ResolveLocalPath,
     content_type_for_path: ContentTypeForPath,
+    upload_base_url: Optional[str] = None,
 ) -> Dict[str, Any]:
     image_sources = [str(ref.get("url") or "").strip() for ref in sources["image_refs"]]
     official_indexes = _official_asset_indexes(request, model, len(image_sources))
@@ -421,7 +450,7 @@ async def _references_payload(
 
     async def upload(value: str, kind: str) -> str:
         return await _upload_media(
-            client, headers, value, kind, cache, resolve_local_path, content_type_for_path
+            client, headers, value, kind, cache, resolve_local_path, content_type_for_path, upload_base_url
         )
 
     image_urls = [await upload(source, "图片") for source in image_sources]
@@ -446,6 +475,7 @@ async def _video_body(
     headers: Mapping[str, str],
     resolve_local_path: ResolveLocalPath,
     content_type_for_path: ContentTypeForPath,
+    upload_base_url: Optional[str] = None,
 ) -> Dict[str, Any]:
     image_refs = _image_refs(request)
     video_sources = _nonempty_strings(request.get("videos") or [])
@@ -461,11 +491,11 @@ async def _video_body(
     }
     if any(role in {"first_frame", "last_frame"} for role in roles):
         inner = await _frames_payload(
-            client, request, model, headers, sources, resolve_local_path, content_type_for_path
+            client, request, model, headers, sources, resolve_local_path, content_type_for_path, upload_base_url
         )
     else:
         inner = await _references_payload(
-            client, request, model, headers, sources, resolve_local_path, content_type_for_path
+            client, request, model, headers, sources, resolve_local_path, content_type_for_path, upload_base_url
         )
     return {
         "model": model,
@@ -871,14 +901,19 @@ async def generate_sudashui_video(
     save_video: SaveVideo,
     poll_timeout: float,
     poll_interval: float = 25.0,
+    upload_base_url: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """提交 Sudashui 视频任务并等待完成。"""
+    """提交 Sudashui 视频任务并等待完成。
+
+    ``upload_base_url`` 传入渠道 Base URL 时，本地素材上传前会校验官方域；
+    默认 None 保持历史行为（宿主 main.py 负责决定是否启用）。
+    """
     root = _provider_root(base_url)
     if not root:
         raise SudashuiProtocolError(400, "Sudashui 未配置 Base URL")
     model = str(request.get("model") or "veo3-fast").strip() or "veo3-fast"
     body = await _video_body(
-        client, request, model, headers, resolve_local_path, content_type_for_path
+        client, request, model, headers, resolve_local_path, content_type_for_path, upload_base_url
     )
     submit_url = f"{root}/v1/video/generations"
     try:

@@ -74,6 +74,7 @@ from plugins.video_plugins import (
     is_aicost_official_provider,
     is_geeknow_official_provider,
     is_megabyai_official_provider,
+    is_sudashui_official_base_url,
     is_tudou_official_provider,
     megabyai_video_task_retryable,
     public_http_get,
@@ -1605,6 +1606,10 @@ def normalize_image_request_mode(value):
         return AICOST_IMAGE_REQUEST_MODE
     return mode if mode in SUPPORTED_IMAGE_REQUEST_MODES else "openai"
 
+def is_sudashui_official_provider(provider) -> bool:
+    """与其余四家插件对齐:按官方域名识别 Sudashui 官方渠道。"""
+    return is_sudashui_official_base_url(str((provider or {}).get("base_url") or ""))
+
 def normalize_video_request_mode(value):
     mode = str(value or "").strip().lower()
     if mode in {"openai-video", "single-video", "video-generations"}:
@@ -1718,6 +1723,8 @@ def normalize_provider(item):
         video_request_mode = GEEKNOW_VIDEO_REQUEST_MODE
     elif is_tudou_official_provider(provider_base_url):
         video_request_mode = TUDOU_VIDEO_REQUEST_MODE
+    elif is_sudashui_official_provider(provider_base_url):
+        video_request_mode = SUDASHUI_VIDEO_REQUEST_MODE
     else:
         video_request_mode = normalize_video_request_mode(item.get("video_request_mode"))
     image_generation_endpoint = normalize_endpoint_override(item.get("image_generation_endpoint"), "文生图端口")
@@ -10686,6 +10693,7 @@ def configured_sudashui_upload_providers() -> List[Dict[str, Any]]:
         if not (
             provider.get("enabled", True)
             and is_sudashui_video_generations_mode(provider)
+            and is_sudashui_official_provider(provider)
             and str(provider.get("base_url") or "").strip()
             and provider_env_key_value(provider_id)
         ):
@@ -10714,6 +10722,7 @@ async def upload_video_to_sudashui(path: str, source_url: str, provider: Dict[st
                 headers=api_headers(json_body=False, provider=provider),
                 resolve_local_path=lambda _value: path,
                 content_type_for_path=content_type_for_path,
+                upload_base_url=str(provider.get("base_url") or ""),
             )
     except SudashuiProtocolError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
@@ -17016,6 +17025,8 @@ def effective_video_request_mode(provider) -> str:
         return GEEKNOW_VIDEO_REQUEST_MODE
     if is_tudou_official_provider(provider):
         return TUDOU_VIDEO_REQUEST_MODE
+    if is_sudashui_official_provider(provider):
+        return SUDASHUI_VIDEO_REQUEST_MODE
     if (
         is_agnes_provider(provider)
         or is_volcengine_provider(provider)
@@ -17959,6 +17970,7 @@ async def build_canvas_video_result(payload: CanvasVideoRequest, progress=None):
                         save_video=lambda url: save_remote_video_to_output(url, provider=provider),
                         poll_timeout=VIDEO_POLL_TIMEOUT,
                         poll_interval=video_poll_interval(provider),
+                        upload_base_url=base_url,
                     )
                 except SudashuiProtocolError as exc:
                     raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc

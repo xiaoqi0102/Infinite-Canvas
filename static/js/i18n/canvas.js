@@ -437,6 +437,7 @@
         "canvas.noTaskIdForQuery": { zh: "没有任务 ID，无法查询结果", en: "No task ID, unable to query the result" },
         "canvas.videoTaskStillRunning": { zh: "视频任务仍在生成中", en: "The video task is still generating" },
         "canvas.taskStillRunningRetryLater": { zh: "任务仍在生成中，请稍后再查询", en: "The task is still generating; query again later" },
+        "canvas.trustedAssetMismatch": { zh: "部分认证素材属于其它平台，已回退为普通素材。切换到对应平台的视频接口才能用 asset:// 认证地址。", en: "Some certified assets belong to other platforms and have fallen back to plain materials. Switch to the matching platform's video API to use asset:// certified URIs." },
         "canvas.megabyParamsReset": { zh: "MegabyAI 仅支持 4–15 秒、16:9 / 9:16 / 1:1 和 Auto / 480p / 720p，已重置为 5 秒、16:9、720p。", en: "MegabyAI supports only 4–15 seconds, 16:9 / 9:16 / 1:1, and Auto / 480p / 720p. Parameters were reset to 5 seconds, 16:9, and 720p." },
         "canvas.videoResolutionModelValue": { zh: "模型自动：{resolution}", en: "Model-defined: {resolution}" },
         "canvas.videoResolutionModelAuto": { zh: "模型自动", en: "Model-defined" },

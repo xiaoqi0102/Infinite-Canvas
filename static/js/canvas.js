@@ -12158,7 +12158,13 @@ async function runVideoNode(nodeId, opts={}){
     const videoUrls = [];
     const audioUrls = [];
     let sudashui;
+    let trustedAssetActive = false;
     try {
+        // 认证素材替换必须在预检之前：后端对 asset:// 直接放行，不做公网可达性探测
+        const trustedAssets = applyTrustedAssetsToCanvasVideoRefs(mediaRefs, providerId);
+        mediaRefs = trustedAssets.refs;
+        trustedAssetActive = trustedAssets.trusted;
+        if(trustedAssets.mismatched) setStatus(tr('canvas.trustedAssetMismatch'));
         const prepared = await preflightCanvasVideoMedia(node, mediaRefs);
         mediaRefs = prepared.refs;
         manualVideoUrl = prepared.manualVideoUrl;
@@ -12202,7 +12208,9 @@ async function runVideoNode(nodeId, opts={}){
         watermark:Boolean(node.watermark),
         camerafixed:Boolean(node.cameraFixed),
         generate_audio:Boolean(node.generateAudio),
-        multimodal:Boolean(node.multimodal)
+        multimodal:Boolean(node.multimodal),
+        // 手动填入 asset:// 或参考素材命中认证地址时，走后端可信素材路由
+        trusted_asset:Boolean(trustedAssetActive || String(manualVideoUrl || '').startsWith('asset://'))
     };
     if(profile.isSudashui) payload.official_asset_indexes = sudashui.officialAssetIndexes;
     if(!opts.cascade){
@@ -12265,6 +12273,70 @@ async function runVideoNode(nodeId, opts={}){
         syncCanvasVideoNodeState(node);
         refreshRunNodes(node, out || pendingHost);
     }
+}
+// 认证素材 asset:// 是平台绑定的：返回某视频 provider 所属的认证平台键（与智能画布 videoProviderPlatform 同构）
+function canvasVideoProviderPlatform(providerId){
+    const provider = videoProviderConfig(providerId) || {};
+    const proto = String(provider.protocol || '').toLowerCase();
+    const base = String(provider.base_url || '').toLowerCase();
+    if(proto === 'apimart' || base.includes('apimart.ai')) return 'apimart';
+    if(proto === 'volcengine' || providerId === 'volcengine') return 'volcengine';
+    return '';
+}
+// 一个素材可注册到多个平台：收集所有「已通过」的 asset:// 地址，按平台映射（与智能画布 assetRegisteredUris 同构）
+function canvasAssetRegisteredUris(item){
+    const regs = (item && item.registrations && typeof item.registrations === 'object') ? item.registrations : {};
+    const out = {};
+    Object.keys(regs).forEach(platform => {
+        const reg = regs[platform];
+        if(reg && reg.status === 'Active' && reg.asset_uri) out[platform] = reg.asset_uri;
+    });
+    return out;
+}
+// 自动识别参考素材中的认证地址：命中当前平台则替换为 asset://，注册在其它平台则标记回退
+function applyTrustedAssetsToCanvasVideoRefs(mediaRefs, providerId){
+    const refs = Array.isArray(mediaRefs) ? mediaRefs : [];
+    // 惰性求值：无参考素材时不触碰资产库全局状态
+    if(!refs.length) return {refs, trusted:false, mismatched:false};
+    let trusted = false;
+    let mismatched = false;
+    let platform = null;
+    let itemsById = null;
+    const lookupAssetItem = assetId => {
+        if(itemsById === null){
+            itemsById = new Map();
+            canvasAssetSourceLibraries().forEach(lib => {
+                (lib.categories || []).forEach(cat => {
+                    (cat.items || []).forEach(item => {
+                        if(item?.id) itemsById.set(String(item.id), item);
+                    });
+                });
+            });
+        }
+        return itemsById.get(String(assetId)) || null;
+    };
+    const next = refs.map(ref => {
+        if(!ref || typeof ref !== 'object') return ref;
+        // 已是 asset:// 直填地址：视为可信素材，原样透传
+        if(String(ref.url || '').startsWith('asset://')){
+            trusted = true;
+            return ref;
+        }
+        if(!ref.assetId) return ref;
+        const item = lookupAssetItem(ref.assetId);
+        if(!item) return ref;
+        const uris = canvasAssetRegisteredUris(item);
+        if(!Object.keys(uris).length) return ref;
+        if(platform === null) platform = canvasVideoProviderPlatform(providerId);
+        if(platform && uris[platform]){
+            trusted = true;
+            return {...ref, url:uris[platform]};
+        }
+        // 素材注册在其它平台：回退普通直链
+        mismatched = true;
+        return ref;
+    });
+    return {refs:next, trusted, mismatched};
 }
 async function uploadCanvasUrlToComfy(url){
     const blob = await fetch(url).then(r => {
@@ -13791,7 +13863,7 @@ function generationLogRequestFields(run){
     const node = run?.node || {};
     const fieldsByType = {
         generator:['apiProvider','model','ratio','resolution','customRatio','customSize','customRatioWidth','customRatioHeight','customWidth','customHeight','quality','count'],
-        video:['apiProvider','model','duration','aspectRatio','resolution','enhancePrompt','enableUpsample','watermark','cameraFixed','generateAudio','useFrameRoles','multimodal','trustedAsset','trustedSource','officialAssetImageNumbers'],
+        video:['apiProvider','model','duration','aspectRatio','resolution','enhancePrompt','enableUpsample','watermark','cameraFixed','generateAudio','useFrameRoles','multimodal','officialAssetImageNumbers'],
         msgen:['msgenModel','msCustomModel','msRatio','msResolution','msCustomRatio','msCustomSize','msWidth','msHeight','count','fitImage'],
         comfy:['mode','comfyWorkflow','comfyParams','width','height','enhanceStrength'],
         ltxDirector:['durationFrames','durationSeconds','frameRate','customWidth','customHeight','useCustomAudio','imgCompression','epsilon','divisibleBy','noiseSeed','ltxSegments'],

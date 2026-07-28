@@ -4437,6 +4437,32 @@ async function applyImageDropPayloadToBoard(payload, point){
     }
     return [];
 }
+// 图片节点上传云端后，url 会被换成云端地址，本地原件地址保留在 originalLocalUrl 一类字段里，
+// canvasPreferredMediaUrl 渲染时优先取这些本地地址。换图时若只改 url 而残留旧派生地址，
+// 节点缩略图会继续显示旧图（双击预览走 node.url 反而是新图），
+// 并且 cloudUploadLinkForCanvasRef 仍能用旧地址匹配到旧图的云端链接，导致拿旧图去生成视频。
+const IMAGE_NODE_DERIVED_URL_KEYS = ['originalLocalUrl', 'localUrl', 'sourceUrl', 'local_url', 'source_url', 'remoteUrl', 'remote_url', 'cloudUrl', 'cloud_url'];
+function resetImageNodeMediaState(node){
+    if(!node) return;
+    IMAGE_NODE_DERIVED_URL_KEYS.forEach(key => { delete node[key]; });
+    // 旧图尺寸会让新图按错误比例显示；清空后由 measureCanvasOriginalImageNodes 重新测量回填。
+    delete node.natural_w;
+    delete node.natural_h;
+    delete node._naturalSizeLoading;
+}
+function applyImageNodeMedia(node, media={}){
+    if(!node) return;
+    resetImageNodeMediaState(node);
+    node.url = media.url || '';
+    node.name = media.name || '';
+    node.mediaKind = media.mediaKind || 'image';
+    const naturalW = Number(media.naturalW);
+    const naturalH = Number(media.naturalH);
+    if(naturalW > 0 && naturalH > 0){
+        node.natural_w = naturalW;
+        node.natural_h = naturalH;
+    }
+}
 async function applyImageDropPayloadToNode(nodeId, payload){
     const node = nodes.find(n => n.id === nodeId);
     if(!node || node.type !== 'image') return;
@@ -4449,9 +4475,7 @@ async function applyImageDropPayloadToNode(nodeId, payload){
         const file = files[0];
         if(file?.url) {
             pushUndo();
-            node.url = file.url;
-            node.name = file.name || outputImageName(file.url);
-            node.mediaKind = 'image';
+            applyImageNodeMedia(node, {url:file.url, name:file.name || outputImageName(file.url), mediaKind:'image'});
             render();
             scheduleSave();
         }
@@ -4461,9 +4485,11 @@ async function applyImageDropPayloadToNode(nodeId, payload){
         const persisted = await persistDroppedImageUrl(payload.url, outputImageName(payload.url));
         if(!persisted?.url) return;
         pushUndo();
-        node.url = persisted.url;
-        node.name = persisted.name || outputImageName(persisted.url);
-        node.mediaKind = persisted.kind || (isVideoUrl(persisted.url) ? 'video' : isAudioUrl(persisted.url) ? 'audio' : 'image');
+        applyImageNodeMedia(node, {
+            url:persisted.url,
+            name:persisted.name || outputImageName(persisted.url),
+            mediaKind:persisted.kind || (isVideoUrl(persisted.url) ? 'video' : isAudioUrl(persisted.url) ? 'audio' : 'image')
+        });
         render();
         scheduleSave();
     }
@@ -4538,9 +4564,7 @@ async function fillImageNode(nodeId, files, opts={}){
     const file = data.files?.[0];
     const node = nodes.find(n => n.id === nodeId);
     if(file && node){
-        node.url = file.url;
-        node.name = file.name;
-        node.mediaKind = file.kind || mediaKindForUpload(imgs[0]);
+        applyImageNodeMedia(node, {url:file.url, name:file.name, mediaKind:file.kind || mediaKindForUpload(imgs[0])});
         render();
         scheduleSave();
     }
@@ -4549,9 +4573,7 @@ function setImageNodeFromOutput(nodeId, url){
     const node = nodes.find(n => n.id === nodeId);
     if(!node || node.type !== 'image' || !url || isVideoUrl(url) || isAudioUrl(url)) return;
     pushUndo();
-    node.url = url;
-    node.name = outputImageName(url);
-    node.mediaKind = 'image';
+    applyImageNodeMedia(node, {url, name:outputImageName(url), mediaKind:'image'});
     render();
     scheduleSave();
 }
@@ -4564,9 +4586,7 @@ function clearImageNode(nodeId, event=null){
     const node = nodes.find(n => n.id === nodeId);
     if(!node || node.type !== 'image') return;
     pushUndo();
-    node.url = '';
-    node.mediaKind = 'image';
-    node.name = '空白图片';
+    applyImageNodeMedia(node, {url:'', name:'空白图片', mediaKind:'image'});
     render();
     scheduleSave();
 }
@@ -6027,8 +6047,7 @@ async function applyImageCrop(){
     const base = (node.name || 'image').replace(/\.[^.]+$/, '');
     const file = await uploadCroppedBlob(blob, `${base}_crop.png`);
     if(file){
-        node.url = file.url;
-        node.name = file.name;
+        applyImageNodeMedia(node, {url:file.url, name:file.name, mediaKind:'image', naturalW:sw, naturalH:sh});
         closeImageEditor();
         render();
         scheduleSave();
@@ -6058,11 +6077,7 @@ async function applyImageOutpaint(){
     const base = (node.name || 'image').replace(/\.[^.]+$/, '');
     const file = await uploadCroppedBlob(blob, `${base}_outpaint.png`);
     if(file){
-        node.url = file.url;
-        node.name = file.name;
-        node.mediaKind = 'image';
-        node.natural_w = outW;
-        node.natural_h = outH;
+        applyImageNodeMedia(node, {url:file.url, name:file.name, mediaKind:'image', naturalW:outW, naturalH:outH});
         closeImageEditor();
         render();
         scheduleSave();
@@ -6121,8 +6136,13 @@ async function applyImageBrush(){
     const base = (node.name || 'image').replace(/\.[^.]+$/, '');
     const file = await uploadCroppedBlob(blob, `${base}_paint.png`);
     if(file){
-        node.url = file.url;
-        node.name = file.name;
+        applyImageNodeMedia(node, {
+            url:file.url,
+            name:file.name,
+            mediaKind:'image',
+            naturalW:canvasEl.width,
+            naturalH:canvasEl.height
+        });
         closeImageEditor();
         render();
         scheduleSave();
@@ -6177,11 +6197,13 @@ async function applyImageResize(){
     const suffix = `${Math.round(resized.scale * 100)}pct`;
     const file = await uploadCroppedBlob(resized.blob, `${base}_resize_${suffix}.png`);
     if(!file) return;
-    node.url = file.url;
-    node.name = file.name;
-    node.mediaKind = 'image';
-    node.natural_w = resized.targetW;
-    node.natural_h = resized.targetH;
+    applyImageNodeMedia(node, {
+        url:file.url,
+        name:file.name,
+        mediaKind:'image',
+        naturalW:resized.targetW,
+        naturalH:resized.targetH
+    });
     closeImageEditor();
     render();
     scheduleSave();
@@ -6269,10 +6291,12 @@ function measureCanvasOriginalImageNodes(root=nodesEl){
         if(!node || node.type !== 'image' || !node.url || node.natural_w || node.natural_h || node._naturalSizeLoading) return;
         const original = imgEl.dataset.originalSrc || node.url;
         if(!original) return;
-        node._naturalSizeLoading = true;
+        node._naturalSizeLoading = original;
         loadCanvasOriginalImageDimensions(original).then(size => {
-            node._naturalSizeLoading = false;
-            if(!size || node.natural_w || node.natural_h) return;
+            // 换图会清除 _naturalSizeLoading；只接受仍对应当前媒体的测量结果，避免旧图异步回写尺寸。
+            if(node._naturalSizeLoading !== original) return;
+            delete node._naturalSizeLoading;
+            if(canvasOriginalMediaUrl(node) !== original || !size || node.natural_w || node.natural_h) return;
             node.natural_w = size.w;
             node.natural_h = size.h;
             scheduleSave();
@@ -13726,9 +13750,7 @@ function clearNodeContentBeforeDelete(id){
     if(!node) return false;
     if(node.type === 'image' && node.url){
         pushUndo();
-        node.url = '';
-        node.mediaKind = 'image';
-        node.name = tr('canvas.imageCard');
+        applyImageNodeMedia(node, {url:'', name:tr('canvas.imageCard'), mediaKind:'image'});
         render();
         scheduleSave();
         return true;

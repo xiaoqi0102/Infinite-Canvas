@@ -16087,9 +16087,22 @@ async function runGeneration(){
             clearPromptInput({preserveDraft:true});
             return;
         }
+        // 可恢复的视频任务（网络瞬断/查询超时等）不得删除输出节点：保留 pendingTasks 供“查询结果”手动恢复。
+        const liveGuardNode = liveSmartNode(branchNode || pendingNode);
+        const hasRecoverableVideoTask = smartPendingTasks(liveGuardNode).some(task => task.failed && task.recoverTaskId);
+        if(e?.smartPendingPreserved || hasRecoverableVideoTask){
+            delete pendingNode.pendingStatus;
+            if(sourceVisualState) restoreSourceVisualState(node, sourceVisualState);
+            delete pendingNode._runMetaTargetId;
+            if(!e?.smartGenerationLogged) addSmartGenerationLog({run:runLog, outputs:[], runMs:nowMs() - runLogStart, error:e.message || String(e), status:'failed'});
+            clearPromptInput({preserveDraft:true});
+            scheduleSave();
+            toast((e.message || tr('smart.errRunFailed')).slice(0, 160));
+            return;
+        }
         pendingNode.pending = 0;
         delete pendingNode.pendingStatus;
-        if(branchNode){
+        if(branchNode && !(branchNode.images || []).length){
             nodes = nodes.filter(n => n.id !== branchNode.id);
             canvas.connections = (canvas.connections || []).filter(c => c.from !== branchNode.id && c.to !== branchNode.id);
             selectedId = node.id;
@@ -16860,11 +16873,27 @@ async function pollSmartCanvasVideoTask(taskId, onProgress=null){
     if(!taskId) throw new Error(tr('smart.errRunFailed'));
     if(activeSmartTaskPolls.has(taskId)) return activeSmartTaskPolls.get(taskId);
     const promise = (async () => {
-        for(let i = 0; i < 1440; i++){
-            const task = await smartFetchWithTimeout(`/api/canvas-video-tasks/${encodeURIComponent(taskId)}`).then(async r => {
-                if(!r.ok) throw await smartCanvasVideoResponseError(r);
-                return r.json();
-            });
+        // 软上限 7260 秒：超时不判失败，抛不带 canvasTaskFailed 的错误，让上层走“可恢复保留”。
+        const deadline = Date.now() + 7260 * 1000;
+        // 与普通画布同构的连续失败容错：瞬时错误按次退避重试，5 次耗尽才抛；404 与终态错误立即抛。
+        const retryDelays = [5000, 10000, 20000, 30000, 30000];
+        let consecutiveFailures = 0;
+        while(true){
+            let task;
+            try {
+                task = await smartFetchWithTimeout(`/api/canvas-video-tasks/${encodeURIComponent(taskId)}`).then(async r => {
+                    if(!r.ok) throw await smartCanvasVideoResponseError(r);
+                    return r.json();
+                });
+                consecutiveFailures = 0;
+            } catch(pollError) {
+                if(pollError?.canvasTaskFailed) throw pollError;
+                consecutiveFailures += 1;
+                if(consecutiveFailures >= retryDelays.length) throw pollError;
+                await sleep(retryDelays[consecutiveFailures - 1]);
+                if(Date.now() >= deadline) throw new Error(tr('smart.videoPollTimeoutPreserved'));
+                continue;
+            }
             if(typeof onProgress === 'function') onProgress(task);
             if(task.status === 'succeeded'){
                 const result = task.result || task;
@@ -16878,9 +16907,9 @@ async function pollSmartCanvasVideoTask(taskId, onProgress=null){
                 error.canvasTaskFailed = true;
                 throw error;
             }
+            if(Date.now() >= deadline) throw new Error(tr('smart.videoPollTimeoutPreserved'));
             await sleep(5000);
         }
-        throw new Error(tr('smart.errRunTimeout'));
     })();
     activeSmartTaskPolls.set(taskId, promise);
     try {

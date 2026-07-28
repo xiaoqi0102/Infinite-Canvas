@@ -8,11 +8,13 @@
 
 ## 项目结构与事实来源
 
-- `main.py`：FastAPI 单体后端，包含 HTTP API、WebSocket、第三方模型适配、任务轮询、文件与用户数据管理；当前约 1.8 万行，是最高风险文件。
+- `main.py`：FastAPI 单体后端，包含 HTTP API、WebSocket、第三方模型适配、任务轮询、文件与用户数据管理；当前约 2.1 万行，是最高风险文件。
+- `plugins/`：图片/视频供应商协议适配层（`image_plugins/`、`video_plugins/`），每个供应商一个模块，由 `main.py` 顶部显式导入。插件不落盘、不读 Key 配置、不直接解析本地路径，职责边界见各目录 `README.md` 与 `DESIGN.md`；新增供应商适配优先写成插件，避免继续扩张 `main.py` 的供应商分支。
 - `static/`：无前端框架和打包器的原生 HTML/CSS/JavaScript。`static/index.html` 是 iframe 外壳；`static/js/canvas.js`、`static/js/smart-canvas.js` 均为超大脚本，修改前必须检索完整调用链。
 - `electron/`：Electron 桌面外壳。主进程负责启动后端、选择用户数据目录和客户端更新；`preload.js` 只暴露受限 IPC，必须保持 `contextIsolation: true`、`nodeIntegration: false`。
 - `scripts/`、`build/backend.spec`：版本同步、PyInstaller 后端打包和 Electron 构建流程。
 - `workflows/`：随应用发布的内置 ComfyUI 工作流；自定义工作流运行时写入用户数据目录，不得混入内置目录。
+- `tests/`：unittest 风格的 Python 测试与独立的 Node 断言脚本，无 pytest/jest 等运行器配置；Python 测试直接 `import main`，必须从仓库根目录运行。
 - `tools/`、`CLI/`：Chrome 素材导入扩展、Photoshop UXP 插件、第三方 CLI 安装与登录脚本，修改时需遵守各自 README 中的接口和脚本加载顺序。
 
 事实来源优先级：
@@ -39,6 +41,7 @@
 - Electron、数据目录、构建、发布或客户端更新：`ELECTRON_DESKTOP.md`。
 - 用户运行方式：`新手运行与使用教程.md`、`MAC-使用说明.md`。
 - CLI、Chrome 扩展、Photoshop 插件：对应目录的 `README.md`。
+- 图片/视频供应商协议适配：`plugins/image_plugins/`、`plugins/video_plugins/` 内的 `README.md` 与 `DESIGN.md`。
 
 ## 依赖与运行环境
 
@@ -48,7 +51,7 @@
 - 不擅自新增依赖。确需新增时，先说明名称、精确版本、用途、来源和影响，并同步依赖声明/锁文件；Python 动态导入或额外数据文件还需检查 `build/backend.spec` 与后端打包脚本。
 - 默认不启动开发服务器。确需验证时应短暂启动、告知访问地址并在完成后关闭。
 - 当前 `main.py` 直接运行时固定监听 `3000` 端口；`INFINITE_CANVAS_PORT` 目前只被 Electron 侧读取，不能假设它会改变后端监听端口。
-- 直接启动 `main.py` 会在启动阶段同步 `static/*.html` 的 `?v=` 缓存参数。若只是诊断或冒烟测试且不希望产生静态文件改动，先设置：
+- 直接启动 `main.py` 会在启动阶段同步 `static/*.html` 的 `?v=` 缓存参数；用户在本机运行应用同样会触发这一重写，`git status` 中由此产生的静态文件噪声改动不得混入提交。若只是诊断或冒烟测试且不希望产生静态文件改动，先设置：
 
 ```powershell
 $env:INFINITE_CANVAS_SKIP_STATIC_SYNC = '1'
@@ -105,7 +108,7 @@ $env:INFINITE_CANVAS_SKIP_STATIC_SYNC = '1'
 
 ## 验证要求
 
-仓库当前没有正式的单元测试目录、CI、ESLint、Prettier、Ruff 或类型检查配置；不得声称这些检查已通过。按变更范围执行以下既有验证，并如实报告未运行项。
+仓库在 `tests/` 目录提供 unittest 风格的 Python 测试与独立的 Node 断言脚本，但没有 CI、ESLint、Prettier、Ruff 或类型检查配置；不得声称不存在的检查已通过。按变更范围执行以下既有验证，并如实报告未运行项。
 
 基础检查：
 
@@ -113,6 +116,18 @@ $env:INFINITE_CANVAS_SKIP_STATIC_SYNC = '1'
 git diff --check
 git diff --name-only --diff-filter=U
 Select-String -Path main.py,static\*.html,static\js\*.js,static\js\i18n\*.js,electron\*.js -Pattern '<<<<<<<|=======|>>>>>>>'
+```
+
+自动化测试（Python 测试直接 `import main`，必须从仓库根目录运行；按变更范围至少运行直接相关的用例）：
+
+```powershell
+.\venv\Scripts\python.exe -m unittest discover tests             # 全部 Python 测试
+.\venv\Scripts\python.exe -m unittest tests.test_jimeng_models   # 单个 Python 测试
+node tests\test_video_api_utils.js                               # 单个 JS 测试，成功时打印 ok
+Get-ChildItem tests\test_*.js | ForEach-Object {
+    node $_.FullName
+    if ($LASTEXITCODE -ne 0) { throw "JS test failed: $($_.Name)" }
+}
 ```
 
 Python 后端变更：
@@ -159,11 +174,11 @@ npm run build:backend
 npm run build:win
 ```
 
-`build:win` 已自动执行版本同步和后端打包，不要在它之前重复运行前两条命令。构建命令耗时且会生成大量忽略文件，只在任务明确需要构建/发布时执行。前端交互、视频 pending 恢复、WebDAV、Electron 用户数据和客户端更新没有自动化覆盖，相关修改必须依据维护文档执行最小必要的手工冒烟测试。
+`build:win` 已自动执行版本同步和后端打包，不要在它之前重复运行前两条命令。构建命令耗时且会生成大量忽略文件，只在任务明确需要构建/发布时执行。画布/视频生命周期、素材预检、供应商插件、Electron 数据迁移等链路已有部分测试覆盖（见 `tests/`），但整体前端交互、WebDAV 同步和客户端更新仍缺自动化覆盖，相关修改必须依据维护文档执行最小必要的手工冒烟测试。
 
 ## Git 仓库与远程关系
 
-- 本地项目源目录：`E:\Infinite-Canvas`。
+- 本地项目源目录：`D:\canvas\Infinite-Canvas`。
 - `origin` 是维护者自己的 Fork，可拉取和推送：`https://github.com/xiaoqi0102/Infinite-Canvas.git`。本地 `main` 跟踪 `origin/main`，它也是默认集成与推送目标。
 - `upstream` 是源项目仓库，只用于拉取和合并：`https://github.com/hero8152/Infinite-Canvas.git`。不得向 `upstream` 推送，也不得删除或覆盖当前的 `pushurl=DISABLED` 防护。
 - 比较远程状态前先刷新引用：普通任务至少执行 `git fetch origin --prune`；涉及源项目同步时还要执行 `git fetch upstream --prune`。不得把本地远程跟踪分支的旧提交差异写成长期事实。

@@ -8313,6 +8313,10 @@ function nodeBodyHtml(node, layout){
     if(recoverTask && imgs.length === 0){
         return imageTaskRecoverBodyHtml(node, recoverTask, layout);
     }
+    // 视频任务终态失败留痕：任务已删除但保留失败占位，避免节点“无声消失”。
+    if(node.lastVideoTaskError?.error && imgs.length === 0 && !node.pending && !smartPendingTasks(node).length && !node.jimengPending){
+        return videoTaskFailedBodyHtml(node, layout);
+    }
     if(node.pendingStatus === 'preflight' && imgs.length === 0){
         return `<div class="jimeng-pending-cell loading-cell single" style="width:${layout.width}px;height:${layout.height}px">
             <div class="jimeng-pending-overlay">
@@ -8354,6 +8358,17 @@ function jimengPendingBodyHtml(node, layout){
             <div class="jimeng-pending-text">${escapeHtml(queueText)}</div>
             <div class="jimeng-pending-sub">任务未丢失，可继续等待或手动查询</div>
             <button class="jimeng-pending-query" type="button" data-jimeng-query="${escapeAttr(node.id)}" ${querying ? 'disabled' : ''}><i data-lucide="${querying ? 'loader-2' : 'refresh-cw'}"></i><span>${querying ? '查询中…' : '查询结果'}</span></button>
+        </div>
+    </div>`;
+}
+function videoTaskFailedBodyHtml(node, layout){
+    const err = node.lastVideoTaskError || {};
+    return `<div class="jimeng-pending-cell loading-cell single" style="width:${layout.width}px;height:${layout.height}px">
+        <div class="jimeng-pending-overlay">
+            <div class="jimeng-pending-spinner"><i data-lucide="alert-triangle"></i></div>
+            <div class="jimeng-pending-text">${escapeHtml(tr('smart.videoTaskFailedTitle'))}</div>
+            <div class="jimeng-pending-sub">${escapeHtml(String(err.error || '').slice(0, 120))}</div>
+            <button class="jimeng-pending-query" type="button" data-video-error-dismiss="${escapeAttr(node.id)}"><i data-lucide="x"></i><span>${escapeHtml(tr('smart.videoTaskFailedDismiss'))}</span></button>
         </div>
     </div>`;
 }
@@ -9287,6 +9302,18 @@ function bindNodeEvents(){
             btn.addEventListener('click', e => {
                 e.preventDefault(); e.stopPropagation();
                 queryJimengNow(btn.dataset.jimengQuery);
+            });
+        });
+        el.querySelectorAll('[data-video-error-dismiss]').forEach(btn => {
+            btn.addEventListener('mousedown', e => { e.preventDefault(); e.stopPropagation(); }, true);
+            btn.addEventListener('click', e => {
+                e.preventDefault(); e.stopPropagation();
+                const target = nodes.find(n => n.id === btn.dataset.videoErrorDismiss);
+                if(target){
+                    delete target.lastVideoTaskError;
+                    render();
+                    scheduleSave();
+                }
             });
         });
         el.querySelectorAll('[data-image-task-query]').forEach(btn => {
@@ -15998,6 +16025,8 @@ async function runGeneration(){
     if(shouldCreateBranchOutput) branchNode = createPendingOutputFromSource(node, expectedCount, pendingMeta, {connectSource:false, selectOutput:true, refs});
     undoSuppressed = false;
     let pendingNode = branchNode || node;
+    // 新一轮生成清除上一轮的视频失败留痕。
+    delete pendingNode.lastVideoTaskError;
     if(extracted) pendingNode._runMetaTargetId = extracted.id;
     if(!branchNode){
         pendingNode.pending = Math.max(1, Number(expectedCount) || 1);
@@ -16727,15 +16756,28 @@ async function querySmartImageTaskNow(nodeId, localTaskId){
             if(!res.ok) throw await smartCanvasVideoResponseError(res);
             const data = await res.json();
             if(data.status === 'succeeded'){
+                const media = resultMediaUrls(data.videos?.length ? data.videos : (data.result || data));
+                if(!media.length){
+                    // 成功状态但无可用产物：按可恢复保留处理，不得按成功收尾。
+                    task.querying = false;
+                    preserveSmartVideoPendingTask(node, task.taskId || localTaskId, new Error(tr('smart.videoNoMediaReturned')));
+                    toast(tr('smart.videoNoMediaReturned'));
+                    render();
+                    scheduleSave();
+                    return;
+                }
                 task.failed = false;
                 task.querying = false;
-                finalizeSmartPendingTask(node, task.taskId, resultMediaUrls(data.videos?.length ? data.videos : (data.result || data)), 'video');
+                delete liveSmartNode(node).lastVideoTaskError;
+                finalizeSmartPendingTask(node, task.taskId, media, 'video');
                 render();
                 scheduleSave();
                 return;
             }
             if(data.status === 'failed'){
                 task.error = data.error || tr('smart.errRunFailed');
+                // 终态失败在节点上留痕（调用处标记，不改 removeSmartPendingTask 语义）。
+                liveSmartNode(node).lastVideoTaskError = {error:task.error, at:Date.now()};
                 removeSmartPendingTask(node, task.taskId || localTaskId);
                 toast(task.error.slice(0, 160));
             } else {
@@ -16743,11 +16785,19 @@ async function querySmartImageTaskNow(nodeId, localTaskId){
                 task.error = data.message || '视频任务仍在生成中';
                 toast(task.error);
                 pollSmartCanvasVideoTask(task.taskId || localTaskId).then(result => {
-                    finalizeSmartPendingTask(node, task.taskId || localTaskId, resultMediaUrls(result?.videos?.length ? result.videos : (result?.result || result)), 'video');
+                    const media = resultMediaUrls(result?.videos?.length ? result.videos : (result?.result || result));
+                    if(!media.length){
+                        preserveSmartVideoPendingTask(node, task.taskId || localTaskId, new Error(tr('smart.videoNoMediaReturned')));
+                        toast(tr('smart.videoNoMediaReturned'));
+                    } else {
+                        delete liveSmartNode(node).lastVideoTaskError;
+                        finalizeSmartPendingTask(node, task.taskId || localTaskId, media, 'video');
+                    }
                     render();
                     scheduleSave();
                 }).catch(err => {
                     if(err?.canvasTaskFailed) {
+                        liveSmartNode(node).lastVideoTaskError = {error:err.message || tr('smart.errRunFailed'), at:Date.now()};
                         removeSmartPendingTask(node, task.taskId || localTaskId);
                     } else {
                         preserveSmartVideoPendingTask(node, task.taskId || localTaskId, err);
@@ -16778,6 +16828,7 @@ async function querySmartImageTaskNow(nodeId, localTaskId){
     } catch(e){
         const message = e.message || '查询失败';
         if(task.kind === 'video' && e?.canvasTaskFailed){
+            liveSmartNode(node).lastVideoTaskError = {error:message, at:Date.now()};
             removeSmartPendingTask(node, task.taskId || localTaskId);
         } else {
             task.error = message;
@@ -17029,7 +17080,20 @@ async function resumeSmartPendingNode(node, logContext={}){
             const media = taskKind === 'video'
                 ? (result?.videos?.length ? result.videos : (result?.result || result))
                 : (result?.image_items?.length ? result.image_items : (result?.images?.length ? result.images : result));
-            node = finalizeSmartPendingTask(node, task.taskId, resultMediaUrls(media), taskKind) || node;
+            const mediaUrls = resultMediaUrls(media);
+            if(taskKind === 'video' && !mediaUrls.length){
+                // 成功状态但无可用产物：按可恢复保留处理，不得按成功收尾。
+                const emptyError = new Error(tr('smart.videoNoMediaReturned'));
+                node = preserveSmartVideoPendingTask(node, task.taskId, emptyError) || node;
+                emptyError.smartPendingPreserved = true;
+                failures.push(emptyError);
+                toast(emptyError.message.slice(0, 160));
+                render();
+                scheduleSave();
+                return;
+            }
+            delete node.lastVideoTaskError;
+            node = finalizeSmartPendingTask(node, task.taskId, mediaUrls, taskKind) || node;
             render();
             scheduleSave();
         } catch(e) {
@@ -17066,6 +17130,10 @@ async function resumeSmartPendingNode(node, logContext={}){
                 render();
                 scheduleSave();
                 return;
+            }
+            if((currentTask.kind || task.kind) === 'video'){
+                // 视频终态失败在节点上留痕（调用处标记，不改 removeSmartPendingTask 语义）。
+                node.lastVideoTaskError = {error:e.message || tr('smart.errRunFailed'), at:Date.now()};
             }
             removeSmartPendingTask(node, task.taskId);
             failures.push(e);

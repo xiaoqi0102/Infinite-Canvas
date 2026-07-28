@@ -15164,11 +15164,12 @@ async function createSmartComfyTask(payload){
     return res.json();
 }
 async function createSmartCanvasVideoTask(payload){
+    // 创建视频任务可能因上游排队耗时较久，使用 10 分钟长超时并区分“创建超时”文案（查询仍用默认 30 秒）。
     const res = await smartFetchWithTimeout('/api/canvas-video-tasks', {
         method:'POST',
         headers:{'Content-Type':'application/json'},
         body:JSON.stringify(payload)
-    });
+    }, 600000, 'smart.videoCreateTimeout');
     if(!res.ok) throw new Error(await smartResponseErrorMessage(res, tr('smart.errRunFailed')));
     return res.json();
 }

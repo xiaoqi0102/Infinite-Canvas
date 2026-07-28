@@ -3226,13 +3226,35 @@ CANVAS_TASKS: Dict[str, Dict[str, Any]] = {}
 CANVAS_TASK_LOCK = Lock()
 CANVAS_VIDEO_TERMINAL_STATUSES = {"succeeded", "failed"}
 CANVAS_VIDEO_RESUMABLE_STATUSES = {"queued", "submitting", "polling", "running", "jimeng_pending"}
+# 终态任务只保留最近 N 条,防止内存字典与快照文件随使用无限增长
+CANVAS_VIDEO_TERMINAL_KEEP = 200
+# 纯进度类 patch(状态未跃迁)的落盘节流间隔;关键 patch 仍立即落盘
+CANVAS_VIDEO_PROGRESS_FLUSH_INTERVAL = 10.0
+CANVAS_VIDEO_PROGRESS_PATCH_KEYS = {"status", "raw_last", "retry_after", "next_poll_at", "message", "model"}
+CANVAS_VIDEO_RAW_LAST_MAX_BYTES = 20 * 1024
+
+def prune_canvas_video_tasks_mapping(items):
+    """终态视频任务按 updated_at 只保留最近 CANVAS_VIDEO_TERMINAL_KEEP 条,进行中任务全部保留。"""
+    kept: Dict[str, Dict[str, Any]] = {}
+    terminal = []
+    for task_id, task in items.items():
+        if not isinstance(task, dict):
+            continue
+        if str(task.get("status") or "") in CANVAS_VIDEO_TERMINAL_STATUSES:
+            terminal.append((task_id, task))
+        else:
+            kept[task_id] = task
+    terminal.sort(key=lambda kv: float(kv[1].get("updated_at") or 0.0), reverse=True)
+    for task_id, task in terminal[:CANVAS_VIDEO_TERMINAL_KEEP]:
+        kept[task_id] = task
+    return kept
 
 def canvas_video_task_snapshot_unlocked():
-    return {
+    return prune_canvas_video_tasks_mapping({
         task_id: task
         for task_id, task in CANVAS_TASKS.items()
         if isinstance(task, dict) and task.get("type") == "online-video"
-    }
+    })
 
 def write_canvas_video_tasks_snapshot(snapshot):
     write_json_atomic(CANVAS_VIDEO_TASKS_FILE, snapshot)
@@ -3257,7 +3279,7 @@ def load_persisted_canvas_video_tasks():
         items = {str(key): value for key, value in raw.items() if isinstance(value, dict)}
     else:
         return {}
-    return {task_id: task for task_id, task in items.items() if task_id}
+    return prune_canvas_video_tasks_mapping({task_id: task for task_id, task in items.items() if task_id})
 
 def load_canvas_video_tasks_into_memory():
     restored = load_persisted_canvas_video_tasks()
@@ -3281,19 +3303,71 @@ def normalize_canvas_video_task_patch(task_id: str, patch: Dict[str, Any]):
         data.pop("task_id", None)
     return data
 
+def truncate_canvas_video_raw_last(value):
+    """raw_last 仅用于前端展示轮询原文,超长时截断避免任务快照膨胀。"""
+    try:
+        text = json.dumps(value, ensure_ascii=False)
+    except Exception:
+        return value
+    if len(text.encode("utf-8")) <= CANVAS_VIDEO_RAW_LAST_MAX_BYTES:
+        return value
+    return {"truncated": True, "preview": text[:2048]}
+
+# 快照写盘代次:并发调度时只落盘最新版本,过期快照直接丢弃
+_canvas_video_snapshot_state = {"scheduled": 0, "written": 0}
+_canvas_video_snapshot_write_lock = Lock()
+_canvas_video_last_persist_at = 0.0
+
+def schedule_canvas_video_snapshot_write(snapshot):
+    """有事件循环时把 json.dump+fsync 移到线程执行,避免阻塞事件循环;启动期同步写。"""
+    with _canvas_video_snapshot_write_lock:
+        _canvas_video_snapshot_state["scheduled"] += 1
+        generation = _canvas_video_snapshot_state["scheduled"]
+
+    def _write():
+        with _canvas_video_snapshot_write_lock:
+            stale = generation <= _canvas_video_snapshot_state["written"] or generation < _canvas_video_snapshot_state["scheduled"]
+        if stale:
+            return
+        write_canvas_video_tasks_snapshot(snapshot)
+        with _canvas_video_snapshot_write_lock:
+            _canvas_video_snapshot_state["written"] = max(_canvas_video_snapshot_state["written"], generation)
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    if loop is None:
+        _write()
+        return
+    loop.create_task(asyncio.to_thread(_write))
+
 def update_canvas_video_task(task_id: str, patch: Dict[str, Any], persist=True):
+    global _canvas_video_last_persist_at
     now = time.time()
     patch_data = normalize_canvas_video_task_patch(task_id, patch)
+    if "raw_last" in patch_data:
+        patch_data["raw_last"] = truncate_canvas_video_raw_last(patch_data["raw_last"])
     with CANVAS_TASK_LOCK:
         task = CANVAS_TASKS.get(task_id)
         if not isinstance(task, dict):
             return {}
+        # 纯进度 patch(状态未跃迁)按时间节流落盘;状态跃迁或关键字段(result/error 等)立即落盘
+        progress_only = (
+            set(patch_data) <= CANVAS_VIDEO_PROGRESS_PATCH_KEYS
+            and str(patch_data.get("status") or task.get("status") or "") == str(task.get("status") or "")
+        )
         task.update(patch_data)
         task["updated_at"] = now
-        snapshot = canvas_video_task_snapshot_unlocked()
         result = dict(task)
-    if persist:
-        write_canvas_video_tasks_snapshot(snapshot)
+        should_persist = persist and not (
+            progress_only and now - _canvas_video_last_persist_at < CANVAS_VIDEO_PROGRESS_FLUSH_INTERVAL
+        )
+        snapshot = canvas_video_task_snapshot_unlocked() if should_persist else None
+        if should_persist:
+            _canvas_video_last_persist_at = now
+    if snapshot is not None:
+        schedule_canvas_video_snapshot_write(snapshot)
     return result
 
 def video_task_request_meta(payload: "CanvasVideoRequest"):

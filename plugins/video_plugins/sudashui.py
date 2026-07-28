@@ -30,6 +30,9 @@ SUDASHUI_UPLOAD_RULES = {
     "音频": ({"audio/mpeg", "audio/wav"}, 15 * 1024 * 1024),
 }
 
+# 轮询期间允许的连续瞬时错误上限（成功响应后清零），与 aicost 保持一致
+_MAX_POLL_ERRORS = 5
+
 _SUCCESS_STATUSES = {
     "SUCCESS", "SUCCEED", "SUCCEEDED", "COMPLETED", "COMPLETE",
     "DONE", "FINISHED", "FINISH", "OK", "READY",
@@ -766,15 +769,25 @@ async def _poll_video(
     quoted_id = urllib.parse.quote(str(task_id), safe="")
     status_url = f"{_provider_root(base_url)}/v1/video/generations/{quoted_id}"
     deadline: Optional[float] = None
+    # 排队阶段（任务尚未开始执行）也受独立超时预算约束，避免断网或长排队时协程永不退出
+    queue_deadline = time.monotonic() + max(1.0, float(poll_timeout))
     delay = max(0.0, float(poll_interval))
+    errors = 0
     last_payload: Dict[str, Any] = {}
-    while deadline is None or time.monotonic() < deadline:
+    while time.monotonic() < (deadline if deadline is not None else queue_deadline):
         if delay:
-            sleep_for = delay if deadline is None else min(delay, max(0.0, deadline - time.monotonic()))
+            effective_deadline = deadline if deadline is not None else queue_deadline
+            sleep_for = min(delay, max(0.0, effective_deadline - time.monotonic()))
             await asyncio.sleep(sleep_for)
         try:
             response = await client.get(status_url, headers=dict(headers))
         except (httpx.TransportError, TimeoutError) as exc:
+            # 网络瞬断按连续错误计数，达到上限后抛错而不是无限重试
+            errors += 1
+            if errors >= _MAX_POLL_ERRORS:
+                raise SudashuiProtocolError(
+                    502, f"Sudashui 视频状态连续查询失败：{str(exc).strip() or type(exc).__name__}"
+                ) from exc
             _report(progress, {
                 "status": "polling",
                 "message": f"Sudashui 视频任务查询暂时失败，将自动重试：{str(exc).strip() or type(exc).__name__}",
@@ -792,6 +805,12 @@ async def _poll_video(
                     response.status_code,
                     humanize_video_task_failure(_failure_reason(error_payload)),
                 )
+            # 408/425/429 与 5xx 属于瞬时错误：计数满阈值抛 502，否则退避后继续
+            transient = response.status_code in {408, 425, 429} or response.status_code >= 500
+            if transient:
+                errors += 1
+                if errors >= _MAX_POLL_ERRORS:
+                    raise SudashuiProtocolError(502, f"Sudashui 视频状态连续查询失败：{response.text[:500]}")
             if retry_after:
                 delay = max(float(poll_interval), retry_after)
                 last_payload = error_payload if isinstance(error_payload, dict) else {"error": error_payload}
@@ -802,7 +821,16 @@ async def _poll_video(
                     "raw_last": last_payload,
                 })
                 continue
+            if transient:
+                delay = max(float(poll_interval), delay)
+                _report(progress, {
+                    "status": "polling",
+                    "message": f"Sudashui 视频任务查询暂时失败（HTTP {response.status_code}），将自动重试",
+                    "next_poll_at": time.time() + delay,
+                })
+                continue
             raise SudashuiProtocolError(response.status_code, f"Sudashui 视频任务查询失败：{response.text[:500]}")
+        errors = 0
         raw = _json_response(response, "视频任务查询")
         last_payload = raw
         _report(progress, {"status": "polling", "raw_last": raw})
@@ -824,6 +852,10 @@ async def _poll_video(
                 "next_poll_at": time.time() + delay,
                 "raw_last": raw,
             })
+    if deadline is None:
+        raise SudashuiProtocolError(
+            504, f"Sudashui 视频任务排队等待超时，任务未丢失，可稍后凭任务 ID 查询结果：{last_payload or task_id}"
+        )
     raise SudashuiProtocolError(504, f"Sudashui 视频生成任务超时：{last_payload or task_id}")
 
 

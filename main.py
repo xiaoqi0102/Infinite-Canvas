@@ -690,7 +690,7 @@ JIMENG_LOGIN_SESSION = {
 }
 
 PROVIDER_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{2,40}$")
-SUPPORTED_PROVIDER_PROTOCOLS = {"openai", "apimart", "gemini", "grok", "gemini-cli", "volcengine", "runninghub", "jimeng", "codex"}
+SUPPORTED_PROVIDER_PROTOCOLS = {"openai", "apimart", "gemini", "grok", "gemini-cli", "volcengine", "runninghub", "jimeng", "codex", "tudou"}
 SUPPORTED_IMAGE_REQUEST_MODES = {
     "openai",
     "openai-json",
@@ -1632,6 +1632,12 @@ def normalize_video_request_mode(value):
     return mode if mode in SUPPORTED_VIDEO_REQUEST_MODES else "openai-videos-generations"
 
 LOCKED_RECOMMENDED_PROVIDER_RULES = {
+    "tudou": {
+        "names": {"土豆", "土豆api"},
+        "base_urls": {"https://api.ai-tudou.net"},
+        "protocol": "tudou",
+        "image_request_mode": "openai",
+    },
     "exellome": {
         "names": {"exellome"},
         "base_urls": {"https://new.exellome.online"},

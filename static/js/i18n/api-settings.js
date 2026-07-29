@@ -21,6 +21,7 @@
         "api.protocolOpenAI": { zh: "OpenAI 直连", en: "OpenAI Direct" },
         "api.protocolApimart": { zh: "异步协议", en: "Async Protocol" },
         "api.protocolGemini": { zh: "Gemini 协议", en: "Gemini Protocol" },
+        "api.protocolTudou": { zh: "土豆 API 协议", en: "Tudou API Protocol" },
         "api.protocolVolcengine": { zh: "火山引擎协议", en: "Volcengine Protocol" },
         "api.imageRequestModeTitle": { zh: "图片接口", en: "Image Endpoint" },
         "api.imageRequestModeAICost": { zh: "aicost：GPT Image / Gemini", en: "aicost: GPT Image / Gemini" },

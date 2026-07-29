@@ -52,3 +52,9 @@ CLI 型图片平台没有应用内可观察的上游 HTTP 请求，继续显示�
 - `tests/test_video_http_request_logging.py` 覆盖请求、响应、异常、重试和 multipart 脱敏。
 - `tests/test_image_http_request_logging.py` 覆盖图片请求接入、成功/失败任务透传和内嵌数据省略。
 - `tests/test_generation_log_detail.js` 覆盖前端日志详情的二次脱敏与 cURL 生成。
+
+## MeAI 协议边界
+
+`meai.py` 只负责 `/v1/videos` 创建/查询协议、参数与素材角色映射、20 秒最小轮询间隔、状态解析和恢复查询。模块不读取 provider 配置或 API Key，不解析本地路径，也不直接写输出文件；宿主通过 `public_reference_url` 与 `save_video` 回调提供受控素材公网化和落盘能力。
+
+MeAI 创建请求遇到无法确认是否已创建任务的传输错误时不得重发。服务恢复仅查询持久化的上游任务 ID。官方域识别使用完整 hostname `api.meai.cloud`，不得用字符串包含判断，以免伪装子域误锁协议。

@@ -3082,6 +3082,10 @@ function renderApiVideoParams(){
     const models = filterJimengVideoModels(providerVideoModels(settings.videoProvider));
     if(!settings.videoModel || !models.includes(settings.videoModel)) settings.videoModel = models[0] || 'veo3-fast';
     const profile = smartVideoProtocolProfile(settings);
+    ['videoEnhancePrompt', 'videoEnableUpsample', 'videoGenerateAudio', 'videoCameraFixed', 'videoWatermark', 'videoMultimodal']
+        .forEach(field => { if(profile.supportsAdvancedOptions === false) settings[field] = false; });
+    if(profile.supportsFrameRoles === false) settings.videoUseFrameRoles = false;
+    if(profile.supportsTrustedAssets === false) settings.videoTrustedAsset = false;
     const imageRefs = smartVideoImageRefs();
     syncSmartOfficialAssetState(profile, imageRefs, true);
     if(profile.isSudashui){
@@ -3095,17 +3099,20 @@ function renderApiVideoParams(){
         ${renderVideoResolutionControl(profile)}
         ${renderVideoAspectControl(profile)}
         ${renderVideoDurationControl(profile)}
-        ${profile.isSudashui ? renderVideoToggleControl('videoUseFrameRoles', tr('smart.videoUseFrameRoles')) : ''}
-        ${(!profile.isSudashui && !isMegaby) ? `
-            ${renderVideoToggleControl('videoEnhancePrompt', tr('smart.videoEnhancePrompt'))}
-            ${renderVideoToggleControl('videoEnableUpsample', tr('smart.videoUpsample'))}
-            ${renderVideoToggleControl('videoGenerateAudio', tr('smart.videoGenerateAudio'))}
-            ${renderVideoToggleControl('videoCameraFixed', tr('smart.videoCameraFixed'))}
-            ${renderVideoToggleControl('videoWatermark', tr('smart.videoWatermark'))}
-            ${renderVideoToggleControl('videoMultimodal', tr('smart.videoMultimodal'))}
-            ${renderVideoToggleControl('videoUseFrameRoles', tr('smart.videoUseFrameRoles'))}
-            ${settings.videoProvider === 'jimeng' ? '' : renderVideoTrustedAssetControl()}
-        ` : ''}
+        ${profile.supportsAdvancedOptions === false
+            ? (profile.supportsFrameRoles !== false ? renderVideoToggleControl('videoUseFrameRoles', tr('smart.videoUseFrameRoles')) : '')
+            : profile.isSudashui
+            ? renderVideoToggleControl('videoUseFrameRoles', tr('smart.videoUseFrameRoles'))
+            : `
+                ${renderVideoToggleControl('videoEnhancePrompt', tr('smart.videoEnhancePrompt'))}
+                ${renderVideoToggleControl('videoEnableUpsample', tr('smart.videoUpsample'))}
+                ${renderVideoToggleControl('videoGenerateAudio', tr('smart.videoGenerateAudio'))}
+                ${renderVideoToggleControl('videoCameraFixed', tr('smart.videoCameraFixed'))}
+                ${renderVideoToggleControl('videoWatermark', tr('smart.videoWatermark'))}
+                ${renderVideoToggleControl('videoMultimodal', tr('smart.videoMultimodal'))}
+                ${renderVideoToggleControl('videoUseFrameRoles', tr('smart.videoUseFrameRoles'))}
+                ${settings.videoProvider === 'jimeng' ? '' : renderVideoTrustedAssetControl()}
+            `}
         ${renderSudashuiOfficialAssetControl(profile, imageRefs)}
         ${profile.isSudashui ? `<div class="muted-note">${escapeHtml(tr('smart.sudashuiAutoUploadTip'))}</div>` : ''}
     `;

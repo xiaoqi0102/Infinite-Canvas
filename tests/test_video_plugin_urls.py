@@ -8,7 +8,7 @@ import httpx
 os.environ.setdefault("INFINITE_CANVAS_SKIP_STATIC_SYNC", "1")
 
 import main
-from plugins.video_plugins import aicost, geeknow, megabyai, sudashui, tudou
+from plugins.video_plugins import aicost, geeknow, megabyai, meai, sudashui, tudou
 from plugins.video_plugins.common import (
     canonical_video_api_root,
     is_public_http_url,
@@ -31,6 +31,20 @@ class _Response:
         }
 
 
+class _MeAIResponse:
+    status_code = 200
+    text = ""
+    headers = {}
+
+    def json(self):
+        return {
+            "id": "meai-task-id",
+            "task_id": "meai-task-id",
+            "status": "RUNNING",
+            "object": "",
+        }
+
+
 class _RecordingClient:
     def __init__(self):
         self.posts = []
@@ -40,7 +54,8 @@ class _RecordingClient:
     async def post(self, url, **kwargs):
         self.posts.append(url)
         self.post_requests.append((url, kwargs))
-        return _Response()
+        responses = getattr(self, "responses", None)
+        return responses.pop(0) if responses else _Response()
 
     async def get(self, url, **kwargs):
         self.gets.append(url)
@@ -104,6 +119,7 @@ class VideoApiRootTests(unittest.TestCase):
             main.TUDOU_VIDEO_REQUEST_MODE: ("/v1/videos", "/v1/videos/task-id"),
             main.GEEKNOW_VIDEO_REQUEST_MODE: ("/v1/videos", "/v1/videos/task-id"),
             main.MEGABYAI_VIDEO_REQUEST_MODE: ("/v1/videos", "/v1/videos/task-id"),
+            main.MEAI_VIDEO_REQUEST_MODE: ("/v1/videos", "/v1/videos/task-id"),
             main.SUDASHUI_VIDEO_REQUEST_MODE: (
                 "/v1/video/generations",
                 "/v1/video/generations/task-id",
@@ -123,6 +139,7 @@ class VideoApiRootTests(unittest.TestCase):
             tudou._api_root,
             geeknow._provider_root,
             megabyai._provider_root,
+            meai._provider_root,
             sudashui._provider_root,
         )
         for function in root_functions:
@@ -159,6 +176,23 @@ class VideoApiRootTests(unittest.TestCase):
                 self.assertEqual(first["base_url"], expected_base_url)
                 self.assertEqual(first["video_request_mode"], main.AICOST_VIDEO_REQUEST_MODE)
                 self.assertEqual(second, first)
+
+    def test_meai_official_provider_is_locked_by_exact_hostname(self):
+        for raw_base_url in (
+            "https://api.meai.cloud",
+            "https://api.meai.cloud/",
+            "https://api.meai.cloud/v1",
+        ):
+            normalized = main.normalize_provider({
+                "id": "meai-test",
+                "name": "MeAI",
+                "base_url": raw_base_url,
+                "video_request_mode": "openai-videos-generations",
+            })
+            with self.subTest(base_url=raw_base_url):
+                self.assertEqual(normalized["video_request_mode"], main.MEAI_VIDEO_REQUEST_MODE)
+                self.assertEqual(main.video_poll_interval(normalized), 20.0)
+        self.assertFalse(meai.is_meai_official_provider({"base_url": "https://api.meai.cloud.evil.example"}))
 
     def test_aicost_candidates_only_use_videos_api(self):
         provider = {
@@ -815,6 +849,171 @@ class VideoDownloadUrlTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(captured.exception.status_code, 401)
         self.assertEqual(len(client.gets), 1)
+
+    async def test_meai_submission_maps_media_roles_and_parameters(self):
+        client = _RecordingClient()
+        client.responses = [_MeAIResponse()]
+        patches = []
+
+        async def publish(value):
+            raw = value.get("url") if isinstance(value, dict) else value
+            return f"https://media.example.com/{str(raw).rsplit('/', 1)[-1]}"
+
+        with self.assertRaises(meai.MeAIProtocolError) as timeout:
+            await meai.generate_meai_video(
+                client,
+                {
+                    "model": "sd-2",
+                    "prompt": "图1中的人物参考视频1的动作",
+                    "duration": 15,
+                    "aspect_ratio": "16:9",
+                    "resolution": "1080p",
+                    "images": [
+                        {"url": "/assets/first.png", "role": "first_frame"},
+                        {"url": "/assets/last.png", "role": "last_frame"},
+                        {"url": "/assets/person.png"},
+                    ],
+                    "videos": ["/assets/action.mp4"],
+                    "audios": ["/assets/voice.mp3"],
+                },
+                base_url="https://api.meai.cloud/v1",
+                headers={"Authorization": "Bearer test"},
+                progress=patches.append,
+                public_reference_url=publish,
+                save_video=self._save_video,
+                poll_timeout=0.001,
+                poll_interval=0,
+            )
+
+        self.assertEqual(timeout.exception.status_code, 502)
+        self.assertEqual(client.posts, ["https://api.meai.cloud/v1/videos"])
+        self.assertEqual(
+            client.post_requests[0][1]["json"],
+            {
+                "model": "sd-2",
+                "input": {
+                    "prompt": "图1中的人物参考视频1的动作",
+                    "media": [
+                        {"type": "first_frame", "url": "https://media.example.com/first.png"},
+                        {"type": "last_frame", "url": "https://media.example.com/last.png"},
+                        {"type": "reference_image", "url": "https://media.example.com/person.png"},
+                        {"type": "reference_video", "url": "https://media.example.com/action.mp4"},
+                        {"type": "reference_voice", "url": "https://media.example.com/voice.mp3"},
+                    ],
+                },
+                "parameters": {"resolution": "1080p", "ratio": "16:9", "duration": 15},
+            },
+        )
+        self.assertTrue(any(item.get("upstream_task_id") == "meai-task-id" for item in patches))
+
+    async def test_meai_polling_parses_succeeded_object_and_failed_status(self):
+        success_client = _SequenceClient([
+            httpx.Response(200, json={
+                "id": "task-id",
+                "object": "https://cdn.example.com/video.mp4",
+                "status": "SUCCEEDED",
+            }),
+        ])
+        with (
+            patch.object(meai.asyncio, "sleep", new=AsyncMock(return_value=None)),
+            patch.object(meai.time, "monotonic", return_value=0.0),
+        ):
+            result = await meai.resume_meai_video(
+                success_client,
+                "task-id",
+                base_url="https://api.meai.cloud",
+                headers={},
+                progress=None,
+                save_video=self._save_video,
+                poll_timeout=1,
+                poll_interval=20,
+            )
+        self.assertEqual(result["videos"], ["/output/video.mp4"])
+
+        failure_client = _SequenceClient([
+            httpx.Response(200, json={"id": "task-id", "object": "", "status": "FAILED: 敏感词"}),
+        ])
+        with (
+            patch.object(meai.asyncio, "sleep", new=AsyncMock(return_value=None)),
+            patch.object(meai.time, "monotonic", return_value=0.0),
+            self.assertRaises(meai.MeAIProtocolError) as captured,
+        ):
+            await meai.resume_meai_video(
+                failure_client,
+                "task-id",
+                base_url="https://api.meai.cloud",
+                headers={},
+                progress=None,
+                save_video=self._save_video,
+                poll_timeout=1,
+                poll_interval=20,
+            )
+        self.assertIn("敏感词", captured.exception.detail)
+
+    async def test_meai_http_failed_status_stops_without_retry(self):
+        client = _SequenceClient([
+            httpx.Response(503, json={"status": "FAILED: 余额不足", "object": ""}),
+            httpx.Response(200, json={"status": "SUCCEEDED", "object": "https://cdn.example.com/video.mp4"}),
+        ])
+        with (
+            patch.object(meai.asyncio, "sleep", new=AsyncMock(return_value=None)),
+            patch.object(meai.time, "monotonic", return_value=0.0),
+            self.assertRaises(meai.MeAIProtocolError) as captured,
+        ):
+            await meai.resume_meai_video(
+                client,
+                "task-id",
+                base_url="https://api.meai.cloud",
+                headers={},
+                progress=None,
+                save_video=self._save_video,
+                poll_timeout=1,
+                poll_interval=20,
+            )
+        self.assertIn("余额不足", captured.exception.detail)
+        self.assertEqual(len(client.gets), 1)
+
+    async def test_meai_rejects_reference_limits_before_submit(self):
+        client = _RecordingClient()
+        with self.assertRaises(meai.MeAIProtocolError) as captured:
+            await meai.generate_meai_video(
+                client,
+                {
+                    "model": "sd-2",
+                    "prompt": "test",
+                    "duration": 5,
+                    "aspect_ratio": "16:9",
+                    "resolution": "720p",
+                    "images": [{"url": f"https://media.example.com/{index}.png"} for index in range(10)],
+                },
+                base_url="https://api.meai.cloud",
+                headers={},
+                progress=None,
+                public_reference_url=self._public_url,
+                save_video=self._save_video,
+                poll_timeout=1,
+            )
+        self.assertEqual(captured.exception.status_code, 400)
+        self.assertEqual(client.posts, [])
+
+        with self.assertRaises(meai.MeAIProtocolError):
+            await meai.generate_meai_video(
+                client,
+                {
+                    "model": "sd-2",
+                    "prompt": "test",
+                    "duration": 5.5,
+                    "aspect_ratio": "16:9",
+                    "resolution": "720p",
+                },
+                base_url="https://api.meai.cloud",
+                headers={},
+                progress=None,
+                public_reference_url=self._public_url,
+                save_video=self._save_video,
+                poll_timeout=1,
+            )
+        self.assertEqual(client.posts, [])
 
 
 class CloudMediaUploadTests(unittest.IsolatedAsyncioTestCase):

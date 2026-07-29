@@ -38,4 +38,21 @@ assert.deepEqual(
     {code:'unsupported', kind:'audio', count:0},
 );
 
+assert.deepEqual(
+    issue(api.MODES.MEAI, 'sd-2', {image:10}),
+    {code:'limit', kind:'image', count:9},
+);
+assert.deepEqual(
+    issue(api.MODES.MEAI, 'sd-2-fast', {video:4}),
+    {code:'limit', kind:'video', count:3},
+);
+const meaiProfile = api.videoProtocolProfile({base_url:'https://api.meai.cloud'}, 'sd-2', '');
+assert.equal(meaiProfile.mode, api.MODES.MEAI);
+assert.equal(meaiProfile.submitPath, '/v1/videos');
+assert.equal(meaiProfile.taskPathPrefix, '/v1/videos/');
+assert.deepEqual(meaiProfile.aspectRatios, ['1:1', '16:9', '9:16', '4:3', '3:4']);
+assert.deepEqual(meaiProfile.resolutions, ['720p', '1080p']);
+assert.equal(meaiProfile.supportsFrameRoles, true);
+assert.equal(meaiProfile.supportsAdvancedOptions, false);
+
 console.log('video api utils ok');

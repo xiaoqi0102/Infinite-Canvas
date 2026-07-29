@@ -33,6 +33,8 @@
         "api.videoRequestModeSudashuiLabel": { zh: "Sudashui：Seedance", en: "Sudashui: Seedance" },
         "api.videoRequestModeMegabyAi": { zh: "MegabyAI：Seedance", en: "MegabyAI: Seedance" },
         "api.videoRequestModeMegabyAiLabel": { zh: "MegabyAI：Seedance", en: "MegabyAI: Seedance" },
+        "api.videoRequestModeMeAi": { zh: "MeAI：Seedance", en: "MeAI: Seedance" },
+        "api.videoRequestModeMeAiLabel": { zh: "MeAI：Seedance", en: "MeAI: Seedance" },
         "api.videoRequestModeGeekNow": { zh: "GeekNow：可灵 / Grok", en: "GeekNow: Kling / Grok" },
         "api.videoRequestModeGeekNowLabel": { zh: "GeekNow 可灵 / Grok", en: "GeekNow Kling / Grok" },
         "api.videoRequestModeTudou": { zh: "Tudou：Grok / Sora2", en: "Tudou: Grok / Sora2" },

@@ -2958,10 +2958,11 @@ function normalizeVideoRequestMode(value){
     if(['openai-videos', 'videos-generations'].includes(mode)) return 'openai-videos-generations';
     if(['sudashui', 'sudashui-video'].includes(mode)) return 'sudashui-video-generations';
     if(['megabyai', 'megabyai-videos'].includes(mode)) return 'megabyai-v1-videos';
+    if(['meai', 'meai-video', 'meai-videos'].includes(mode)) return 'meai-v1-videos';
     if(['geeknow', 'geeknow-video', 'geeknow-videos'].includes(mode)) return 'geeknow-v1-videos';
     if(['tudou', 'tudou-video', 'tudou-videos'].includes(mode)) return 'tudou-video';
     if(['aicost', 'aicost-video', 'aicost-videos'].includes(mode)) return 'aicost-video';
-    return ['openai-videos-generations', 'openai-video-generations', 'sudashui-video-generations', 'megabyai-v1-videos', 'geeknow-v1-videos', 'tudou-video', 'aicost-video'].includes(mode) ? mode : 'openai-videos-generations';
+    return ['openai-videos-generations', 'openai-video-generations', 'sudashui-video-generations', 'megabyai-v1-videos', 'meai-v1-videos', 'geeknow-v1-videos', 'tudou-video', 'aicost-video'].includes(mode) ? mode : 'openai-videos-generations';
 }
 function isMegabyAiBaseUrl(value){
     if(window.StudioVideoApi) return window.StudioVideoApi.isMegabyAiBaseUrl(value);
@@ -2973,6 +2974,14 @@ function isMegabyAiBaseUrl(value){
     }
     catch (_) {}
     try { return officialHostnames.has(new URL(`https://${text.replace(/^\/+/, '')}`).hostname.toLowerCase()); }
+    catch (_) { return false; }
+}
+function isMeAiBaseUrl(value){
+    if(window.StudioVideoApi) return window.StudioVideoApi.isMeAiBaseUrl(value);
+    const text = String(value || '').trim();
+    try { return new URL(text).hostname.toLowerCase() === 'api.meai.cloud'; }
+    catch (_) {}
+    try { return new URL(`https://${text.replace(/^\/+/, '')}`).hostname.toLowerCase() === 'api.meai.cloud'; }
     catch (_) { return false; }
 }
 function isTudouBaseUrl(value){
@@ -2994,6 +3003,7 @@ function isGeekNowBaseUrl(value){
 }
 function officialVideoRequestMode(baseUrl){
     if(isAICostBaseUrl(baseUrl)) return 'aicost-video';
+    if(isMeAiBaseUrl(baseUrl)) return 'meai-v1-videos';
     if(isMegabyAiBaseUrl(baseUrl)) return 'megabyai-v1-videos';
     if(isGeekNowBaseUrl(baseUrl)) return 'geeknow-v1-videos';
     if(isTudouBaseUrl(baseUrl)) return 'tudou-video';
@@ -3053,6 +3063,7 @@ function videoRequestModeLabel(mode){
     const normalized = normalizeVideoRequestMode(mode);
     if(normalized === 'sudashui-video-generations') return tr('api.videoRequestModeSudashuiLabel') || 'Sudashui: Seedance';
     if(normalized === 'megabyai-v1-videos') return tr('api.videoRequestModeMegabyAiLabel') || 'MegabyAI: Seedance';
+    if(normalized === 'meai-v1-videos') return tr('api.videoRequestModeMeAiLabel') || 'MeAI: Seedance';
     if(normalized === 'geeknow-v1-videos') return tr('api.videoRequestModeGeekNowLabel') || 'GeekNow Kling / Grok';
     if(normalized === 'tudou-video') return tr('api.videoRequestModeTudouLabel') || 'Tudou Grok / Sora2';
     if(normalized === 'aicost-video') return tr('api.videoRequestModeAICostLabel') || 'aicost: Seedance / Grok';

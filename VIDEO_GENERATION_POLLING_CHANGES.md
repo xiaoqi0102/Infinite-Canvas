@@ -1029,7 +1029,7 @@ Windows 入口：
 - 普通画布视频任务化轮询。
 - 智能画布视频任务化轮询。
 
-该脚本不覆盖 `plugins/video_plugins/` 中的 MegabyAI、GeekNow、Tudou、aicost 等后续独立协议，也不会完整重建对应的前端模型约束。同步上游后必须按 `UPSTREAM_MERGE_GUIDE.md` 逐项保留这些插件、注册入口、i18n 和画布适配，不能把脚本成功当作全部视频能力已恢复。
+该脚本不覆盖 `plugins/video_plugins/` 中的 MegabyAI、MeAI、GeekNow、Tudou、aicost 等后续独立协议，也不会完整重建对应的前端模型约束。同步上游后必须按 `UPSTREAM_MERGE_GUIDE.md` 逐项保留这些插件、注册入口、i18n 和画布适配，不能把脚本成功当作全部视频能力已恢复。
 
 ### 14.2 推荐使用方式
 
@@ -1510,4 +1510,32 @@ JSON 结果兼容 `video_url`、`result_url` 与文本中的视频地址。AICos
 - **可信素材(trusted_asset)双画布对齐**:普通画布在检测到 asset:// URI 或引用已注册认证素材时自动置 `trusted_asset` 并按平台选认证地址(无 UI 开关,与智能画布的手动开关并存)。
 - **Sudashui 密钥边界**:本地素材上传到 `files.sudashuiapi.com` 前会校验渠道 Base URL 属官方域(`sudashuiapi.com` 及子域,官方域名单为合理假设),非官方域的第三方中转会被拒绝上传并提示改用公网素材链接;`configured_sudashui_upload_providers` 同样只保留官方渠道;官方域渠道现与其余四家插件一致被强制识别为 sudashui 模式。
 - **文案国际化**:视频链路此前硬编码的中文提示(手动网址弹窗、任务查询、"任务未丢失"等)全部接入 `StudioI18n` 双语。
+
+## 25. MeAI `/v1/videos` 独立视频插件
+
+新增 `video_request_mode: meai-v1-videos`，协议实现位于 `plugins/video_plugins/meai.py`。官方 Base URL `https://api.meai.cloud` 会按完整 hostname 自动锁定该模式；手动选择时也可接入实现相同协议的兼容服务。
+
+接口与请求映射：
+
+- 创建：`POST /v1/videos`，Bearer 鉴权。
+- 查询：`GET /v1/videos/{task_id}`，两次查询至少间隔 20 秒。
+- 请求外层为 `model`、`input`、`parameters`；提示词写入 `input.prompt`。
+- 图片按角色映射为 `first_frame`、`last_frame` 或 `reference_image`，视频映射为 `reference_video`，音频映射为 `reference_voice`。
+- `parameters` 发送 `resolution`、`ratio`、`duration`；分辨率支持 `720p` / `1080p`，比例支持 `1:1`、`16:9`、`9:16`、`4:3`、`3:4`，时长为正整数。
+- 最多 9 张图片、3 个视频、3 个音频；所有素材必须先通过既有受控公网化链路转换为 HTTP/HTTPS URL。
+
+状态 `PENDING` / `RUNNING` 继续轮询，`SUCCEEDED` 从 `object` 读取视频地址并下载到本地输出目录，`FAILED: 错误信息` 立即终止并保留具体原因。创建请求遇到传输错误不会自动重发，避免重复扣费；服务重启只恢复已有上游任务 ID 的查询。
+
+普通画布与智能画布共用 `static/js/video-api-utils.js` 的协议约束，保留首尾帧开关，隐藏 MeAI 未声明支持的提示词增强、超分、水印、镜头固定、生成音频、多模态和可信素材开关。配置示例：
+
+```json
+{
+  "base_url": "https://api.meai.cloud",
+  "protocol": "openai",
+  "video_request_mode": "meai-v1-videos",
+  "video_models": ["sd-2", "sd-2-fast"]
+}
+```
+
+生成结果链接由 MeAI 保留约 24 小时，后端在成功后会立即下载到本地输出目录。
 

@@ -61,12 +61,13 @@ git status
 
 必须保留的后端能力：
 
-- `video_request_mode` 支持 `openai-videos-generations`、`openai-video-generations`、`sudashui-video-generations`、`megabyai-v1-videos`、`geeknow-v1-videos`、`tudou-video` 和 `aicost-video`。
+- `video_request_mode` 支持 `openai-videos-generations`、`openai-video-generations`、`sudashui-video-generations`、`megabyai-v1-videos`、`meai-v1-videos`、`geeknow-v1-videos`、`tudou-video` 和 `aicost-video`。
 - `/v1/videos/generations` 与 `/v1/video/generations` 都可按配置选择。
 - Sudashui 虽然也使用 `/v1/video/generations`，但必须保留独立的字符串化 `metadata.payload` 请求体，不能退回 OpenAI 单数视频格式。
 - Sudashui 分辨率只从模型名展示并记录在本地任务中，不能把 `resolution` 发送给上游。
 - Sudashui 本地素材上传必须使用 `files.sudashuiapi.com`，不能静默回退 Litterbox/temp.sh；创建请求不能自动重发。
 - MegabyAI 必须保留 `POST /v1/videos`、`GET /v1/videos/{task_id}`、camelCase 参考素材字段、8 秒轮询及同源 Bearer 下载，不能退回任一 `generations` 路径。
+- MeAI 必须保留独立的 `input.prompt` / `input.media` / `parameters` 请求体、`first_frame` / `last_frame` / `reference_*` 媒体类型、至少 20 秒轮询和 `object` 结果字段，不能复用 MegabyAI 的 camelCase 请求体。
 - Sudashui 与 MegabyAI 的 Base URL 必须兼容根域名、末尾 `/` 和末尾 `/v1`，插件内部统一保证请求路径只包含一份 `/v1`；MegabyAI 官方域名还必须在后端配置归一化时锁定独立模式。
 - GeekNow 与 Tudou 的协议实现位于 `plugins/video_plugins/`，`main.py` 只保留注册、回调桥接和 FastAPI 错误转换；合并时不得把协议细节重新内联到主文件。
 - GeekNow 的 `geeknow.ai` 与 `api.geeknow.ai` 必须在前端保存和后端调用两侧按完整 hostname 自动识别为 `geeknow-v1-videos`，避免旧配置退回通用 `videos` 路径。

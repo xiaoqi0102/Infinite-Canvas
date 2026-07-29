@@ -9638,6 +9638,9 @@ function renderVideoBody(node){
         node.aspectRatio = normalized.aspectRatio || node.aspectRatio;
         node.resolution = normalized.resolution ?? node.resolution;
     }
+    ['enhancePrompt', 'enableUpsample', 'watermark', 'cameraFixed', 'generateAudio', 'multimodal']
+        .forEach(field => { if(profile.supportsAdvancedOptions === false) node[field] = false; });
+    if(profile.supportsFrameRoles === false) node.useFrameRoles = false;
     const isMegaby = isMegabyVideoProvider(node.apiProvider);
     const currentImageRefs = resolveGeneratorRequestInputs(node).imageRefs;
     syncCanvasOfficialAssetState(node, currentImageRefs, profile, true);
@@ -9699,7 +9702,9 @@ function renderVideoBody(node){
                     </select>
                 </label>
             </div>
-            ${isMegaby ? '' : `<div class="gen-settings-row" style="flex-wrap:wrap">
+            ${profile.supportsAdvancedOptions === false ? (profile.supportsFrameRoles !== false ? `<div class="gen-settings-row" style="flex-wrap:wrap">
+                <button type="button" class="setting-check ${node.useFrameRoles ? 'active' : ''}" data-video-toggle="useFrameRoles"><span class="check-dot"></span>${tr('canvas.videoFirstLastFrames')}</button>
+            </div>` : '') : `<div class="gen-settings-row" style="flex-wrap:wrap">
                 ${profile.isSudashui ? '' : `<button type="button" class="setting-check ${node.enhancePrompt ? 'active' : ''}" data-video-toggle="enhancePrompt"><span class="check-dot"></span>${tr('canvas.videoEnhancePrompt')}</button>
                 <button type="button" class="setting-check ${node.enableUpsample ? 'active' : ''}" data-video-toggle="enableUpsample"><span class="check-dot"></span>${tr('canvas.videoUpsample')}</button>
                 <button type="button" class="setting-check ${node.watermark ? 'active' : ''}" data-video-toggle="watermark"><span class="check-dot"></span>${tr('canvas.videoWatermark')}</button>

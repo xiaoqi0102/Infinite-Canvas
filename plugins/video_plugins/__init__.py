@@ -32,6 +32,13 @@ from .megabyai import (
     megabyai_video_task_retryable,
     resume_megabyai_video,
 )
+from .meai import (
+    MEAI_VIDEO_REQUEST_MODE,
+    MeAIProtocolError,
+    generate_meai_video,
+    is_meai_official_provider,
+    resume_meai_video,
+)
 from .sudashui import (
     SUDASHUI_VIDEO_REQUEST_MODE,
     SudashuiProtocolError,
@@ -74,6 +81,11 @@ __all__ = [
     "is_megabyai_official_provider",
     "megabyai_video_task_retryable",
     "resume_megabyai_video",
+    "MEAI_VIDEO_REQUEST_MODE",
+    "MeAIProtocolError",
+    "generate_meai_video",
+    "is_meai_official_provider",
+    "resume_meai_video",
     "SUDASHUI_VIDEO_REQUEST_MODE",
     "SudashuiProtocolError",
     "generate_sudashui_video",

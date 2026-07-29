@@ -6,6 +6,7 @@
         VIDEO: 'openai-video-generations',
         SUDASHUI: 'sudashui-video-generations',
         MEGABYAI: 'megabyai-v1-videos',
+        MEAI: 'meai-v1-videos',
         GEEKNOW: 'geeknow-v1-videos',
         TUDOU: 'tudou-video',
         AICOST: 'aicost-video',
@@ -16,8 +17,11 @@
     const SUDASHUI_ASPECT_RATIO_SET = new Set(SUDASHUI_ASPECT_RATIOS);
     const MEGABYAI_DURATIONS = Object.freeze(Array.from({length:12}, (_, index) => index + 4));
     const MEGABYAI_ASPECT_RATIOS = Object.freeze(['16:9', '9:16', '1:1']);
+    const MEAI_ASPECT_RATIOS = Object.freeze(['1:1', '16:9', '9:16', '4:3', '3:4']);
     const MEGABYAI_OFFICIAL_HOSTNAMES = Object.freeze(['newapi.megabyai.cc', 'cn.megabyai.cc']);
     const MEGABYAI_OFFICIAL_HOSTNAME_SET = new Set(MEGABYAI_OFFICIAL_HOSTNAMES);
+    const MEAI_OFFICIAL_HOSTNAMES = Object.freeze(['api.meai.cloud']);
+    const MEAI_OFFICIAL_HOSTNAME_SET = new Set(MEAI_OFFICIAL_HOSTNAMES);
     const AICOST_OFFICIAL_HOSTNAME_SET = new Set(['aicost.xyz', 'www.aicost.xyz']);
     const GEEKNOW_OFFICIAL_HOSTNAMES = Object.freeze(['geeknow.ai', 'api.geeknow.ai']);
     const GEEKNOW_OFFICIAL_HOSTNAME_SET = new Set(GEEKNOW_OFFICIAL_HOSTNAMES);
@@ -31,6 +35,7 @@
         if(['openai-videos', 'videos-generations'].includes(mode)) return MODES.VIDEOS;
         if(['sudashui', 'sudashui-video'].includes(mode)) return MODES.SUDASHUI;
         if(['megabyai', 'megabyai-videos'].includes(mode)) return MODES.MEGABYAI;
+        if(['meai', 'meai-video', 'meai-videos'].includes(mode)) return MODES.MEAI;
         if(['geeknow', 'geeknow-video', 'geeknow-videos'].includes(mode)) return MODES.GEEKNOW;
         if(['tudou', 'tudou-video', 'tudou-videos'].includes(mode)) return MODES.TUDOU;
         if(['aicost', 'aicost-video', 'aicost-videos'].includes(mode)) return MODES.AICOST;
@@ -79,6 +84,10 @@
         return MEGABYAI_OFFICIAL_HOSTNAME_SET.has(videoProviderHostname(value));
     }
 
+    function isMeAiBaseUrl(value){
+        return MEAI_OFFICIAL_HOSTNAME_SET.has(videoProviderHostname(value));
+    }
+
     function isAICostBaseUrl(value){
         return AICOST_OFFICIAL_HOSTNAME_SET.has(videoProviderHostname(value));
     }
@@ -94,6 +103,7 @@
     function providerVideoRequestMode(providerOrMode){
         if(providerOrMode && typeof providerOrMode === 'object'){
             if(isAICostBaseUrl(providerOrMode.base_url || providerOrMode.baseUrl)) return MODES.AICOST;
+            if(isMeAiBaseUrl(providerOrMode.base_url || providerOrMode.baseUrl)) return MODES.MEAI;
             if(isMegabyAiBaseUrl(providerOrMode.base_url || providerOrMode.baseUrl)) return MODES.MEGABYAI;
             if(isGeekNowBaseUrl(providerOrMode.base_url || providerOrMode.baseUrl)) return MODES.GEEKNOW;
             if(isTudouBaseUrl(providerOrMode.base_url || providerOrMode.baseUrl)) return MODES.TUDOU;
@@ -113,6 +123,10 @@
 
     function isMegabyAiVideoMode(providerOrMode){
         return providerVideoRequestMode(providerOrMode) === MODES.MEGABYAI;
+    }
+
+    function isMeAiVideoMode(providerOrMode){
+        return providerVideoRequestMode(providerOrMode) === MODES.MEAI;
     }
 
     function isGeekNowVideoMode(providerOrMode){
@@ -312,6 +326,16 @@
         };
     }
 
+    function meaiModelProfile(){
+        return {
+            minDuration:1, maxDuration:null, defaultDuration:5,
+            aspectRatios:MEAI_ASPECT_RATIOS, defaultAspectRatio:'16:9',
+            resolutions:['720p', '1080p'], defaultResolution:'720p',
+            maxImageReferences:9, maxVideoReferences:3, maxAudioReferences:3,
+            supportsVideoReferences:true, supportsAudioReferences:true, supportsFrameRoles:true,
+        };
+    }
+
     function normalizeVideoProtocolValues(profile, values){
         const result = {...(values || {})};
         const durations = Array.isArray(profile?.durations) ? profile.durations.map(Number) : null;
@@ -353,23 +377,26 @@
         const mode = providerVideoRequestMode(provider);
         const sudashui = mode === MODES.SUDASHUI;
         const megabyai = mode === MODES.MEGABYAI;
+        const meai = mode === MODES.MEAI;
         const geeknow = mode === MODES.GEEKNOW;
         const tudou = mode === MODES.TUDOU;
         const aicost = mode === MODES.AICOST;
+        const meaiProfile = meai ? meaiModelProfile() : {};
         const geeknowProfile = geeknow ? geekNowModelProfile(model) : {};
         const tudouProfile = tudou ? tudouModelProfile(model) : {};
         const aicostProfile = aicost ? aicostModelProfile(model) : {};
-        const pluginProfile = geeknow ? geeknowProfile : tudou ? tudouProfile : aicost ? aicostProfile : {};
+        const pluginProfile = meai ? meaiProfile : geeknow ? geeknowProfile : tudou ? tudouProfile : aicost ? aicostProfile : {};
         const resolution = effectiveVideoResolution(mode, model, storedValue) || pluginProfile.defaultResolution || '';
         return Object.freeze({
             mode,
             isSudashui: sudashui,
             isMegabyAi: megabyai,
+            isMeAi: meai,
             isGeekNow: geeknow,
             isTudou: tudou,
             isAICost: aicost,
-            submitPath: pluginProfile.submitPath || ((megabyai || geeknow) ? '/v1/videos' : mode === MODES.VIDEOS ? '/v1/videos/generations' : '/v1/video/generations'),
-            taskPathPrefix: pluginProfile.taskPathPrefix || ((megabyai || geeknow) ? '/v1/videos/' : mode === MODES.VIDEOS ? '/v1/videos/generations/' : '/v1/video/generations/'),
+            submitPath: pluginProfile.submitPath || ((megabyai || meai || geeknow) ? '/v1/videos' : mode === MODES.VIDEOS ? '/v1/videos/generations' : '/v1/video/generations'),
+            taskPathPrefix: pluginProfile.taskPathPrefix || ((megabyai || meai || geeknow) ? '/v1/videos/' : mode === MODES.VIDEOS ? '/v1/videos/generations/' : '/v1/video/generations/'),
             durations: sudashui ? SUDASHUI_DURATIONS : megabyai ? MEGABYAI_DURATIONS : (pluginProfile.durations || null),
             minDuration: (sudashui || megabyai) ? 4 : (pluginProfile.minDuration ?? null),
             maxDuration: (sudashui || megabyai) ? 15 : (pluginProfile.maxDuration ?? null),
@@ -389,9 +416,9 @@
             officialAssetsEnabled: sudashui && isSudashuiOfficialModel(model),
             supportsVideoReferences: pluginProfile.supportsVideoReferences ?? (!tudou && !(sudashui && isSudashuiOfficialModel(model))),
             supportsAudioReferences: pluginProfile.supportsAudioReferences ?? !tudou,
-            supportsAdvancedOptions: !megabyai,
+            supportsAdvancedOptions: !megabyai && !meai,
             supportsFrameRoles: pluginProfile.supportsFrameRoles ?? (!megabyai && !tudou),
-            supportsTrustedAssets: !aicost && !geeknow && !tudou,
+            supportsTrustedAssets: !aicost && !geeknow && !tudou && !meai,
         });
     }
 
@@ -403,18 +430,22 @@
         MEGABYAI_DURATIONS,
         MEGABYAI_ASPECT_RATIOS,
         MEGABYAI_OFFICIAL_HOSTNAMES,
+        MEAI_ASPECT_RATIOS,
+        MEAI_OFFICIAL_HOSTNAMES,
         GEEKNOW_OFFICIAL_HOSTNAMES,
         TUDOU_OFFICIAL_HOSTNAMES,
         normalizeVideoRequestMode,
         videoProviderHostname,
         isPublicHttpUrl,
         isMegabyAiBaseUrl,
+        isMeAiBaseUrl,
         isAICostBaseUrl,
         isGeekNowBaseUrl,
         isTudouBaseUrl,
         providerVideoRequestMode,
         isSudashuiVideoMode,
         isMegabyAiVideoMode,
+        isMeAiVideoMode,
         isGeekNowVideoMode,
         isTudouVideoMode,
         isAICostVideoMode,
@@ -427,6 +458,7 @@
         geekNowModelProfile,
         tudouModelProfile,
         aicostModelProfile,
+        meaiModelProfile,
         normalizeVideoProtocolValues,
         videoProtocolReferenceIssue,
         videoProtocolProfile,

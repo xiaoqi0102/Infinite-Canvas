@@ -59,6 +59,8 @@ from plugins.video_plugins import (
     GeekNowProtocolError,
     MEGABYAI_VIDEO_REQUEST_MODE,
     MegabyAIProtocolError,
+    MEAI_VIDEO_REQUEST_MODE,
+    MeAIProtocolError,
     SUDASHUI_VIDEO_REQUEST_MODE,
     SudashuiProtocolError,
     TUDOU_VIDEO_REQUEST_MODE,
@@ -68,12 +70,14 @@ from plugins.video_plugins import (
     generate_aicost_video,
     generate_geeknow_video,
     generate_megabyai_video,
+    generate_meai_video,
     generate_sudashui_video,
     generate_tudou_video,
     humanize_video_task_failure,
     is_aicost_official_provider,
     is_geeknow_official_provider,
     is_megabyai_official_provider,
+    is_meai_official_provider,
     is_sudashui_official_base_url,
     is_tudou_official_provider,
     megabyai_video_task_retryable,
@@ -82,6 +86,7 @@ from plugins.video_plugins import (
     resume_aicost_video,
     resume_geeknow_video,
     resume_megabyai_video,
+    resume_meai_video,
     resume_sudashui_video,
     resume_tudou_video,
     submit_http_request_with_logging,
@@ -703,6 +708,7 @@ SUPPORTED_VIDEO_REQUEST_MODES = {
     "openai-video-generations",
     SUDASHUI_VIDEO_REQUEST_MODE,
     MEGABYAI_VIDEO_REQUEST_MODE,
+    MEAI_VIDEO_REQUEST_MODE,
     GEEKNOW_VIDEO_REQUEST_MODE,
     TUDOU_VIDEO_REQUEST_MODE,
     AICOST_VIDEO_REQUEST_MODE,
@@ -1623,6 +1629,10 @@ def normalize_video_request_mode(value):
         return "openai-videos-generations"
     if mode in {"sudashui", "sudashui-video"}:
         return SUDASHUI_VIDEO_REQUEST_MODE
+    if mode in {"megabyai", "megabyai-videos"}:
+        return MEGABYAI_VIDEO_REQUEST_MODE
+    if mode in {"meai", "meai-video", "meai-videos"}:
+        return MEAI_VIDEO_REQUEST_MODE
     if mode in {"geeknow", "geeknow-videos", "geeknow-video"}:
         return GEEKNOW_VIDEO_REQUEST_MODE
     if mode in {"tudou", "tudou-videos", "tudou-video"}:
@@ -1728,6 +1738,8 @@ def normalize_provider(item):
     provider_base_url = {"base_url": base_url}
     if is_aicost_official_provider(provider_base_url):
         video_request_mode = AICOST_VIDEO_REQUEST_MODE
+    elif is_meai_official_provider(provider_base_url):
+        video_request_mode = MEAI_VIDEO_REQUEST_MODE
     elif is_megabyai_official_provider(provider_base_url):
         video_request_mode = MEGABYAI_VIDEO_REQUEST_MODE
     elif is_geeknow_official_provider(provider_base_url):
@@ -3716,6 +3728,20 @@ async def resume_canvas_video_task_result(task_id: str):
                     poll_interval=video_poll_interval(provider),
                 )
             except MegabyAIProtocolError as exc:
+                raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+        if is_meai_video_mode(provider):
+            try:
+                return await resume_meai_video(
+                    client,
+                    upstream_task_id,
+                    base_url=video_api_root(provider),
+                    headers=api_headers(json_body=False, provider=provider),
+                    progress=progress,
+                    save_video=lambda url: save_remote_video_to_output(url, provider=provider),
+                    poll_timeout=VIDEO_POLL_TIMEOUT,
+                    poll_interval=video_poll_interval(provider),
+                )
+            except MeAIProtocolError as exc:
                 raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
         if is_geeknow_video_mode(provider):
             try:
@@ -6703,6 +6729,9 @@ def is_lingjing_provider(provider):
 
 def is_megabyai_provider(provider):
     return is_megabyai_official_provider(provider)
+
+def is_meai_provider(provider):
+    return is_meai_official_provider(provider)
 
 def is_agnes_provider(provider, model=""):
     base_url = str((provider or {}).get("base_url") or "").lower()
@@ -17362,6 +17391,8 @@ def video_submit_url_candidates(provider, base_url):
         return [f"{base_url}/v1/videos"]
     if video_request_mode == MEGABYAI_VIDEO_REQUEST_MODE:
         return [f"{base_url}/v1/videos"]
+    if video_request_mode == MEAI_VIDEO_REQUEST_MODE:
+        return [f"{base_url}/v1/videos"]
     if video_request_mode == SUDASHUI_VIDEO_REQUEST_MODE:
         return [f"{base_url}/v1/video/generations"]
     if video_request_mode == "openai-video-generations":
@@ -17398,6 +17429,8 @@ def video_task_url_candidates(provider, base_url, task_id, submit_url=""):
         return [f"{base_url}/v1/videos/{quoted_id}"]
     if video_request_mode == MEGABYAI_VIDEO_REQUEST_MODE:
         return [f"{base_url}/v1/videos/{quoted_id}"]
+    if video_request_mode == MEAI_VIDEO_REQUEST_MODE:
+        return [f"{base_url}/v1/videos/{quoted_id}"]
     if video_request_mode == SUDASHUI_VIDEO_REQUEST_MODE:
         return [f"{base_url}/v1/video/generations/{quoted_id}"]
     if video_request_mode == "openai-video-generations":
@@ -17424,6 +17457,8 @@ def video_task_url_candidates(provider, base_url, task_id, submit_url=""):
 def effective_video_request_mode(provider) -> str:
     if is_aicost_official_provider(provider):
         return AICOST_VIDEO_REQUEST_MODE
+    if is_meai_provider(provider):
+        return MEAI_VIDEO_REQUEST_MODE
     if is_megabyai_provider(provider):
         return MEGABYAI_VIDEO_REQUEST_MODE
     if is_geeknow_official_provider(provider):
@@ -17451,6 +17486,9 @@ def is_sudashui_video_generations_mode(provider) -> bool:
 def is_megabyai_video_mode(provider) -> bool:
     return effective_video_request_mode(provider) == MEGABYAI_VIDEO_REQUEST_MODE
 
+def is_meai_video_mode(provider) -> bool:
+    return effective_video_request_mode(provider) == MEAI_VIDEO_REQUEST_MODE
+
 def is_geeknow_video_mode(provider) -> bool:
     return effective_video_request_mode(provider) == GEEKNOW_VIDEO_REQUEST_MODE
 
@@ -17461,6 +17499,8 @@ def is_aicost_video_mode(provider) -> bool:
     return effective_video_request_mode(provider) == AICOST_VIDEO_REQUEST_MODE
 
 def video_poll_interval(provider) -> float:
+    if is_meai_video_mode(provider):
+        return 20.0
     if is_geeknow_video_mode(provider) or is_aicost_video_mode(provider):
         return 10.0
     return 8.0 if is_megabyai_video_mode(provider) else VIDEO_POLL_INTERVAL
@@ -18228,6 +18268,7 @@ async def build_canvas_video_result(payload: CanvasVideoRequest, progress=None):
     is_single_video_generations = is_openai_video_generations_mode(provider)
     is_sudashui_video_generations = is_sudashui_video_generations_mode(provider)
     is_megabyai = is_megabyai_video_mode(provider)
+    is_meai = is_meai_video_mode(provider)
     is_geeknow = is_geeknow_video_mode(provider)
     is_tudou = is_tudou_video_mode(provider)
     is_aicost = is_aicost_video_mode(provider)
@@ -18235,6 +18276,7 @@ async def build_canvas_video_result(payload: CanvasVideoRequest, progress=None):
         is_single_video_generations
         or is_sudashui_video_generations
         or is_megabyai
+        or is_meai
         or is_geeknow
         or is_tudou
         or is_aicost
@@ -18246,7 +18288,10 @@ async def build_canvas_video_result(payload: CanvasVideoRequest, progress=None):
     volc_is_proxy = bool(is_volcengine and urllib.parse.urlparse(base_url).path.rstrip("/"))
     submit_urls = video_submit_url_candidates(provider, base_url)
     submit_url = submit_urls[0]
-    requested_model = selected_model(payload.model, "agnes-video-v2.0" if is_agnes else "videos-mini" if is_megabyai else "veo3-fast")
+    requested_model = selected_model(
+        payload.model,
+        "agnes-video-v2.0" if is_agnes else "videos-mini" if is_megabyai else "sd-2" if is_meai else "veo3-fast",
+    )
     report_canvas_video_progress(progress, {"model": requested_model})
     is_veo31 = is_apimart and is_apimart_veo31_model(requested_model)
     if is_agnes:
@@ -18359,6 +18404,23 @@ async def build_canvas_video_result(payload: CanvasVideoRequest, progress=None):
                         poll_interval=video_poll_interval(provider),
                     )
                 except MegabyAIProtocolError as exc:
+                    raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+            if is_meai:
+                request_data = payload.model_dump() if hasattr(payload, "model_dump") else payload.dict()
+                request_data["model"] = requested_model
+                try:
+                    return await generate_meai_video(
+                        client,
+                        request_data,
+                        base_url=base_url,
+                        headers=api_headers(json_body=False, provider=provider),
+                        progress=progress,
+                        public_reference_url=lambda value: openai_video_proxy_public_reference_url(value),
+                        save_video=lambda url: save_remote_video_to_output(url, provider=provider),
+                        poll_timeout=VIDEO_POLL_TIMEOUT,
+                        poll_interval=video_poll_interval(provider),
+                    )
+                except MeAIProtocolError as exc:
                     raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
             if is_sudashui_video_generations:
                 request_data = payload.model_dump() if hasattr(payload, "model_dump") else payload.dict()

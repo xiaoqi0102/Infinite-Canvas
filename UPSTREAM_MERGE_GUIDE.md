@@ -918,3 +918,18 @@ git config core.excludesfile "E:/Infinite-Canvas/.git/info/exclude"
 - 本地已从 `gpt-chat.html` 移除未使用的 `tailwindcss-cdn.js` 引用，上游冲突侧只是版本号变化，注意不要借冲突恢复该引用。
 
 本次自动验证结果：132 个 Python 测试通过（1 跳过），JavaScript 测试除 `test_canvas_save_resilience.js` 的既有基线失败（合并前 `main` 上即失败）外全部通过，全量 JavaScript 语法检查、Python 编译、i18n 校验（1237 键）、云同步配置断言、用户数据目录断言和视频补丁 dry-run 均通过。未执行安装包构建与发布文件在线验证。
+
+## 12. 2026-08-05 上游合并记录
+
+本次从共同祖先 `a581fbb` 合并 `upstream/main@1c141a5`，上游新增 3 个提交（`de469fe`、`2aeaba4`、`1c141a5`），主要包含 GPT Image 2 CLI 离线安装包、Tudou GPT-Image-2 异步协议、RunningHub 国际站迁移、MiniMax H3 工作流与时间轴节点、即梦模型命令约束及 APIMart Gemini 修复。实际冲突集中在 `VERSION`、`main.py`、API 设置、普通画布、智能画布、首页 iframe 与静态 HTML 缓存参数。
+
+本次新增的合并注意事项：
+
+- 上游分支不包含本 Fork 后续新增的 Electron、插件、WebDAV 和视频任务化文件；应基于共同祖先做三方合并，不能把分支最终树的缺失误判为本次上游删除。
+- Tudou 异步图片协议需要与本地 `tudou-video` 视频插件并存：图片模式使用 `tudou-async`，视频模式继续由 `video_request_mode` 分流；域名判断复用视频插件的官方 hostname 规则。
+- 即梦新增 `seedance1.0fast` 和命令级模型白名单后，仍需兼容既有 `jimeng_append_model_resolution_args(..., include_model=True)` 调用；非高分辨率模型继续把请求收敛到 720p，避免旧画布因保存了 4k 而直接失败。
+- 普通画布和智能画布的 MiniMax H3 节点可与本地视频任务化、可信素材、生成日志详情、指针取消和 pending 恢复逻辑并存，不能机械选择任一侧冲突块。
+- 上游提交的 `broken-before-stable`、`mojibake-backup` 和 `stable-before-minimax` 智能画布源码备份不参与运行且与正式文件重复，本次合并未纳入结果；正式源码、工作流、RunningHub 模板与缩略图均已保留。
+- `VERSION` 和 `static/update-notes.json` 继续使用 Fork 自有版本线；本次上游的 `2026.08.04` 不直接覆盖根版本，也不触发 Electron 版本同步。
+
+本次自动验证结果：144 个 Python 测试通过（1 跳过），全部 JavaScript 测试通过，全量 JavaScript 语法检查、Python 编译与依赖导入、i18n 校验（1263 键）、用户数据目录断言、云同步轻量检查、Electron 更新/构建配置断言和冲突标记检查均通过。视频补丁 dry-run 仍报告 `plugins/video_plugins/sudashui.py` 缺少旧轮询锚点；该插件与补丁脚本相对合并前 `origin/main` 均无差异，属于既有基线限制。未执行安装包构建、前端浏览器手工冒烟和发布文件在线验证。

@@ -94,7 +94,7 @@ const CODEX_DEFAULT_CHAT_MODELS = ['gpt-5.5'];
 const GEMINI_CLI_DEFAULT_IMAGE_MODELS = ['auto'];
 const GEMINI_CLI_DEFAULT_CHAT_MODELS = ['auto'];
 const CLI_PROTOCOLS = new Set(['jimeng', 'codex', 'gemini-cli']);
-const API_PROTOCOLS = ['openai', 'apimart', 'gemini', 'tudou', 'volcengine', 'runninghub', 'jimeng', 'codex', 'gemini-cli'];
+const API_PROTOCOLS = ['openai', 'apimart', 'gemini', 'volcengine', 'runninghub', 'jimeng', 'codex', 'gemini-cli'];
 let cloudSyncAutoEnabled = false;
 let cloudSyncAutoTimer = null;
 const CLI_PROVIDER_PRESETS = {
@@ -2961,7 +2961,7 @@ function normalizeImageRequestMode(value){
     return ['openai', 'openai-json', 'openai-video-proxy', 'openai-responses', 'aicost-image', 'tudou-async'].includes(mode) ? mode : 'openai';
 }
 function normalizeVideoRequestMode(value){
-    if(window.StudioVideoApi?.MODES?.TUDOU) return window.StudioVideoApi.normalizeVideoRequestMode(value);
+    if(window.StudioVideoApi) return window.StudioVideoApi.normalizeVideoRequestMode(value);
     const mode = String(value || '').trim().toLowerCase();
     if(['openai-video', 'single-video', 'video-generations'].includes(mode)) return 'openai-video-generations';
     if(['openai-videos', 'videos-generations'].includes(mode)) return 'openai-videos-generations';
@@ -2969,9 +2969,8 @@ function normalizeVideoRequestMode(value){
     if(['megabyai', 'megabyai-videos'].includes(mode)) return 'megabyai-v1-videos';
     if(['meai', 'meai-video', 'meai-videos'].includes(mode)) return 'meai-v1-videos';
     if(['geeknow', 'geeknow-video', 'geeknow-videos'].includes(mode)) return 'geeknow-v1-videos';
-    if(['tudou', 'tudou-video', 'tudou-videos'].includes(mode)) return 'tudou-video';
     if(['aicost', 'aicost-video', 'aicost-videos'].includes(mode)) return 'aicost-video';
-    return ['openai-videos-generations', 'openai-video-generations', 'sudashui-video-generations', 'megabyai-v1-videos', 'meai-v1-videos', 'geeknow-v1-videos', 'tudou-video', 'aicost-video'].includes(mode) ? mode : 'openai-videos-generations';
+    return ['openai-videos-generations', 'openai-video-generations', 'sudashui-video-generations', 'megabyai-v1-videos', 'meai-v1-videos', 'geeknow-v1-videos', 'aicost-video'].includes(mode) ? mode : 'openai-videos-generations';
 }
 function isMegabyAiBaseUrl(value){
     if(window.StudioVideoApi) return window.StudioVideoApi.isMegabyAiBaseUrl(value);
@@ -3015,7 +3014,6 @@ function officialVideoRequestMode(baseUrl){
     if(isMeAiBaseUrl(baseUrl)) return 'meai-v1-videos';
     if(isMegabyAiBaseUrl(baseUrl)) return 'megabyai-v1-videos';
     if(isGeekNowBaseUrl(baseUrl)) return 'geeknow-v1-videos';
-    if(isTudouBaseUrl(baseUrl)) return 'tudou-video';
     return '';
 }
 function officialImageRequestMode(baseUrl){
@@ -3076,7 +3074,6 @@ function videoRequestModeLabel(mode){
     if(normalized === 'megabyai-v1-videos') return tr('api.videoRequestModeMegabyAiLabel') || 'MegabyAI: Seedance';
     if(normalized === 'meai-v1-videos') return tr('api.videoRequestModeMeAiLabel') || 'MeAI: Seedance';
     if(normalized === 'geeknow-v1-videos') return tr('api.videoRequestModeGeekNowLabel') || 'GeekNow Kling / Grok';
-    if(normalized === 'tudou-video') return tr('api.videoRequestModeTudouLabel') || 'Tudou Grok / Sora2';
     if(normalized === 'aicost-video') return tr('api.videoRequestModeAICostLabel') || 'aicost: Seedance / Grok';
     return normalized === 'openai-video-generations' ? '/v1/video/generations' : '/v1/videos/generations';
 }

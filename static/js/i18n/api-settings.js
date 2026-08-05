@@ -36,8 +36,6 @@
         "api.videoRequestModeMeAiLabel": { zh: "MeAI：Seedance", en: "MeAI: Seedance" },
         "api.videoRequestModeGeekNow": { zh: "GeekNow：可灵 / Grok", en: "GeekNow: Kling / Grok" },
         "api.videoRequestModeGeekNowLabel": { zh: "GeekNow 可灵 / Grok", en: "GeekNow Kling / Grok" },
-        "api.videoRequestModeTudou": { zh: "Tudou：Grok / Sora2", en: "Tudou: Grok / Sora2" },
-        "api.videoRequestModeTudouLabel": { zh: "Tudou Grok / Sora2", en: "Tudou Grok / Sora2" },
         "api.videoRequestModeAICost": { zh: "aicost：Seedance / Grok", en: "aicost: Seedance / Grok" },
         "api.videoRequestModeAICostLabel": { zh: "aicost：Seedance / Grok", en: "aicost: Seedance / Grok" },
         "api.key": { zh: "API Key", en: "API Key" },

@@ -11,7 +11,6 @@
 | `megabyai.py` | `megabyai-v1-videos` | `/v1/videos` |
 | `meai.py` | `meai-v1-videos` | `/v1/videos` |
 | `sudashui.py` | `sudashui-video-generations` | `/v1/video/generations` |
-| `tudou.py` | `tudou-video` | 按模型使用 `/v1/videos` 或 `/v1/videos/generations` |
 | `common.py` | — | Base URL、下载 URL、公网请求与脱敏日志工具 |
 
 ## 职责边界

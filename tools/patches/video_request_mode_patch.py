@@ -1919,7 +1919,7 @@ def validate(root, overrides=None):
             "async def generate_sudashui_video(",
             "async def resume_sudashui_video(",
             "deadline: Optional[float] = None",
-            "while deadline is None or time.monotonic() < deadline",
+            "while time.monotonic() < (deadline if deadline is not None else queue_deadline)",
             "Sudashui 视频任务查询暂时失败，将自动重试",
         ]
     missing = []

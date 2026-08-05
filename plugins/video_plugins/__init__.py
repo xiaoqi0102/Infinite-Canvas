@@ -48,13 +48,6 @@ from .sudashui import (
     sudashui_video_task_pending,
     upload_sudashui_media,
 )
-from .tudou import (
-    TUDOU_VIDEO_REQUEST_MODE,
-    TudouProtocolError,
-    generate_tudou_video,
-    is_tudou_official_provider,
-    resume_tudou_video,
-)
 
 __all__ = [
     "humanize_video_task_failure",
@@ -93,9 +86,4 @@ __all__ = [
     "resume_sudashui_video",
     "sudashui_video_task_pending",
     "upload_sudashui_media",
-    "TUDOU_VIDEO_REQUEST_MODE",
-    "TudouProtocolError",
-    "generate_tudou_video",
-    "is_tudou_official_provider",
-    "resume_tudou_video",
 ]

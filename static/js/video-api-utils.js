@@ -8,7 +8,6 @@
         MEGABYAI: 'megabyai-v1-videos',
         MEAI: 'meai-v1-videos',
         GEEKNOW: 'geeknow-v1-videos',
-        TUDOU: 'tudou-video',
         AICOST: 'aicost-video',
     });
     const SUDASHUI_MODE = MODES.SUDASHUI;
@@ -25,8 +24,6 @@
     const AICOST_OFFICIAL_HOSTNAME_SET = new Set(['aicost.xyz', 'www.aicost.xyz']);
     const GEEKNOW_OFFICIAL_HOSTNAMES = Object.freeze(['geeknow.ai', 'api.geeknow.ai']);
     const GEEKNOW_OFFICIAL_HOSTNAME_SET = new Set(GEEKNOW_OFFICIAL_HOSTNAMES);
-    const TUDOU_OFFICIAL_HOSTNAMES = Object.freeze(['api.ai-tudou.net']);
-    const TUDOU_OFFICIAL_HOSTNAME_SET = new Set(TUDOU_OFFICIAL_HOSTNAMES);
     const RESOLUTION_TOKEN_RE = /(?:^|[^a-z0-9])(480p|720p|1080p|2160p|1k|2k|4k|8k)(?=$|[^a-z0-9])/gi;
 
     function normalizeVideoRequestMode(value){
@@ -37,7 +34,6 @@
         if(['megabyai', 'megabyai-videos'].includes(mode)) return MODES.MEGABYAI;
         if(['meai', 'meai-video', 'meai-videos'].includes(mode)) return MODES.MEAI;
         if(['geeknow', 'geeknow-video', 'geeknow-videos'].includes(mode)) return MODES.GEEKNOW;
-        if(['tudou', 'tudou-video', 'tudou-videos'].includes(mode)) return MODES.TUDOU;
         if(['aicost', 'aicost-video', 'aicost-videos'].includes(mode)) return MODES.AICOST;
         return Object.values(MODES).includes(mode) ? mode : MODES.VIDEOS;
     }
@@ -96,17 +92,12 @@
         return GEEKNOW_OFFICIAL_HOSTNAME_SET.has(videoProviderHostname(value));
     }
 
-    function isTudouBaseUrl(value){
-        return TUDOU_OFFICIAL_HOSTNAME_SET.has(videoProviderHostname(value));
-    }
-
     function providerVideoRequestMode(providerOrMode){
         if(providerOrMode && typeof providerOrMode === 'object'){
             if(isAICostBaseUrl(providerOrMode.base_url || providerOrMode.baseUrl)) return MODES.AICOST;
             if(isMeAiBaseUrl(providerOrMode.base_url || providerOrMode.baseUrl)) return MODES.MEAI;
             if(isMegabyAiBaseUrl(providerOrMode.base_url || providerOrMode.baseUrl)) return MODES.MEGABYAI;
             if(isGeekNowBaseUrl(providerOrMode.base_url || providerOrMode.baseUrl)) return MODES.GEEKNOW;
-            if(isTudouBaseUrl(providerOrMode.base_url || providerOrMode.baseUrl)) return MODES.TUDOU;
             return normalizeVideoRequestMode(
                 providerOrMode.video_request_mode
                 || providerOrMode.videoRequestMode
@@ -131,10 +122,6 @@
 
     function isGeekNowVideoMode(providerOrMode){
         return providerVideoRequestMode(providerOrMode) === MODES.GEEKNOW;
-    }
-
-    function isTudouVideoMode(providerOrMode){
-        return providerVideoRequestMode(providerOrMode) === MODES.TUDOU;
     }
 
     function isAICostVideoMode(providerOrMode){
@@ -256,53 +243,6 @@
         return {};
     }
 
-    function tudouModelProfile(model){
-        const value = String(model || '').trim().toLowerCase();
-        if(value === 'grok-imagine-video' || value === 'grok-imagine-video-1.5'){
-            return {
-                durations:[6, 10, 12, 16, 20],
-                minDuration:6,
-                maxDuration:20,
-                defaultDuration:6,
-                aspectRatios:['9:16', '16:9', '1:1'],
-                defaultAspectRatio:'9:16',
-                resolutions:['480p', '720p'],
-                defaultResolution:'720p',
-                submitPath:'/v1/videos',
-                taskPathPrefix:'/v1/videos/',
-                requiresImageReference:value === 'grok-imagine-video-1.5',
-                minImageReferences:value === 'grok-imagine-video-1.5' ? 1 : 0,
-                maxImageReferences:value === 'grok-imagine-video-1.5' ? 1 : 7,
-                maxVideoReferences:0,
-                maxAudioReferences:0,
-                supportsVideoReferences:false,
-                supportsAudioReferences:false,
-                supportsFrameRoles:false,
-            };
-        }
-        if(value === 'sora2'){
-            return {
-                durations:[4, 8, 12],
-                minDuration:4,
-                maxDuration:12,
-                defaultDuration:8,
-                aspectRatios:['16:9', '9:16'],
-                defaultAspectRatio:'16:9',
-                resolutions:[''],
-                defaultResolution:'',
-                submitPath:'/v1/videos/generations',
-                taskPathPrefix:'/v1/tasks/',
-                maxImageReferences:1,
-                maxVideoReferences:0,
-                maxAudioReferences:0,
-                supportsVideoReferences:false,
-                supportsAudioReferences:false,
-                supportsFrameRoles:false,
-            };
-        }
-        return {};
-    }
-
     function aicostModelProfile(model){
         const value = String(model || '').trim().toLowerCase();
         if(value.includes('grok')){
@@ -379,13 +319,11 @@
         const megabyai = mode === MODES.MEGABYAI;
         const meai = mode === MODES.MEAI;
         const geeknow = mode === MODES.GEEKNOW;
-        const tudou = mode === MODES.TUDOU;
         const aicost = mode === MODES.AICOST;
         const meaiProfile = meai ? meaiModelProfile() : {};
         const geeknowProfile = geeknow ? geekNowModelProfile(model) : {};
-        const tudouProfile = tudou ? tudouModelProfile(model) : {};
         const aicostProfile = aicost ? aicostModelProfile(model) : {};
-        const pluginProfile = meai ? meaiProfile : geeknow ? geeknowProfile : tudou ? tudouProfile : aicost ? aicostProfile : {};
+        const pluginProfile = meai ? meaiProfile : geeknow ? geeknowProfile : aicost ? aicostProfile : {};
         const resolution = effectiveVideoResolution(mode, model, storedValue) || pluginProfile.defaultResolution || '';
         return Object.freeze({
             mode,
@@ -393,7 +331,6 @@
             isMegabyAi: megabyai,
             isMeAi: meai,
             isGeekNow: geeknow,
-            isTudou: tudou,
             isAICost: aicost,
             submitPath: pluginProfile.submitPath || ((megabyai || meai || geeknow) ? '/v1/videos' : mode === MODES.VIDEOS ? '/v1/videos/generations' : '/v1/video/generations'),
             taskPathPrefix: pluginProfile.taskPathPrefix || ((megabyai || meai || geeknow) ? '/v1/videos/' : mode === MODES.VIDEOS ? '/v1/videos/generations/' : '/v1/video/generations/'),
@@ -414,11 +351,11 @@
             resolutionLabel: resolution ? resolution.toUpperCase() : '',
             resolutionReadOnly: sudashui,
             officialAssetsEnabled: sudashui && isSudashuiOfficialModel(model),
-            supportsVideoReferences: pluginProfile.supportsVideoReferences ?? (!tudou && !(sudashui && isSudashuiOfficialModel(model))),
-            supportsAudioReferences: pluginProfile.supportsAudioReferences ?? !tudou,
+            supportsVideoReferences: pluginProfile.supportsVideoReferences ?? !(sudashui && isSudashuiOfficialModel(model)),
+            supportsAudioReferences: pluginProfile.supportsAudioReferences ?? true,
             supportsAdvancedOptions: !megabyai && !meai,
-            supportsFrameRoles: pluginProfile.supportsFrameRoles ?? (!megabyai && !tudou),
-            supportsTrustedAssets: !aicost && !geeknow && !tudou && !meai,
+            supportsFrameRoles: pluginProfile.supportsFrameRoles ?? !megabyai,
+            supportsTrustedAssets: !aicost && !geeknow && !meai,
         });
     }
 
@@ -433,7 +370,6 @@
         MEAI_ASPECT_RATIOS,
         MEAI_OFFICIAL_HOSTNAMES,
         GEEKNOW_OFFICIAL_HOSTNAMES,
-        TUDOU_OFFICIAL_HOSTNAMES,
         normalizeVideoRequestMode,
         videoProviderHostname,
         isPublicHttpUrl,
@@ -441,13 +377,11 @@
         isMeAiBaseUrl,
         isAICostBaseUrl,
         isGeekNowBaseUrl,
-        isTudouBaseUrl,
         providerVideoRequestMode,
         isSudashuiVideoMode,
         isMegabyAiVideoMode,
         isMeAiVideoMode,
         isGeekNowVideoMode,
-        isTudouVideoMode,
         isAICostVideoMode,
         isSudashuiOfficialModel,
         normalizeSudashuiAspectRatio,
@@ -456,7 +390,6 @@
         inferModelResolution,
         effectiveVideoResolution,
         geekNowModelProfile,
-        tudouModelProfile,
         aicostModelProfile,
         meaiModelProfile,
         normalizeVideoProtocolValues,

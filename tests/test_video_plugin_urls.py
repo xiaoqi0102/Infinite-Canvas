@@ -8,7 +8,7 @@ import httpx
 os.environ.setdefault("INFINITE_CANVAS_SKIP_STATIC_SYNC", "1")
 
 import main
-from plugins.video_plugins import aicost, geeknow, megabyai, meai, sudashui, tudou
+from plugins.video_plugins import aicost, geeknow, megabyai, meai, sudashui
 from plugins.video_plugins.common import (
     canonical_video_api_root,
     is_public_http_url,
@@ -116,7 +116,6 @@ class VideoApiRootTests(unittest.TestCase):
     def test_main_create_and_query_paths_contain_one_v1(self):
         expected_paths = {
             main.AICOST_VIDEO_REQUEST_MODE: ("/v1/videos", "/v1/videos/task-id"),
-            main.TUDOU_VIDEO_REQUEST_MODE: ("/v1/videos", "/v1/videos/task-id"),
             main.GEEKNOW_VIDEO_REQUEST_MODE: ("/v1/videos", "/v1/videos/task-id"),
             main.MEGABYAI_VIDEO_REQUEST_MODE: ("/v1/videos", "/v1/videos/task-id"),
             main.MEAI_VIDEO_REQUEST_MODE: ("/v1/videos", "/v1/videos/task-id"),
@@ -136,7 +135,6 @@ class VideoApiRootTests(unittest.TestCase):
     def test_plugin_roots_share_the_same_rules(self):
         root_functions = (
             aicost._provider_root,
-            tudou._api_root,
             geeknow._provider_root,
             megabyai._provider_root,
             meai._provider_root,
@@ -156,6 +154,20 @@ class VideoApiRootTests(unittest.TestCase):
         second = main.normalize_provider(first)
         self.assertEqual(first["base_url"], "https://api.example.com/v1")
         self.assertEqual(second["base_url"], first["base_url"])
+
+    def test_tudou_uses_upstream_image_mode_without_custom_video_mode(self):
+        normalized = main.normalize_provider({
+            "id": "tudou",
+            "name": "土豆API",
+            "base_url": "https://api.ai-tudou.net",
+            "protocol": "tudou",
+            "image_request_mode": "tudou-async",
+            "video_request_mode": "tudou-video",
+        })
+
+        self.assertEqual(normalized["protocol"], "openai")
+        self.assertEqual(normalized["image_request_mode"], "tudou-async")
+        self.assertEqual(normalized["video_request_mode"], "openai-videos-generations")
 
     def test_aicost_saved_values_are_idempotent(self):
         for raw_base_url, expected_base_url in (
@@ -279,7 +291,6 @@ class VideoDownloadUrlTests(unittest.IsolatedAsyncioTestCase):
         payload = {"status": "SUCCESS", "download_url": "/v1/videos/task-id/content"}
         extractors = (
             aicost._video_urls,
-            tudou._video_urls,
             geeknow._video_urls,
             megabyai._video_urls,
             sudashui._video_urls,
@@ -312,13 +323,11 @@ class VideoDownloadUrlTests(unittest.IsolatedAsyncioTestCase):
 
         hostile_base = "https://api.example.com//v1/v1/"
         await aicost._save_result({}, "aicost-id", "seedance2.0-mini", hostile_base, save_video)
-        await tudou._save_result({}, "tudou-id", tudou.GROK_MODEL, hostile_base, save_video)
         await geeknow._save_result({}, "geeknow-id", hostile_base, save_video)
         self.assertEqual(
             captured,
             [
                 "https://api.example.com/v1/videos/aicost-id/content",
-                "https://api.example.com/v1/videos/tudou-id/content",
                 "https://api.example.com/v1/videos/geeknow-id/content",
             ],
         )
@@ -529,21 +538,6 @@ class VideoDownloadUrlTests(unittest.IsolatedAsyncioTestCase):
             save_video=self._save_video,
             poll_timeout=1,
             poll_interval=0,
-        )
-        cases.append((client.posts, "https://api.example.com/v1/videos"))
-
-        client = _RecordingClient()
-        await tudou.generate_tudou_video(
-            client,
-            {"model": tudou.GROK_MODEL, "prompt": "x", "duration": 6, "aspect_ratio": "9:16", "resolution": "720p"},
-            base_url=base_url,
-            headers={},
-            progress=None,
-            resolve_local_path=self._local_path,
-            content_type_for_path=self._content_type,
-            public_reference_url=self._public_url,
-            save_video=self._save_video,
-            poll_timeout=1,
         )
         cases.append((client.posts, "https://api.example.com/v1/videos"))
 
@@ -1286,13 +1280,6 @@ class PublicReferenceSafetyTests(unittest.IsolatedAsyncioTestCase):
                     self._local_path,
                     self._content_type,
                 )
-            with self.assertRaises(tudou.TudouProtocolError):
-                await tudou._reference_file(
-                    client,
-                    "https://private.example/image.png",
-                    self._local_path,
-                    self._content_type,
-                )
             with self.assertRaises(aicost.AICostProtocolError):
                 await aicost._media_data_url(
                     client,
@@ -1482,6 +1469,27 @@ class CanvasVideoTaskPersistenceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn({"model": "veo3-fast"}, progress)
 
+    async def test_tudou_video_dispatches_to_upstream_model_handler(self):
+        provider = {
+            "id": "tudou",
+            "name": "土豆API",
+            "base_url": "https://api.ai-tudou.net",
+            "video_request_mode": "openai-videos-generations",
+        }
+        payload = main.CanvasVideoRequest(provider_id="tudou", model="sora2", prompt="test")
+        handler = AsyncMock(return_value={"videos": ["/output/video.mp4"]})
+
+        with (
+            patch.object(main, "get_api_provider", return_value=provider),
+            patch.object(main, "provider_env_key_value", return_value="test-key"),
+            patch.object(main.httpx, "AsyncClient", return_value=_AsyncClientContext(_RecordingClient())),
+            patch.object(main, "generate_tudou_video", new=handler),
+        ):
+            result = await main.build_canvas_video_result(payload)
+
+        self.assertEqual(result["videos"], ["/output/video.mp4"])
+        self.assertEqual(handler.await_args.args[4], "sora2")
+
     async def test_public_resume_entries_use_canonical_query_urls(self):
         base_url = "https://api.example.com//v1/v1/"
         cases = []
@@ -1497,19 +1505,6 @@ class CanvasVideoTaskPersistenceTests(unittest.IsolatedAsyncioTestCase):
                 save_video=self._save_video,
                 poll_timeout=1,
                 poll_interval=0,
-            )
-            cases.append((client.gets, "https://api.example.com/v1/videos/task%2Fid"))
-
-            client = _RecordingClient()
-            await tudou.resume_tudou_video(
-                client,
-                "task/id",
-                tudou.GROK_MODEL,
-                base_url=base_url,
-                headers={},
-                progress=None,
-                save_video=self._save_video,
-                poll_timeout=1,
             )
             cases.append((client.gets, "https://api.example.com/v1/videos/task%2Fid"))
 

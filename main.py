@@ -63,8 +63,6 @@ from plugins.video_plugins import (
     MeAIProtocolError,
     SUDASHUI_VIDEO_REQUEST_MODE,
     SudashuiProtocolError,
-    TUDOU_VIDEO_REQUEST_MODE,
-    TudouProtocolError,
     UnsafePublicUrlError,
     canonical_video_api_root,
     generate_aicost_video,
@@ -72,14 +70,12 @@ from plugins.video_plugins import (
     generate_megabyai_video,
     generate_meai_video,
     generate_sudashui_video,
-    generate_tudou_video,
     humanize_video_task_failure,
     is_aicost_official_provider,
     is_geeknow_official_provider,
     is_megabyai_official_provider,
     is_meai_official_provider,
     is_sudashui_official_base_url,
-    is_tudou_official_provider,
     megabyai_video_task_retryable,
     public_http_get,
     public_http_probe,
@@ -88,7 +84,6 @@ from plugins.video_plugins import (
     resume_megabyai_video,
     resume_meai_video,
     resume_sudashui_video,
-    resume_tudou_video,
     submit_http_request_with_logging,
     submit_video_http_request,
     sudashui_video_task_pending,
@@ -695,7 +690,7 @@ JIMENG_LOGIN_SESSION = {
 }
 
 PROVIDER_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{2,40}$")
-SUPPORTED_PROVIDER_PROTOCOLS = {"openai", "apimart", "gemini", "grok", "gemini-cli", "volcengine", "runninghub", "jimeng", "codex", "tudou"}
+SUPPORTED_PROVIDER_PROTOCOLS = {"openai", "apimart", "gemini", "grok", "gemini-cli", "volcengine", "runninghub", "jimeng", "codex"}
 SUPPORTED_IMAGE_REQUEST_MODES = {
     "openai",
     "openai-json",
@@ -711,7 +706,6 @@ SUPPORTED_VIDEO_REQUEST_MODES = {
     MEGABYAI_VIDEO_REQUEST_MODE,
     MEAI_VIDEO_REQUEST_MODE,
     GEEKNOW_VIDEO_REQUEST_MODE,
-    TUDOU_VIDEO_REQUEST_MODE,
     AICOST_VIDEO_REQUEST_MODE,
 }
 RUNNINGHUB_DEFAULT_BASE_URL = "https://www.runninghub.ai"
@@ -1638,8 +1632,6 @@ def normalize_video_request_mode(value):
         return MEAI_VIDEO_REQUEST_MODE
     if mode in {"geeknow", "geeknow-videos", "geeknow-video"}:
         return GEEKNOW_VIDEO_REQUEST_MODE
-    if mode in {"tudou", "tudou-videos", "tudou-video"}:
-        return TUDOU_VIDEO_REQUEST_MODE
     if mode in {"aicost", "aicost-videos", "aicost-video"}:
         return AICOST_VIDEO_REQUEST_MODE
     return mode if mode in SUPPORTED_VIDEO_REQUEST_MODES else "openai-videos-generations"
@@ -1743,8 +1735,6 @@ def normalize_provider(item):
         video_request_mode = MEGABYAI_VIDEO_REQUEST_MODE
     elif is_geeknow_official_provider(provider_base_url):
         video_request_mode = GEEKNOW_VIDEO_REQUEST_MODE
-    elif is_tudou_official_provider(provider_base_url):
-        video_request_mode = TUDOU_VIDEO_REQUEST_MODE
     elif is_sudashui_official_provider(provider_base_url):
         video_request_mode = SUDASHUI_VIDEO_REQUEST_MODE
     else:
@@ -3863,20 +3853,6 @@ async def resume_canvas_video_task_result(task_id: str):
                 )
             except GeekNowProtocolError as exc:
                 raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
-        if is_tudou_video_mode(provider):
-            try:
-                return await resume_tudou_video(
-                    client,
-                    upstream_task_id,
-                    model,
-                    base_url=video_api_root(provider),
-                    headers=api_headers(json_body=False, provider=provider),
-                    progress=progress,
-                    save_video=lambda url: save_remote_video_to_output(url, provider=provider),
-                    poll_timeout=VIDEO_POLL_TIMEOUT,
-                )
-            except TudouProtocolError as exc:
-                raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
         if is_aicost_video_mode(provider):
             try:
                 return await resume_aicost_video(
@@ -5978,7 +5954,11 @@ def is_tudou_provider(provider):
     return str(provider.get("id") or "").strip().lower() == "tudou" or is_tudou_base_url(provider.get("base_url") or "")
 
 def is_tudou_base_url(value):
-    return is_tudou_official_provider({"base_url": str(value or "").strip()})
+    try:
+        host = (urllib.parse.urlsplit(str(value or "").strip()).hostname or "").lower()
+    except Exception:
+        host = ""
+    return host == "api.ai-tudou.net" or host.endswith(".ai-tudou.net")
 
 def is_tudou_async_image_mode(provider, model=""):
     return (
@@ -12200,7 +12180,6 @@ async def save_remote_video_to_output(url, prefix="video_", category="output", p
             and (
                 is_megabyai_video_mode(provider)
                 or is_geeknow_video_mode(provider)
-                or is_tudou_video_mode(provider)
                 or is_aicost_video_mode(provider)
             )
             and same_http_origin(url, provider_base_url)
@@ -18163,8 +18142,6 @@ def video_submit_url_candidates(provider, base_url):
     if is_lingjing_provider(provider):
         return [f"{base_url}/v1/videos"]
     video_request_mode = effective_video_request_mode(provider)
-    if video_request_mode == TUDOU_VIDEO_REQUEST_MODE:
-        return [f"{base_url}/v1/videos", f"{base_url}/v1/videos/generations"]
     if video_request_mode == AICOST_VIDEO_REQUEST_MODE:
         return [f"{base_url}/v1/videos"]
     if video_request_mode == GEEKNOW_VIDEO_REQUEST_MODE:
@@ -18201,8 +18178,6 @@ def video_task_url_candidates(provider, base_url, task_id, submit_url=""):
             f"{base_url}/v1/video/query?{urllib.parse.urlencode({'id': task_id})}",
         ]
     video_request_mode = effective_video_request_mode(provider)
-    if video_request_mode == TUDOU_VIDEO_REQUEST_MODE:
-        return [f"{base_url}/v1/videos/{quoted_id}", f"{base_url}/v1/tasks/{quoted_id}"]
     if video_request_mode == AICOST_VIDEO_REQUEST_MODE:
         return [f"{base_url}/v1/videos/{quoted_id}"]
     if video_request_mode == GEEKNOW_VIDEO_REQUEST_MODE:
@@ -18243,8 +18218,6 @@ def effective_video_request_mode(provider) -> str:
         return MEGABYAI_VIDEO_REQUEST_MODE
     if is_geeknow_official_provider(provider):
         return GEEKNOW_VIDEO_REQUEST_MODE
-    if is_tudou_official_provider(provider):
-        return TUDOU_VIDEO_REQUEST_MODE
     if is_sudashui_official_provider(provider):
         return SUDASHUI_VIDEO_REQUEST_MODE
     if (
@@ -18271,9 +18244,6 @@ def is_meai_video_mode(provider) -> bool:
 
 def is_geeknow_video_mode(provider) -> bool:
     return effective_video_request_mode(provider) == GEEKNOW_VIDEO_REQUEST_MODE
-
-def is_tudou_video_mode(provider) -> bool:
-    return effective_video_request_mode(provider) == TUDOU_VIDEO_REQUEST_MODE
 
 def is_aicost_video_mode(provider) -> bool:
     return effective_video_request_mode(provider) == AICOST_VIDEO_REQUEST_MODE
@@ -19012,6 +18982,320 @@ async def generate_yuli_openai_video(client, payload, provider, base_url, reques
     local_urls = [await save_remote_video_to_output(url) for url in urls]
     return {"videos": local_urls, "task_id": task_id, "raw": result}
 
+TUDOU_GROK_IMAGE_SIZES = {"1024x1024", "1280x720", "720x1280", "1792x1024", "1024x1792"}
+TUDOU_GROK_IMAGE_ASPECT_SIZES = {
+    "1:1": "1024x1024", "16:9": "1280x720", "9:16": "720x1280",
+    "3:2": "1792x1024", "2:3": "1024x1792",
+}
+
+def tudou_grok_image_size(size, aspect_ratio=""):
+    value = str(size or "").strip().lower().replace("*", "x").replace("×", "x")
+    if value in TUDOU_GROK_IMAGE_SIZES:
+        return value
+    if str(aspect_ratio or "").strip() in TUDOU_GROK_IMAGE_ASPECT_SIZES:
+        return TUDOU_GROK_IMAGE_ASPECT_SIZES[str(aspect_ratio).strip()]
+    match = re.match(r"^(\d+)\s*x\s*(\d+)$", value)
+    if match:
+        width, height = int(match.group(1)), int(match.group(2))
+        if width and height:
+            ratio = width / height
+            choices = {"1024x1024": 1.0, "1280x720": 16 / 9, "720x1280": 9 / 16, "1792x1024": 3 / 2, "1024x1792": 2 / 3}
+            return min(choices, key=lambda candidate: abs(choices[candidate] - ratio))
+    return "1024x1024"
+
+def tudou_api_endpoint(base_url, path):
+    base = str(base_url or "").rstrip("/")
+    return f"{base}{path}" if base.endswith("/v1") else f"{base}/v1{path}"
+
+def tudou_reference_urls(ref):
+    source = ref if isinstance(ref, dict) else {}
+    urls = []
+    for key in ("url", "original_url", "originalLocalUrl", "source_url"):
+        value = str(source.get(key) or "").strip()
+        if value and value not in urls:
+            urls.append(value)
+    return urls
+
+async def generate_tudou_grok_image(prompt, size, model, reference_images, provider, aspect_ratio=""):
+    """Use Tudou's Grok multipart edit route without changing generic OpenAI image behavior."""
+    model = selected_model(model, "grok-imagine-image")
+    base_url = str(provider.get("base_url") or "").rstrip("/")
+    if not base_url:
+        raise HTTPException(status_code=400, detail=f"{provider.get('name') or provider['id']} 未配置 Base URL")
+    refs = [item for item in (reference_images or []) if isinstance(item, dict) and item.get("url")]
+    is_edit = "edit" in model.lower() or bool(refs)
+    timeout = httpx.Timeout(connect=20.0, read=600.0, write=120.0, pool=20.0)
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+        if is_edit:
+            edit_model = model if "edit" in model.lower() else "grok-imagine-image-edit"
+            parts = [(key, (None, str(value))) for key, value in {
+                "model": edit_model,
+                "prompt": str(prompt or ""),
+                "n": "1",
+                "size": "1024x1024",
+                "response_format": "url",
+            }.items()]
+            attached = 0
+            for ref in refs[:7]:
+                for value in tudou_reference_urls(ref):
+                    if value.lower().startswith("asset://"):
+                        continue
+                    ref_file = await yuli_fetch_reference_bytes(client, value)
+                    if ref_file:
+                        parts.append(("image[]", ref_file))
+                        attached += 1
+                        break
+            if attached <= 0:
+                raise HTTPException(status_code=400, detail="土豆 Grok 图像编辑没有成功读取参考图。请使用本地图片、公网图片 URL 或 data:image;base64。")
+            response = await client.post(
+                tudou_api_endpoint(base_url, "/images/edits"),
+                headers=api_headers(json_body=False, provider=provider, model=edit_model),
+                files=parts,
+            )
+        else:
+            response = await client.post(
+                tudou_api_endpoint(base_url, "/images/generations"),
+                headers=api_headers(json_body=True, provider=provider, model=model),
+                json={"model": model, "prompt": str(prompt or ""), "n": 1, "size": tudou_grok_image_size(size, aspect_ratio), "response_format": "url"},
+            )
+        response.raise_for_status()
+        try:
+            raw = response.json()
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"土豆 Grok 图像接口返回非 JSON 响应：{(response.text or '')[:500]}") from exc
+    images = extract_images(raw)
+    if not images:
+        raise HTTPException(status_code=502, detail=f"土豆 Grok 图像接口没有返回图片：{str(raw)[:400]}")
+    return images[0], raw
+
+TUDOU_VIDEO_SUCCESS_STATUSES = {"COMPLETED", "COMPLETE", "DONE", "FINISHED", "SUCCESS", "SUCCEED", "SUCCEEDED", "SUCCESSFUL", "OK", "READY"}
+TUDOU_VIDEO_FAILED_STATUSES = {"FAILED", "FAIL", "FAILURE", "ERROR", "ERRORED", "CANCELED", "CANCELLED", "TIMEOUT", "REJECTED", "EXPIRED"}
+
+def tudou_video_family(model):
+    value = str(model or "").strip().lower()
+    if value.startswith("sora2"):
+        return "sora2"
+    if value.startswith("veo3.1"):
+        return "veo31"
+    if value.startswith("kling-v3"):
+        return "kling"
+    if value.startswith("pixverse-v6"):
+        return "pixverse"
+    if "seedance-2.0" in value:
+        return "seedance"
+    return ""
+
+def is_tudou_video_model(model):
+    return bool(tudou_video_family(model)) or is_tudou_grok_video_model(model)
+
+def tudou_snap_choice(value, choices, default):
+    try:
+        parsed = int(round(float(value)))
+    except Exception:
+        return default
+    return parsed if parsed in choices else min(choices, key=lambda choice: abs(choice - parsed))
+
+def tudou_video_aspect(value, allowed=("16:9", "9:16"), default="16:9"):
+    value = str(value or "").strip()
+    return value if value in allowed else default
+
+def tudou_task_data(raw):
+    return raw.get("data") if isinstance(raw, dict) and isinstance(raw.get("data"), dict) else raw if isinstance(raw, dict) else {}
+
+def tudou_extract_task_id(raw):
+    data = tudou_task_data(raw)
+    return str(data.get("id") or data.get("task_id") or (raw or {}).get("id") or (raw or {}).get("task_id") or "").strip()
+
+def tudou_video_result_urls(raw):
+    result = tudou_task_data(raw).get("result")
+    result = result if isinstance(result, dict) else {}
+    urls = []
+    def add(value):
+        if isinstance(value, list):
+            for item in value:
+                add(item)
+        elif isinstance(value, dict):
+            add(value.get("url") or value.get("video_url"))
+        elif isinstance(value, str) and value.strip() and value.strip() not in urls:
+            urls.append(value.strip())
+    add(result.get("video_url"))
+    for key in ("videos", "images", "outputs", "result"):
+        add(result.get(key))
+    return urls
+
+async def tudou_public_image_urls(images, limit):
+    urls = []
+    for ref in list(images or [])[:limit]:
+        value = str(getattr(ref, "url", "") or "").strip()
+        if value:
+            urls.append(await openai_video_proxy_public_reference_url({"url": value}))
+    return urls
+
+async def tudou_public_media_urls(items, limit):
+    urls = []
+    for item in list(items or [])[:limit]:
+        value = str(item or "").strip()
+        if value:
+            urls.append(await openai_video_proxy_public_reference_url(value))
+    return urls
+
+async def tudou_wait_video_task(client, provider, base_url, task_id):
+    deadline = time.monotonic() + VIDEO_POLL_TIMEOUT
+    await asyncio.sleep(min(12.0, VIDEO_POLL_TIMEOUT))
+    delay = 5.0
+    last_payload = {}
+    task_url = f"{base_url}/v1/tasks/{urllib.parse.quote(str(task_id), safe='')}"
+    while time.monotonic() < deadline:
+        response = await client.get(task_url, headers=api_headers(provider=provider))
+        response.raise_for_status()
+        last_payload = response.json()
+        data = tudou_task_data(last_payload)
+        status = str(data.get("status") or data.get("task_status") or "").upper()
+        if status in TUDOU_VIDEO_SUCCESS_STATUSES or tudou_video_result_urls(last_payload):
+            return last_payload
+        if status in TUDOU_VIDEO_FAILED_STATUSES:
+            error = data.get("error") if isinstance(data.get("error"), dict) else {}
+            reason = error.get("message") or data.get("message") or data.get("fail_reason") or str(last_payload)[:300]
+            raise HTTPException(status_code=502, detail=f"土豆视频生成失败：{reason}")
+        await asyncio.sleep(delay)
+        delay = min(delay * 1.4, 10.0)
+    raise HTTPException(status_code=504, detail=f"土豆视频任务超时：{task_id}")
+
+async def generate_tudou_video(client, payload, provider, base_url, requested_model):
+    family = tudou_video_family(requested_model)
+    model = selected_model(requested_model, requested_model)
+    aspect = tudou_video_aspect(payload.aspect_ratio or payload.size)
+    body = {"model": model, "prompt": str(payload.prompt or "")}
+    if family == "sora2":
+        body.update(duration=tudou_snap_choice(payload.duration, (4, 8, 12), 8), aspect_ratio=aspect, generate_audio=bool(payload.generate_audio))
+        images = await tudou_public_image_urls(payload.images, 1)
+        if images: body["images"] = images
+    elif family == "veo31":
+        body.update(resolution="1080p" if model.lower().endswith("1080p") else "720p", duration=tudou_snap_choice(payload.duration, (4, 6, 8), 8), aspect_ratio=aspect, generate_audio=bool(payload.generate_audio))
+        images = await tudou_public_image_urls(payload.images, 3)
+        if images:
+            body["reference_mode"] = "image" if len(images) > 2 else "frame"
+            body["images"] = images
+    elif family == "kling":
+        images = await tudou_public_image_urls(payload.images, 2)
+        if not images:
+            raise HTTPException(status_code=400, detail="土豆 Kling v3 系列只支持图生视频，请至少提供 1 张参考图。")
+        durations = (5, 10, 15) if model.lower() == "kling-v3" else (5, 15)
+        body.update(duration=tudou_snap_choice(payload.duration, durations, 10 if model.lower() == "kling-v3" else 15), aspect_ratio=aspect, generate_audio=bool(payload.generate_audio), images=images)
+    elif family == "pixverse":
+        lower = model.lower()
+        body.update(resolution="1080p" if "1080p" in lower else "720p", audio=lower.endswith("-audio"), size=tudou_video_aspect(payload.aspect_ratio or payload.size, allowed=("16:9", "4:3", "1:1", "3:4", "9:16", "2:3", "3:2", "21:9")))
+        first = next((ref for ref in payload.images if str(ref.role or "").lower() == "first_frame"), None)
+        last = next((ref for ref in payload.images if str(ref.role or "").lower() == "last_frame"), None)
+        if first and last:
+            body.update(first_frame_image=await openai_video_proxy_public_reference_url({"url": first.url}), last_frame_image=await openai_video_proxy_public_reference_url({"url": last.url}), duration=tudou_snap_choice(payload.duration, (5, 8), 5))
+        else:
+            images = await tudou_public_image_urls(payload.images, 7)
+            if images: body["img_references"] = images
+            body["duration"] = max(1, min(15, tudou_snap_choice(payload.duration, tuple(range(1, 16)), 5)))
+    elif family == "seedance":
+        body.update(model="seedance-2.0-fast" if "fast" in model.lower() else "seedance-2.0", duration=tudou_snap_choice(payload.duration, tuple(range(4, 16)), 4), aspect_ratio=aspect, resolution="1080p" if str(payload.resolution or "").lower().startswith("1080") else "720p", generate_audio=bool(payload.generate_audio))
+        images, videos = await tudou_public_image_urls(payload.images, 9), await tudou_public_media_urls(payload.videos, 3)
+        if images: body["images"] = images
+        if videos: body["videos"] = videos
+        if images or videos:
+            audios = await tudou_public_media_urls(payload.audios, 3)
+            if audios: body["audios"] = audios
+    else:
+        raise HTTPException(status_code=400, detail=f"未知的土豆视频模型：{model}")
+    response = await client.post(f"{base_url}/v1/videos/generations", headers=api_headers(provider=provider, model=model), json=body)
+    response.raise_for_status()
+    try:
+        raw = response.json()
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"土豆视频接口返回非 JSON 响应：{(response.text or '')[:500]}") from exc
+    task_id = tudou_extract_task_id(raw)
+    if not task_id:
+        raise HTTPException(status_code=502, detail=f"土豆视频提交未返回任务 ID：{str(raw)[:400]}")
+    result = raw if tudou_video_result_urls(raw) else await tudou_wait_video_task(client, provider, base_url, task_id)
+    urls = tudou_video_result_urls(result)
+    if not urls:
+        raise HTTPException(status_code=502, detail=f"土豆视频任务完成但未返回视频地址：{str(result)[:400]}")
+    return {"videos": [await save_remote_video_to_output(url, prefix="tudou_video_") for url in urls], "task_id": task_id, "raw": result}
+
+def tudou_grok_video_seconds(duration):
+    allowed = (6, 10, 12, 16, 20)
+    try:
+        value = int(duration)
+    except Exception:
+        value = 6
+    return str(value if value in allowed else next((item for item in allowed if item >= value), allowed[-1]))
+
+def tudou_grok_video_size(aspect_ratio="", resolution=""):
+    ratio = str(aspect_ratio or "").strip()
+    high = str(resolution or "").strip().lower() in {"1080p", "4k", "high", "hd"}
+    if ratio == "9:16": return "1024x1792" if high else "720x1280"
+    if ratio == "1:1": return "1024x1024"
+    return "1792x1024" if high else "1280x720"
+
+async def tudou_grok_video_part(client, ref):
+    for value in (str(getattr(ref, key, "") or "").strip() for key in ("url", "original_url", "originalLocalUrl", "source_url")):
+        if not value or value.lower().startswith("asset://"):
+            continue
+        ref_file = await yuli_fetch_reference_bytes(client, value)
+        if ref_file:
+            return ("input_reference[]", ref_file)
+    return None
+
+async def save_video_bytes_to_output(data, prefix="video_", ext=".mp4"):
+    if not data:
+        raise HTTPException(status_code=502, detail="上游视频下载为空")
+    extension = ext if ext in {".mp4", ".webm", ".mov", ".m4v", ".avi", ".mkv", ".flv"} else ".mp4"
+    filename = f"{prefix}{uuid.uuid4().hex[:10]}{extension}"
+    path = output_path_for(filename, "output")
+    with open(path, "wb") as file:
+        file.write(data)
+    if os.path.getsize(path) <= 0:
+        raise HTTPException(status_code=502, detail="上游视频下载为空")
+    return output_url_for(filename, "output")
+
+async def download_tudou_grok_video_content(client, provider, base_url, task_id):
+    response = await client.get(
+        f"{base_url}/v1/videos/{urllib.parse.quote(str(task_id), safe='')}/content",
+        headers=api_headers(provider=provider),
+    )
+    response.raise_for_status()
+    content_type = (response.headers.get("content-type") or "").lower()
+    extension = ".webm" if "webm" in content_type else ".mov" if "quicktime" in content_type or "mov" in content_type else ".mp4"
+    return await save_video_bytes_to_output(response.content, prefix="tudou_grok_video_", ext=extension)
+
+async def generate_tudou_grok_video(client, payload, provider, base_url, requested_model):
+    model = selected_model(requested_model, "grok-imagine-video")
+    parts = [(key, (None, str(value))) for key, value in {
+        "model": model, "prompt": str(payload.prompt or ""), "seconds": tudou_grok_video_seconds(payload.duration),
+        "size": tudou_grok_video_size(payload.aspect_ratio or payload.size, payload.resolution),
+        "resolution_name": "480p" if str(payload.resolution or "").lower() == "480p" else "720p", "preset": "custom",
+    }.items()]
+    attached = 0
+    for ref in (payload.images or [])[:7]:
+        part = await tudou_grok_video_part(client, ref)
+        if part:
+            parts.append(part)
+            attached += 1
+    if payload.images and not attached:
+        raise HTTPException(status_code=400, detail="土豆 Grok 图生视频没有成功读取参考图。请使用本地图片、公网图片 URL 或 data:image;base64。")
+    response = await client.post(f"{base_url}/v1/videos", headers=api_headers(json_body=False, provider=provider, model=model), files=parts)
+    response.raise_for_status()
+    try:
+        raw = response.json()
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"土豆 Grok 视频接口返回非 JSON 响应：{(response.text or '')[:500]}") from exc
+    task_id = str(raw.get("id") or extract_task_id(raw) or raw.get("task_id") or "").strip()
+    result = raw if video_output_urls(raw) else await wait_for_video_task(client, provider, task_id, f"{base_url}/v1/videos") if task_id else raw
+    urls = video_output_urls(result)
+    if urls:
+        videos = [await save_remote_video_to_output(url, prefix="tudou_grok_video_") for url in urls]
+    elif task_id:
+        videos = [await download_tudou_grok_video_content(client, provider, base_url, task_id)]
+    else:
+        raise HTTPException(status_code=502, detail=f"土豆 Grok 视频没有返回视频地址：{str(result)[:400]}")
+    return {"videos": videos, "task_id": task_id, "raw": result}
+
 def volcengine_video_prompt_text(prompt, aspect_ratio="", duration=None):
     text = str(prompt or "").strip()
     suffixes = []
@@ -19050,7 +19334,6 @@ async def build_canvas_video_result(payload: CanvasVideoRequest, progress=None):
     is_megabyai = is_megabyai_video_mode(provider)
     is_meai = is_meai_video_mode(provider)
     is_geeknow = is_geeknow_video_mode(provider)
-    is_tudou = is_tudou_video_mode(provider)
     is_aicost = is_aicost_video_mode(provider)
     is_apimart = is_apimart_provider(provider) and not (
         is_single_video_generations
@@ -19058,7 +19341,6 @@ async def build_canvas_video_result(payload: CanvasVideoRequest, progress=None):
         or is_megabyai
         or is_meai
         or is_geeknow
-        or is_tudou
         or is_aicost
     )
     is_volcengine = is_volcengine_provider(provider)
@@ -19073,6 +19355,19 @@ async def build_canvas_video_result(payload: CanvasVideoRequest, progress=None):
         "agnes-video-v2.0" if is_agnes else "videos-mini" if is_megabyai else "sd-2" if is_meai else "veo3-fast",
     )
     report_canvas_video_progress(progress, {"model": requested_model})
+    if is_tudou_provider(provider) and is_tudou_video_model(requested_model):
+        try:
+            async with httpx.AsyncClient(timeout=VIDEO_POLL_TIMEOUT) as tudou_client:
+                if is_tudou_grok_video_model(requested_model):
+                    return await generate_tudou_grok_video(tudou_client, payload, provider, base_url, requested_model)
+                return await generate_tudou_video(tudou_client, payload, provider, base_url, requested_model)
+        except httpx.HTTPStatusError as exc:
+            text = exc.response.text
+            friendly = friendly_video_error_detail(text, requested_model, provider)
+            raise HTTPException(status_code=exc.response.status_code, detail=friendly or f"土豆视频接口错误：{text}") from exc
+        except httpx.HTTPError as exc:
+            log_net_error(f"视频(土豆) 网络/TLS错误 model={requested_model}", exc)
+            raise HTTPException(status_code=502, detail=f"请求土豆视频接口失败：{exc}") from exc
     is_veo31 = is_apimart and is_apimart_veo31_model(requested_model)
     if is_agnes:
         try:
@@ -19126,24 +19421,6 @@ async def build_canvas_video_result(payload: CanvasVideoRequest, progress=None):
                         poll_interval=video_poll_interval(provider),
                     )
                 except AICostProtocolError as exc:
-                    raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
-            if is_tudou:
-                request_data = payload.model_dump() if hasattr(payload, "model_dump") else payload.dict()
-                request_data["model"] = requested_model
-                try:
-                    return await generate_tudou_video(
-                        client,
-                        request_data,
-                        base_url=base_url,
-                        headers=api_headers(json_body=False, provider=provider),
-                        progress=progress,
-                        resolve_local_path=output_file_from_url,
-                        content_type_for_path=content_type_for_path,
-                        public_reference_url=lambda value: openai_video_proxy_public_reference_url(value),
-                        save_video=lambda url: save_remote_video_to_output(url, provider=provider),
-                        poll_timeout=VIDEO_POLL_TIMEOUT,
-                    )
-                except TudouProtocolError as exc:
                     raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
             if is_geeknow:
                 request_data = payload.model_dump() if hasattr(payload, "model_dump") else payload.dict()

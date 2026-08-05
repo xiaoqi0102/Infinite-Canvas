@@ -21,22 +21,6 @@ assert.deepEqual(
     issue(api.MODES.GEEKNOW, 'grok-imagine-video-1.5-preview', {image:2}),
     {code:'limit', kind:'image', count:1},
 );
-assert.deepEqual(
-    issue(api.MODES.TUDOU, 'grok-imagine-video-1.5', {image:0}),
-    {code:'image_required', kind:'image', count:1},
-);
-assert.deepEqual(
-    issue(api.MODES.TUDOU, 'grok-imagine-video-1.5', {image:2}),
-    {code:'limit', kind:'image', count:1},
-);
-assert.deepEqual(
-    issue(api.MODES.TUDOU, 'grok-imagine-video', {image:8}),
-    {code:'limit', kind:'image', count:7},
-);
-assert.deepEqual(
-    issue(api.MODES.TUDOU, 'sora2', {audio:1}),
-    {code:'unsupported', kind:'audio', count:0},
-);
 
 assert.deepEqual(
     issue(api.MODES.MEAI, 'sd-2', {image:10}),

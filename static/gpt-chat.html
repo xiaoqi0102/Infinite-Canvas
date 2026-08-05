@@ -691,6 +691,15 @@
             story: [['720x1280','1k'], ['1080x1920','2k'], ['1440x2560','4k']],
             wide: [['1280x720','1k'], ['1920x1080','2k'], ['2560x1440','4k']]
         };
+        const CHAT_RATIO_VALUES = {
+            square:'1:1',
+            portrait:'2:3',
+            landscape:'3:2',
+            portrait43:'3:4',
+            landscape43:'4:3',
+            story:'9:16',
+            wide:'16:9'
+        };
 
         const headers = () => ({'Content-Type':'application/json', 'X-User-ID':userId});
 
@@ -1297,6 +1306,21 @@
             return chatSizeForResolution();
         }
 
+        function currentChatAspectRatio(){
+            return chatResolution === 'custom' ? '' : (CHAT_RATIO_VALUES[chatRatio] || '1:1');
+        }
+
+        function chatResolutionForRequest(message, requestedSize){
+            if(['1k','2k','4k'].includes(chatResolution)) return chatResolution;
+            const text = String(message || '');
+            if(/4\s*k|4K|超清|超高分辨率/i.test(text)) return '4k';
+            if(/2\s*k|2K|高清|高分辨率/i.test(text)) return '2k';
+            const edge = Math.max(...String(requestedSize || '').split(/[xX×*]/).map(n => Number(n) || 0));
+            if(edge >= 2800) return '4k';
+            if(edge >= 1600) return '2k';
+            return '1k';
+        }
+
         function chatSizeFromPrompt(message, fallbackSize = currentChatSize()){
             const text = String(message || '');
             const direct = text.match(/(^|[^\d])([1-9]\d{2,4})\s*[xX×*]\s*([1-9]\d{2,4})(?!\d)/);
@@ -1544,6 +1568,8 @@
             if(useStreaming || mode === 'agent') assistantBubble.bubble.classList.add('streaming');
             scrollBottom();
             try {
+                const requestResolution = chatResolutionForRequest(message, requestedSize);
+                const requestAspectRatio = currentChatAspectRatio();
                 if(useStreaming) {
                     await streamChatMessage(message, pendingRefs, assistantBubble);
                 } else if(mode === 'chat') {
@@ -1556,6 +1582,8 @@
                             system_prompt: currentSystemPrompt(),
                             mode:'chat',
                             size: requestedSize,
+                            aspect_ratio: requestAspectRatio,
+                            resolution: requestResolution,
                             model: provider === 'modelscope' ? (msModel || activeChatModel) : (activeChatModel || config.chat_model),
                             ms_model: provider === 'modelscope' ? (msModel || activeChatModel) : '',
                             reference_images: pendingRefs,
@@ -1577,6 +1605,8 @@
                             system_prompt: currentSystemPrompt(),
                             mode:'agent',
                             size: requestedSize,
+                            aspect_ratio: requestAspectRatio,
+                            resolution: requestResolution,
                             model: provider === 'modelscope' ? (msModel || activeChatModel) : (activeChatModel || config.chat_model),
                             ms_model: provider === 'modelscope' ? (msModel || activeChatModel) : '',
                             image_model: activeImageModel || config.image_model,
@@ -1600,6 +1630,8 @@
                             system_prompt: currentSystemPrompt(),
                             mode,
                             size: requestedSize,
+                            aspect_ratio: requestAspectRatio,
+                            resolution: requestResolution,
                             model: activeChatModel || config.chat_model,
                             image_model: activeImageModel || config.image_model,
                             reference_images: pendingRefs,

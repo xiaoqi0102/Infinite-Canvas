@@ -79,7 +79,7 @@ const MS_BUILTIN_IMAGE_MODELS = [
     'black-forest-labs/FLUX.2-klein-9B'
 ];
 const MS_DEFAULT_BASE_URL = 'https://api-inference.modelscope.cn/v1';
-const RH_DEFAULT_BASE_URL = 'https://www.runninghub.cn';
+const RH_DEFAULT_BASE_URL = 'https://www.runninghub.ai';
 const LINGJING_DEFAULT_BASE_URL = 'https://apistudio.vip';
 const LINGJING_REGISTER_URL = 'https://apistudio.vip/register?aff=g1CT';
 const VIP_GPT_DEFAULT_BASE_URL = 'https://www.vip-gpt.net';
@@ -114,14 +114,10 @@ const ONBOARDING_GUIDES = {
     runninghub:{
         titleKey:'api.rhOnboardingTitle',
         descKey:'api.rhOnboardingDesc',
-        primaryLabelKey:'api.rhGetKeyCn',
-        secondaryLabelKey:'api.rhGetKeyGlobal',
-        primaryUrl:'https://www.runninghub.cn/enterprise-api/consumerApi?inviteCode=rh-v1331',
-        secondaryUrl:'https://www.runninghub.ai/enterprise-api/consumerApi?inviteCode=rh-v1331',
-        walletPrimaryLabelKey:'api.rhGetWalletKeyCn',
-        walletSecondaryLabelKey:'api.rhGetWalletKeyGlobal',
-        walletPrimaryUrl:'https://www.runninghub.cn/enterprise-api/sharedApi?inviteCode=rh-v1331',
-        walletSecondaryUrl:'https://www.runninghub.ai/enterprise-api/sharedApi?inviteCode=rh-v1331'
+        primaryLabelKey:'api.rhGetKeyGlobal',
+        primaryUrl:'https://www.runninghub.ai/enterprise-api/consumerApi?inviteCode=rh-v1331',
+        walletPrimaryLabelKey:'api.rhGetWalletKeyGlobal',
+        walletPrimaryUrl:'https://www.runninghub.ai/enterprise-api/sharedApi?inviteCode=rh-v1331'
     },
     lingjing:{
         titleKey:'api.lingjingOnboardingTitle',
@@ -130,6 +126,10 @@ const ONBOARDING_GUIDES = {
         primaryUrl:LINGJING_REGISTER_URL
     }
 };
+function normalizeRunningHubBaseUrl(value){
+    const url = String(value || '').trim().replace(/\/+$/, '');
+    return url || RH_DEFAULT_BASE_URL;
+}
 function applyCliProtocolDefaults(item, protocol){
     if(!item) return;
     const value = String(protocol || item.protocol || '').toLowerCase();
@@ -161,8 +161,8 @@ const RECOMMENDED_APIS = [
         name:'土豆API',
         category:'value',
         base_url:'https://api.ai-tudou.net',
-        protocol:'tudou',
-        image_request_mode:'openai',
+        protocol:'openai',
+        image_request_mode:'tudou-async',
         register_url:'https://api.ai-tudou.net/register?aff=GmBu',
         tagKeys:['api.tagImageModels','api.tagVideoModels','api.tagLlmModels'],
         icons:['IMG','VID','LLM'],
@@ -229,8 +229,7 @@ const RECOMMENDED_APIS = [
         base_url:RH_DEFAULT_BASE_URL,
         protocol:'runninghub',
         image_request_mode:'openai',
-        register_url:ONBOARDING_GUIDES.runninghub.secondaryUrl,
-        register_url_cn:ONBOARDING_GUIDES.runninghub.primaryUrl,
+        register_url:ONBOARDING_GUIDES.runninghub.primaryUrl,
         tagKeys:['api.tagImageModels','api.tagVideoModels','api.tagLlmModels','api.tagSeedance'],
         icons:['IMG','VID','LLM'],
         summaryKey:'api.recommendRunninghubSummary',
@@ -304,7 +303,7 @@ const RECOMMEND_GROUPS = [
     {key:'value', titleKey:'api.recommendGroupValue', icon:'badge-percent'},
     {key:'free', titleKey:'api.recommendGroupFree', icon:'gift'}
 ];
-const LOCKED_RECOMMENDED_PROTOCOL_IDS = new Set(['tudou', 'exellome', 'fhl']);
+const LOCKED_RECOMMENDED_PROTOCOL_IDS = new Set(['exellome', 'fhl']);
 function lockedRecommendedApi(itemOrId){
     const id = typeof itemOrId === 'string' ? itemOrId : itemOrId?.id;
     const name = typeof itemOrId === 'string' ? '' : itemOrId?.name;
@@ -728,7 +727,6 @@ function renderProviderOnboarding(item){
                             <div class="onboarding-rh-source-label">${escapeHtml(tr('api.rhCoinKey'))}</div>
                             <div class="onboarding-key-actions onboarding-rh-key-actions">
                                 <a class="onboarding-key-btn" href="${escapeAttr(guide.primaryUrl)}" target="_blank" rel="noopener noreferrer"><i data-lucide="coins" class="w-3.5 h-3.5"></i><span>${escapeHtml(tr(guide.primaryLabelKey))}</span></a>
-                                <a class="onboarding-key-btn" href="${escapeAttr(guide.secondaryUrl)}" target="_blank" rel="noopener noreferrer"><i data-lucide="globe-2" class="w-3.5 h-3.5"></i><span>${escapeHtml(tr(guide.secondaryLabelKey))}</span></a>
                             </div>
                         </div>
                         <div class="recommend-flow-arrow onboarding-flow-arrow onboarding-rh-row-arrow" aria-hidden="true"><span></span><b></b></div>
@@ -742,7 +740,6 @@ function renderProviderOnboarding(item){
                             <div class="onboarding-rh-source-label">${escapeHtml(tr('api.rhWalletKey'))}</div>
                             <div class="onboarding-key-actions onboarding-rh-key-actions">
                                 <a class="onboarding-key-btn" href="${escapeAttr(guide.walletPrimaryUrl)}" target="_blank" rel="noopener noreferrer"><i data-lucide="wallet" class="w-3.5 h-3.5"></i><span>${escapeHtml(tr(guide.walletPrimaryLabelKey))}</span></a>
-                                <a class="onboarding-key-btn" href="${escapeAttr(guide.walletSecondaryUrl)}" target="_blank" rel="noopener noreferrer"><i data-lucide="globe-2" class="w-3.5 h-3.5"></i><span>${escapeHtml(tr(guide.walletSecondaryLabelKey))}</span></a>
                             </div>
                         </div>
                         <div class="recommend-flow-arrow onboarding-flow-arrow onboarding-rh-row-arrow" aria-hidden="true"><span></span><b></b></div>
@@ -788,7 +785,7 @@ function applyProviderOnboardingDefaults(id){
         item.chat_models = unique([...(item.chat_models || [])]);
         item.ms_defaults_version = Math.max(3, Number(item.ms_defaults_version || 0));
     } else if(id === 'runninghub'){
-        item.base_url = RH_DEFAULT_BASE_URL;
+        item.base_url = normalizeRunningHubBaseUrl(item.base_url);
         item.protocol = 'runninghub';
         item.image_models = unique(item.image_models || []);
         item.chat_models = unique(item.chat_models || []);
@@ -843,7 +840,11 @@ function syncEditor(){
         : item.id === 'volcengine'
         ? 'volcengine'
         : (protocolInput?.value || 'openai');
-    item.base_url = CLI_PROTOCOLS.has(selectedProtocol) ? '' : baseInput.value.trim();
+    item.base_url = CLI_PROTOCOLS.has(selectedProtocol)
+        ? ''
+        : selectedProtocol === 'runninghub'
+        ? normalizeRunningHubBaseUrl(baseInput.value)
+        : baseInput.value.trim();
     // 固定平台不从协议下拉读取
     item.protocol = selectedProtocol;
     item.image_request_mode = effectiveImageRequestModeForProvider(item,
@@ -2559,12 +2560,20 @@ function renderEditor(){
         if(officialVideoMode) item.video_request_mode = officialVideoMode;
     }
     if(protocolInput){
-        protocolInput.value = item.id === 'runninghub' ? 'runninghub' : item.id === 'volcengine' ? 'volcengine' : (item.protocol || 'openai');
+        const protocolValue = String(item.protocol || 'openai').toLowerCase();
+        protocolInput.value = item.id === 'runninghub'
+            ? 'runninghub'
+            : item.id === 'volcengine'
+            ? 'volcengine'
+            : API_PROTOCOLS.includes(protocolValue)
+            ? protocolValue
+            : 'openai';
         protocolInput.disabled = FIXED_PROTOCOL_PROVIDER_IDS.has(item.id) || Boolean(lockedApi);
         protocolInput.title = lockedApi ? '推荐平台使用固定协议' : (protocolInput.disabled ? '内置平台使用固定协议' : '');
     }
     if(imageRequestModeInput){
-        imageRequestModeInput.value = normalizeImageRequestMode(item.image_request_mode);
+        const requestedMode = normalizeImageRequestMode(item.image_request_mode);
+        imageRequestModeInput.value = requestedMode;
         imageRequestModeInput.disabled = Boolean(lockedApi) || item.id === 'modelscope' || item.id === 'runninghub' || item.id === 'volcengine' || CLI_PROTOCOLS.has(String(protocolInput?.value || item.protocol || '').toLowerCase());
         imageRequestModeInput.title = lockedApi ? '推荐平台使用固定图片协议' : '';
     }
@@ -2949,7 +2958,7 @@ function currentProviderApiKey(item){
 function normalizeImageRequestMode(value){
     const mode = String(value || '').trim().toLowerCase();
     if(['aicost', 'aicost-images'].includes(mode)) return 'aicost-image';
-    return ['openai', 'openai-json', 'openai-video-proxy', 'openai-responses', 'aicost-image'].includes(mode) ? mode : 'openai';
+    return ['openai', 'openai-json', 'openai-video-proxy', 'openai-responses', 'aicost-image', 'tudou-async'].includes(mode) ? mode : 'openai';
 }
 function normalizeVideoRequestMode(value){
     if(window.StudioVideoApi?.MODES?.TUDOU) return window.StudioVideoApi.normalizeVideoRequestMode(value);
@@ -3010,6 +3019,7 @@ function officialVideoRequestMode(baseUrl){
     return '';
 }
 function officialImageRequestMode(baseUrl){
+    if(isTudouBaseUrl(baseUrl)) return 'tudou-async';
     return isAICostBaseUrl(baseUrl) ? 'aicost-image' : '';
 }
 function isAICostBaseUrl(value){
@@ -3057,6 +3067,7 @@ function imageRequestModeLabel(mode){
     if(normalized === 'openai-json') return 'OpenAI JSON';
     if(normalized === 'openai-video-proxy') return 'OpenAI 中转';
     if(normalized === 'openai-responses') return 'OpenAI RS';
+    if(normalized === 'tudou-async') return '土豆 GPT-Image-2 异步';
     return 'OpenAI 标准';
 }
 function videoRequestModeLabel(mode){
@@ -3112,7 +3123,7 @@ function applyDetectedProtocol(protocol){
         item.volcengine_region = item.volcengine_region || VOLCENGINE_DEFAULT_REGION;
     }
     if(detected === 'runninghub'){
-        item.base_url = item.base_url || RH_DEFAULT_BASE_URL;
+        item.base_url = normalizeRunningHubBaseUrl(item.base_url);
         item.image_models = unique(item.image_models || []);
         item.chat_models = unique(item.chat_models || []);
         item.video_models = unique(item.video_models || []);
@@ -3150,6 +3161,7 @@ async function probeAsync(){
     if(!item) return;
     const btn = document.getElementById('probeAsyncBtn');
     const baseUrl = baseInput.value.trim();
+    applyOfficialImageMode(baseUrl);
     applyOfficialVideoMode(baseUrl);
     const isCliProtocol = CLI_PROTOCOLS.has(String(protocolInput?.value || item.protocol || '').toLowerCase());
     if(!baseUrl && !isCliProtocol){ alert('请先填写请求地址'); return; }
@@ -3197,11 +3209,12 @@ async function probeAsync(){
         const detectedProtocol = String(data.protocol || '').toLowerCase();
         const isAsync = data.ok === true && detectedProtocol === 'apimart';
         const isOpenAiCompat = data.ok === true && detectedProtocol === 'openai';
-        const keepManualProtocol = ['gemini', 'tudou', 'volcengine', 'jimeng', 'codex', 'gemini-cli'].includes(currentProtocol);
+        const keepManualProtocol = ['gemini', 'volcengine', 'jimeng', 'codex', 'gemini-cli'].includes(currentProtocol);
         if(protocolInput && !keepManualProtocol){
             applyDetectedProtocol(detectedProtocol || (isAsync ? 'apimart' : 'openai'));
         }
         if(data.image_request_mode) applyDetectedImageRequestMode(data.image_request_mode);
+        if(isTudouHost) applyDetectedImageRequestMode('tudou-async');
         const rawJson = JSON.stringify(data.raw, null, 2);
         const probeMessage = String(data.message || '');
         const hideTasksEndpointTip = probeMessage.includes('/v1/tasks/');
@@ -3224,7 +3237,7 @@ async function probeAsync(){
                 <pre style="margin-top:6px;padding:10px 12px;border-radius:10px;background:var(--soft);border:1px solid var(--line-2);font-size:10.5px;font-family:ui-monospace,Menlo,monospace;white-space:pre-wrap;word-break:break-all;color:var(--text);max-height:200px;overflow:auto">${escapeHtml(rawJson)}</pre>
             </details>`);
     } catch(e){
-        const keepManualProtocol = ['gemini', 'tudou', 'volcengine', 'jimeng', 'codex', 'gemini-cli'].includes(String(protocolInput?.value || item.protocol || '').toLowerCase());
+        const keepManualProtocol = ['gemini', 'volcengine', 'jimeng', 'codex', 'gemini-cli'].includes(String(protocolInput?.value || item.protocol || '').toLowerCase());
         if(protocolInput && !keepManualProtocol){ protocolInput.value = 'openai'; protocolInput.dispatchEvent(new Event('change')); }
         const suffix = keepManualProtocol ? '，已保留当前手动选择的协议' : '，协议已设为 OpenAI 兼容';
         showVerifyResult(`<div style="font-size:11px;font-weight:800;color:#b45309">⚠ ${escapeHtml(e.message || String(e))}${suffix}</div>`);
@@ -3266,7 +3279,8 @@ async function testConnection(){
             if(detectedProtocol && detectedProtocol !== String(protocolInput?.value || '').toLowerCase()){
                 applyDetectedProtocol(detectedProtocol);
             }
-            if(data.image_request_mode) applyDetectedImageRequestMode(data.image_request_mode);
+            // "验证地址" only checks reachability. Protocol and image-interface
+            // selection are intentionally left untouched for this action.
             // 存入 picker 状态并启用「选择模型」按钮，但不自动弹出
             lastFetchedAll = data.all || [];
             lastFetchedSuggestion = {
@@ -3330,7 +3344,7 @@ const RH_KNOWN_MODEL_LABELS = {
 };
 function isRunningHubLike(item){
     const base = String(item?.base_url || '').toLowerCase();
-    return item?.id === 'runninghub' || String(item?.protocol || '').toLowerCase() === 'runninghub' || base.includes('runninghub.cn');
+    return item?.id === 'runninghub' || String(item?.protocol || '').toLowerCase() === 'runninghub' || base.includes('runninghub.cn') || base.includes('runninghub.ai');
 }
 function rhActionLabel(text){
     const value = String(text || '').toLowerCase().replace(/[_/-]+/g, ' ');
@@ -3936,7 +3950,7 @@ async function saveProviders(){
         );
         if(isCliProtocol) applyCliProtocolDefaults(item, item.protocol);
         if(item.id === 'runninghub'){
-            item.base_url = item.base_url || RH_DEFAULT_BASE_URL;
+            item.base_url = normalizeRunningHubBaseUrl(item.base_url);
             item.image_models = unique(item.image_models || []);
             item.chat_models = unique(item.chat_models || []);
             item.video_models = unique(item.video_models || []);

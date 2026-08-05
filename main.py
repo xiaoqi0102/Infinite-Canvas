@@ -702,6 +702,7 @@ SUPPORTED_IMAGE_REQUEST_MODES = {
     "openai-video-proxy",
     "openai-responses",
     AICOST_IMAGE_REQUEST_MODE,
+    "tudou-async",
 }
 SUPPORTED_VIDEO_REQUEST_MODES = {
     "openai-videos-generations",
@@ -713,16 +714,15 @@ SUPPORTED_VIDEO_REQUEST_MODES = {
     TUDOU_VIDEO_REQUEST_MODE,
     AICOST_VIDEO_REQUEST_MODE,
 }
-RUNNINGHUB_DEFAULT_BASE_URL = "https://www.runninghub.cn"
-RUNNINGHUB_OPENAPI_BASE_URL = "https://www.runninghub.cn/openapi/v2"
+RUNNINGHUB_DEFAULT_BASE_URL = "https://www.runninghub.ai"
+RUNNINGHUB_OPENAPI_BASE_URL = "https://www.runninghub.ai/openapi/v2"
 RUNNINGHUB_MODEL_REGISTRY_URL = "https://raw.githubusercontent.com/HM-RunningHub/ComfyUI_RH_OpenAPI/main/models_registry.json"
-RUNNINGHUB_LLM_BASE_URL = "https://llm.runninghub.cn/v1"
+RUNNINGHUB_LLM_BASE_URL = "https://llm.runninghub.ai/v1"
 RUNNINGHUB_FILE_HOST_REWRITES = {
     "rh-images-1252422369.cos.ap-beijing.myqcloud.com": "rh-images.xiaoyaoyou.com",
 }
 LINGJING_DEFAULT_BASE_URL = "https://apistudio.vip"
 RUNNINGHUB_LLM_MODELS_URLS = [
-    "https://llm.runninghub.cn/v1/models",
     "https://llm.runninghub.ai/v1/models",
 ]
 RUNNINGHUB_FALLBACK_CHAT_MODELS = [
@@ -1024,6 +1024,9 @@ VIDEO_MATERIAL_UPLOAD_CONCURRENCY = max(
     1,
     min(4, int(os.getenv("VIDEO_MATERIAL_UPLOAD_CONCURRENCY", "2"))),
 )
+TUDOU_ASYNC_IMAGE_TASK_TIMEOUT = float(os.getenv("TUDOU_ASYNC_IMAGE_TASK_TIMEOUT", "1800"))
+TUDOU_ASYNC_IMAGE_POLL_INTERVAL = float(os.getenv("TUDOU_ASYNC_IMAGE_POLL_INTERVAL", "4"))
+TUDOU_ASYNC_IMAGE_INITIAL_POLL_DELAY = float(os.getenv("TUDOU_ASYNC_IMAGE_INITIAL_POLL_DELAY", "12"))
 ONLINE_IMAGE_PROMPT_MAX_LENGTH = int(os.getenv("ONLINE_IMAGE_PROMPT_MAX_LENGTH", "20000"))
 VIDEO_PROMPT_MAX_LENGTH = int(os.getenv("VIDEO_PROMPT_MAX_LENGTH", "4000"))
 LLM_MESSAGE_MAX_LENGTH = int(os.getenv("LLM_MESSAGE_MAX_LENGTH", "20000"))
@@ -1642,12 +1645,6 @@ def normalize_video_request_mode(value):
     return mode if mode in SUPPORTED_VIDEO_REQUEST_MODES else "openai-videos-generations"
 
 LOCKED_RECOMMENDED_PROVIDER_RULES = {
-    "tudou": {
-        "names": {"土豆", "土豆api"},
-        "base_urls": {"https://api.ai-tudou.net"},
-        "protocol": "tudou",
-        "image_request_mode": "openai",
-    },
     "exellome": {
         "names": {"exellome"},
         "base_urls": {"https://new.exellome.online"},
@@ -1732,6 +1729,8 @@ def normalize_provider(item):
     if base_url and not re.match(r"^https?://", base_url):
         raise HTTPException(status_code=400, detail=f"{name} 的 Base URL 需要以 http:// 或 https:// 开头")
     protocol = str(item.get("protocol") or "openai").strip().lower()
+    if protocol == "tudou":
+        protocol = "openai"
     if protocol not in SUPPORTED_PROVIDER_PROTOCOLS:
         protocol = "openai"
     image_request_mode = detect_image_request_mode(base_url, item.get("image_models") or []) or normalize_image_request_mode(item.get("image_request_mode"))
@@ -1814,6 +1813,86 @@ def load_api_providers():
 def save_api_providers(providers):
     with GLOBAL_CONFIG_LOCK:
         write_json_atomic(API_PROVIDERS_FILE, providers)
+
+def default_runninghub_static_provider():
+    return {
+        "id": "runninghub",
+        "name": "RunningHub",
+        "base_url": RUNNINGHUB_DEFAULT_BASE_URL,
+        "protocol": "runninghub",
+        "image_generation_endpoint": "",
+        "image_edit_endpoint": "",
+        "enabled": True,
+        "primary": False,
+        "image_models": [],
+        "chat_models": [],
+        "video_models": [],
+        "model_protocols": {},
+        "ms_loras": [],
+        "ms_defaults_version": 0,
+        "rh_apps": [],
+        "rh_workflows": [],
+    }
+
+def mutate_static_runninghub_provider(mutator):
+    os.makedirs(STATIC_RUNNINGHUB_DIR, exist_ok=True)
+    raw = []
+    if os.path.exists(STATIC_RUNNINGHUB_API_PROVIDERS_FILE):
+        try:
+            with open(STATIC_RUNNINGHUB_API_PROVIDERS_FILE, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+        except Exception as exc:
+            print(f"读取 static RunningHub 模板失败，将重建基础模板: {exc}")
+            raw = []
+    if isinstance(raw, dict) and str(raw.get("id") or "").strip().lower() == "runninghub":
+        provider = raw
+    else:
+        if isinstance(raw, list):
+            providers = raw
+        elif isinstance(raw, dict):
+            providers = raw.setdefault("providers", [])
+            if not isinstance(providers, list):
+                providers = []
+                raw["providers"] = providers
+        else:
+            raw = []
+            providers = raw
+        provider = next((
+            item for item in providers
+            if isinstance(item, dict) and str(item.get("id") or "").strip().lower() == "runninghub"
+        ), None)
+        if provider is None:
+            provider = default_runninghub_static_provider()
+            providers.append(provider)
+    changed = mutator(provider)
+    if changed is False:
+        return False
+    with open(STATIC_RUNNINGHUB_API_PROVIDERS_FILE, "w", encoding="utf-8") as f:
+        json.dump(raw, f, ensure_ascii=False, indent=2)
+        f.write("\n")
+    return True
+
+def sync_runninghub_provider_workflows_to_static_template(provider):
+    if not isinstance(provider, dict) or str(provider.get("id") or "").strip().lower() != "runninghub":
+        return False
+    workflows = []
+    seen = set()
+    for entry in normalize_runninghub_entries(provider.get("rh_workflows") or [], "workflow"):
+        key = runninghub_workflow_store_key(entry.get("workflowId") or entry.get("id"))
+        if not key or entry.get("hidden") is True or key in seen:
+            continue
+        seen.add(key)
+        workflows.append(entry)
+    def apply_workflows(static_provider):
+        static_provider["id"] = "runninghub"
+        static_provider["name"] = static_provider.get("name") or "RunningHub"
+        static_provider["base_url"] = static_provider.get("base_url") or RUNNINGHUB_DEFAULT_BASE_URL
+        static_provider["protocol"] = "runninghub"
+        static_provider["rh_workflows"] = workflows
+        if "rh_apps" not in static_provider or not isinstance(static_provider.get("rh_apps"), list):
+            static_provider["rh_apps"] = []
+        return True
+    return mutate_static_runninghub_provider(apply_workflows)
 
 def public_provider(provider):
     if provider.get("id") == "runninghub":
@@ -3248,6 +3327,33 @@ class OnlineImageRequest(BaseModel):
     n: int = 1
     reference_images: List[AIReference] = []
 
+class MidjourneySubmitRequest(BaseModel):
+    provider_id: str = ""
+    prompt: str = Field(default="", max_length=ONLINE_IMAGE_PROMPT_MAX_LENGTH)
+    size: str = "1:1"
+    version: str = "6.1"
+    speed: str = "relax"
+    reference_images: List[AIReference] = []
+    mode: str = "imagine"
+
+class MidjourneyActionRequest(BaseModel):
+    provider_id: str = ""
+    task_id: str = Field(min_length=1, max_length=240)
+    action: str = "variation"
+    index: int = 1
+    speed: str = "relax"
+    direction: str = ""
+    zoom_ratio: Optional[float] = None
+    custom_id: str = Field(default="", max_length=600)
+    prompt: str = Field(default="", max_length=ONLINE_IMAGE_PROMPT_MAX_LENGTH)
+
+class MidjourneyModalRequest(BaseModel):
+    provider_id: str = ""
+    task_id: str = Field(min_length=1, max_length=240)
+    prompt: str = Field(default="", max_length=ONLINE_IMAGE_PROMPT_MAX_LENGTH)
+    speed: str = "relax"
+    mask_image: Optional[AIReference] = None
+
 class ImageTaskQueryRequest(BaseModel):
     provider_id: str = "comfly"
     task_id: str = Field(min_length=1, max_length=240)
@@ -4039,6 +4145,8 @@ class ChatRequest(BaseModel):
     image_provider: str = ""
     mode: str = "chat"
     size: str = "1024x1024"
+    aspect_ratio: str = ""
+    resolution: str = ""
     quality: str = "auto"
     reference_images: List[AIReference] = []
     provider: str = "comfly"
@@ -4142,6 +4250,17 @@ class SmartCanvasGroupExportRequest(BaseModel):
     folder: str = ""
     group_name: str = "group"
     items: List[SmartCanvasGroupExportItem] = []
+
+class MiniMaxTimelineClip(BaseModel):
+    url: str = ""
+    name: str = ""
+    start: float = 0
+    end: float = 0
+    duration: float = 0
+
+class MiniMaxTimelineExportRequest(BaseModel):
+    clips: List[MiniMaxTimelineClip] = []
+    filename: str = "minimax-timeline.mp4"
 
 class LocalImageImportRequest(BaseModel):
     path: str = ""
@@ -4301,10 +4420,49 @@ def collect_required_comfy_media(params: Dict[str, Any]) -> List[str]:
     for node_inputs in (params or {}).values():
         if not isinstance(node_inputs, dict):
             continue
-        for input_name, value in node_inputs.items():
+        scan_inputs = node_inputs.get("inputs") if isinstance(node_inputs.get("inputs"), dict) else node_inputs
+        for input_name, value in scan_inputs.items():
             if is_comfy_input_media_value(input_name, value):
                 required.append(value)
     return list(dict.fromkeys(required))
+
+def comfy_prompt_error_message(status_code: int, error_body: str) -> str:
+    """Turn ComfyUI's validation payload into a useful canvas error."""
+    fallback = str(error_body or "").strip()
+    try:
+        payload = json.loads(fallback)
+    except (TypeError, ValueError):
+        return f"ComfyUI 请求失败（HTTP {status_code}）：{fallback[:500] or '未知错误'}"
+
+    parts = []
+    error = payload.get("error") if isinstance(payload, dict) else None
+    if isinstance(error, dict):
+        message = str(error.get("message") or "").strip()
+        details = str(error.get("details") or "").strip()
+        if message:
+            parts.append(message)
+        if details and details not in parts:
+            parts.append(details)
+
+    node_errors = payload.get("node_errors") if isinstance(payload, dict) else None
+    if isinstance(node_errors, dict):
+        for node_id, node_error in list(node_errors.items())[:3]:
+            if not isinstance(node_error, dict):
+                continue
+            class_type = str(node_error.get("class_type") or "").strip()
+            messages = []
+            for item in node_error.get("errors") or []:
+                if not isinstance(item, dict):
+                    continue
+                text = str(item.get("message") or item.get("details") or "").strip()
+                if text and text not in messages:
+                    messages.append(text)
+            if messages:
+                label = f"节点 {node_id}" + (f"（{class_type}）" if class_type else "")
+                parts.append(f"{label}：{'；'.join(messages[:2])}")
+
+    detail = "；".join(part for part in parts if part).strip()
+    return f"ComfyUI 拒绝了工作流（HTTP {status_code}）：{detail[:700] or fallback[:500] or '工作流校验失败'}"
 
 def get_best_backend(required_images: List[str] = None):
     best_backend = COMFYUI_INSTANCES[0]
@@ -4961,6 +5119,10 @@ def resolve_chat_provider(provider: str, model: str, ms_model: str):
     mdl = selected_model(model, default_model)
     protocol = effective_protocol(api_provider, mdl)
     if protocol == "gemini":
+        # APIMart's native Gemini API is served from its official API domain.
+        # Keep the configured base URL for its OpenAI-compatible models only.
+        if is_apimart_provider(api_provider):
+            base_root = "https://api.apimart.ai"
         base = base_root if base_root.endswith("/v1beta") else base_root + "/v1beta"
     elif protocol == "volcengine":
         base = base_root if base_root.endswith("/api/v3") else base_root + "/api/v3"
@@ -5014,6 +5176,8 @@ def api_headers(json_body=True, provider=None, model=""):
         api_key = AI_API_KEY
         if not api_key:
             raise HTTPException(status_code=400, detail="未配置 COMFLY_API_KEY，请在 API/.env 中填写。")
+    # APIMart proxies Gemini's request format but authenticates with its normal
+    # OpenAI-compatible Bearer key. Direct Gemini-compatible providers use x-goog.
     if provider and effective_protocol(provider, model) == "gemini" and not is_apimart_provider(provider):
         headers = {"Accept": "application/json", "x-goog-api-key": api_key}
     else:
@@ -5149,6 +5313,16 @@ def image_payload_from_string(value, mime_type="image/png", assume_b64=False):
     text = str(value or "").strip()
     if not text:
         return None
+    # Some Gemini-compatible proxies (including APIMart's image models) return
+    # the generated image as Markdown: ![image](data:image/jpeg;base64,...).
+    # Extract the embedded data URL before handling plain URLs/base64 values.
+    embedded_data_url = re.search(r"data:(image/[A-Za-z0-9.+-]+);base64,([A-Za-z0-9+/_=-]+)", text)
+    if embedded_data_url:
+        return {
+            "type": "b64",
+            "value": embedded_data_url.group(2),
+            "mime_type": embedded_data_url.group(1),
+        }
     if text.startswith("data:image/"):
         header, sep, encoded = text.partition(",")
         if sep and encoded:
@@ -5268,7 +5442,7 @@ def extract_images(data):
                     continue
                 inline = part.get("inlineData") or part.get("inline_data") or {}
                 if not isinstance(inline, dict):
-                    continue
+                    inline = {}
                 value = inline.get("data")
                 if value:
                     add_image({
@@ -5276,6 +5450,11 @@ def extract_images(data):
                         "value": value,
                         "mime_type": inline.get("mimeType") or inline.get("mime_type") or "image/png",
                     })
+                # APIMart Gemini image models can return a Markdown data URL in
+                # the text part instead of the native inlineData structure.
+                embedded = image_payload_from_string(part.get("text"))
+                if embedded:
+                    add_image(embedded)
 
     current = data
     if isinstance(current, dict) and isinstance(current.get("data"), dict) and isinstance(current["data"].get("result"), dict):
@@ -5792,6 +5971,130 @@ def effective_image_request_mode(provider, model=""):
 
 def is_gemini_provider(provider):
     return provider_protocol(provider) == "gemini"
+
+def is_tudou_provider(provider):
+    if not isinstance(provider, dict):
+        return False
+    return str(provider.get("id") or "").strip().lower() == "tudou" or is_tudou_base_url(provider.get("base_url") or "")
+
+def is_tudou_base_url(value):
+    return is_tudou_official_provider({"base_url": str(value or "").strip()})
+
+def is_tudou_async_image_mode(provider, model=""):
+    return (
+        normalize_image_request_mode((provider or {}).get("image_request_mode")) == "tudou-async"
+        and (not model or is_tudou_async_image_model(model))
+    )
+
+def is_tudou_async_image_model(model):
+    return str(model or "").strip().lower().startswith("gpt-image-2")
+
+def tudou_image_model_for_request(model):
+    """Keep older canvases working after Tudou retired the unsuffixed GPT Image 2 model."""
+    value = str(model or "").strip()
+    return "gpt-image-2-1k" if value.lower() == "gpt-image-2" else value
+
+def tudou_async_resolution(model, resolution, size=""):
+    requested = str(resolution or "").strip().lower()
+    if requested in {"1k", "2k", "4k"}:
+        return requested
+    model_name = str(model or "").strip().lower()
+    for value in ("4k", "2k", "1k"):
+        if model_name.endswith(f"-{value}"):
+            return value
+    width, height = parse_size_pair(size)
+    edge = max(width or 0, height or 0)
+    pixels = (width or 0) * (height or 0)
+    if edge >= 2800 or pixels >= 7_000_000:
+        return "4k"
+    if edge >= 1600 or pixels >= 2_000_000:
+        return "2k"
+    return "1k"
+
+def tudou_async_size(size, aspect_ratio=""):
+    ratio = str(aspect_ratio or "").strip()
+    if re.fullmatch(r"\d+\s*:\s*\d+", ratio):
+        return ratio.replace(" ", "")
+    value = str(size or "").strip().lower().replace("*", "x")
+    if re.fullmatch(r"\d{2,5}x\d{2,5}", value):
+        return value
+    return "1:1"
+
+def tudou_png_or_jpeg_data_url(value):
+    text = str(value or "").strip()
+    if re.match(r"^data:image/(?:png|jpe?g);base64,", text, re.I):
+        return text
+    if not text.startswith("data:image/"):
+        return text
+    header, sep, encoded = text.partition(",")
+    if not sep or not encoded:
+        return text
+    try:
+        raw = base64.b64decode(encoded, validate=False)
+        with Image.open(BytesIO(raw)) as img:
+            img.load()
+            img = ImageOps.exif_transpose(img)
+            if img.mode in ("RGBA", "LA", "P"):
+                fmt, mime = "PNG", "image/png"
+                converted = img.convert("RGBA")
+            else:
+                fmt, mime = "JPEG", "image/jpeg"
+                converted = img.convert("RGB")
+            buf = BytesIO()
+            converted.save(buf, format=fmt, quality=90 if fmt == "JPEG" else None)
+        return f"data:{mime};base64,{base64.b64encode(buf.getvalue()).decode('ascii')}"
+    except Exception:
+        return text
+
+async def tudou_async_reference_images(reference_images):
+    images = []
+    for ref in (reference_images or [])[:ONLINE_IMAGE_REFERENCE_MAX]:
+        value = str((ref or {}).get("url") or "").strip()
+        if value.startswith(("http://", "https://")):
+            images.append(value)
+            continue
+        if value.startswith("data:image/"):
+            images.append(tudou_png_or_jpeg_data_url(value))
+            continue
+        data_url = reference_to_data_url(ref, max_size=1536)
+        if data_url and data_url.startswith("data:image/"):
+            images.append(tudou_png_or_jpeg_data_url(data_url))
+    return images
+
+async def generate_tudou_async_image(prompt, size, quality, model, reference_images, provider, aspect_ratio="", resolution=""):
+    """Tudou's GPT-Image-2 async route, isolated from generic OpenAI image calls."""
+    base_url = str((provider or {}).get("base_url") or "").strip().rstrip("/")
+    if not base_url:
+        raise HTTPException(status_code=400, detail=f"{provider.get('name') or provider.get('id') or '土豆'} 未配置 Base URL")
+    body = {
+        "model": "gpt-image-2-all",
+        "prompt": str(prompt or "").strip(),
+        "size": tudou_async_size(size, aspect_ratio),
+        "resolution": tudou_async_resolution(model, resolution, size),
+        "quality": str(quality or "").strip().lower() if str(quality or "").strip().lower() in {"low", "medium", "high"} else "medium",
+    }
+    images = await tudou_async_reference_images(reference_images)
+    if images:
+        body["images"] = images
+    endpoint = provider_endpoint_url(provider, "image_generation_endpoint", "/v1/images/generations/async")
+    async with httpx.AsyncClient(timeout=httpx.Timeout(connect=20.0, read=180.0, write=120.0, pool=20.0)) as client:
+        response = await client.post(endpoint, headers=api_headers(provider=provider, model=body["model"]), json=body)
+        response.raise_for_status()
+        raw = response.json()
+        task_id = extract_task_id(raw) if isinstance(raw, dict) else None
+        if not task_id:
+            try:
+                return extract_image(raw), raw
+            except HTTPException as exc:
+                raise HTTPException(status_code=502, detail=f"土豆异步生图未返回 task_id：{str(raw)[:500]}") from exc
+        result = await wait_for_image_task(client, task_id, provider)
+        return extract_image(result), result
+
+def is_tudou_grok_image_model(model):
+    return str(model or "").strip().lower().startswith("grok-imagine-image")
+
+def is_tudou_grok_video_model(model):
+    return str(model or "").strip().lower().startswith("grok-imagine-video")
 
 def is_volcengine_provider(provider):
     return provider_protocol(provider) == "volcengine"
@@ -6940,7 +7243,7 @@ async def run_jimeng_cli(args, timeout=120, raw_text=False):
     out_text, clean_err_text = jimeng_decode_cli_output(stdout, stderr)
     if proc.returncode != 0:
         message = clean_err_text or out_text or f"exit={proc.returncode}"
-        raise HTTPException(status_code=502, detail=f"即梦 CLI 调用失败：{message[:1000]}")
+        raise HTTPException(status_code=502, detail=f"即梦 CLI 调用失败：{jimeng_friendly_error_detail(message[:1000])}")
     # 帮助等纯文本输出不应被 JSON 提取吞掉（如 [0.5, 8] 会被误判为结果）
     if raw_text:
         return {"_stdout": out_text, "_stderr": clean_err_text}
@@ -7104,7 +7407,13 @@ def jimeng_failure_reason(raw):
             for item in value:
                 visit(item)
     visit(raw)
-    return found[0] if found else ""
+    return jimeng_friendly_error_detail(found[0]) if found else ""
+
+def jimeng_friendly_error_detail(detail):
+    text = str(detail or "").strip()
+    if "aigccomplianceconfirmationrequired" in text.lower():
+        return "即梦要求先完成内容安全授权。请在 Dreamina 网页端按提示确认授权后，再返回此处重试。"
+    return text
 
 def jimeng_collect_media_values(value, outputs):
     media_ext = re.compile(r"\.(png|jpe?g|webp|gif|bmp|mp4|webm|mov|m4v|avi|mkv)(\?|#|$)", re.I)
@@ -7206,50 +7515,53 @@ def jimeng_image_resolution(model, size, mode="text2image"):
 # 因此“自动”模式显式使用 720p。
 JIMENG_VIDEO_HIGH_RES_MODELS = {"seedance2.0_vip"}
 JIMENG_VIDEO_MODEL_VERSIONS = {
-    "seedance1.5pro",
-    "seedance2.0",
-    "seedance2.0fast",
-    "seedance2.0_vip",
-    "seedance2.0fast_vip",
-    "seedance2.0mini",
+    "seedance1.0fast", "seedance1.5pro", "seedance2.0", "seedance2.0fast",
+    "seedance2.0_vip", "seedance2.0fast_vip", "seedance2.0mini",
+}
+JIMENG_VIDEO_MODELS_BY_COMMAND = {
+    "text2video": {"seedance2.0", "seedance2.0fast", "seedance2.0_vip", "seedance2.0fast_vip", "seedance2.0mini"},
+    "image2video": {"seedance1.0fast", "seedance1.5pro", "seedance2.0", "seedance2.0fast", "seedance2.0_vip", "seedance2.0fast_vip", "seedance2.0mini"},
+    "multimodal2video": {"seedance2.0", "seedance2.0fast", "seedance2.0_vip", "seedance2.0fast_vip", "seedance2.0mini"},
+    "frames2video": {"seedance1.5pro", "seedance2.0", "seedance2.0fast", "seedance2.0_vip", "seedance2.0fast_vip", "seedance2.0mini"},
 }
 
 def jimeng_video_resolution(model, resolution):
-    if not str(resolution or "").strip():
-        return "720p"
     version = jimeng_video_model_version(model)
-    requested = str(resolution or "").strip().upper()
-    if requested in {"4K", "4KP"}:
+    requested = str(resolution or "").strip().lower()
+    if not requested:
+        requested = "720p"
+    elif requested in {"4k", "4kp"}:
         requested = "4k"
-    elif requested in {"1080P", "1080"}:
+    elif requested in {"1080p", "1080"}:
         requested = "1080p"
-    elif requested in {"720P", "720"}:
+    elif requested in {"720p", "720"}:
         requested = "720p"
     else:
-        text = str(model or "").lower()
-        requested = "1080p" if "1080" in text else "720p"
+        raise HTTPException(status_code=400, detail="即梦视频只支持 720p；seedance2.0_vip 额外支持 1080p 和 4k。")
     if version not in JIMENG_VIDEO_HIGH_RES_MODELS:
         return "720p"
-    return requested if requested in {"720p", "1080p", "4k"} else "720p"
+    return requested
 
 # 各模型支持的时长区间（秒）：3.0 系列 3-10，3.5pro 4-12，seedance 4-15
-def jimeng_video_duration_range(model):
+def jimeng_video_duration_range(model, command=""):
     version = jimeng_video_model_version(model)
-    if version in ("3.0", "3.0fast", "3.0pro"):
-        return 3, 10
-    if version == "3.5pro":
-        return 4, 12
+    if command in {"image2video", "frames2video"} and version == "seedance1.5pro":
+        return 5, 12
+    if command == "image2video" and version == "seedance1.0fast":
+        return 5, 10
     return 4, 15
 
-def jimeng_video_duration(duration, model=None):
-    low, high = jimeng_video_duration_range(model)
+def jimeng_video_duration(duration, model=None, command=""):
+    low, high = jimeng_video_duration_range(model, command)
     default = max(low, min(high, 5))
     try:
         text = str(duration).strip() if duration is not None else ""
         value = default if text == "" else int(text)
     except Exception:
-        value = default
-    return max(low, min(high, value))
+        raise HTTPException(status_code=400, detail=f"即梦视频时长必须是 {low}-{high} 秒的整数。")
+    if not low <= value <= high:
+        raise HTTPException(status_code=400, detail=f"即梦模型 {jimeng_video_model_version(model) or model} 只支持 {low}-{high} 秒时长。")
+    return value
 
 def jimeng_transition_duration(total_duration, transition_count):
     count = max(1, int(transition_count or 1))
@@ -7263,9 +7575,11 @@ def jimeng_video_model_version(model):
     value = str(model or "").strip()
     low = value.lower()
     aliases = {
+        "seedance1.0fast": "seedance1.0fast",
         "seedance1.5pro": "seedance1.5pro",
         "seedance2.0fast_vip": "seedance2.0fast_vip",
         "seedance2.0_vip": "seedance2.0_vip",
+        "seedance2.0mini": "seedance2.0mini",
         "seedance2.0fast": "seedance2.0fast",
         "seedance2.0mini": "seedance2.0mini",
         "seedance2.0": "seedance2.0",
@@ -7274,6 +7588,14 @@ def jimeng_video_model_version(model):
         if key in low:
             return mapped if mapped in JIMENG_VIDEO_MODEL_VERSIONS else ""
     return ""
+
+def jimeng_video_model_for_command(model, command):
+    version = jimeng_video_model_version(model)
+    allowed = JIMENG_VIDEO_MODELS_BY_COMMAND.get(command) or set()
+    if version in allowed:
+        return version
+    supported = "、".join(sorted(allowed))
+    raise HTTPException(status_code=400, detail=f"即梦 {command} 不支持模型「{model}」。可用模型：{supported}。")
 
 def jimeng_video_resolution_arg(model, resolution):
     return jimeng_video_resolution(model, resolution)
@@ -7285,13 +7607,32 @@ def jimeng_video_ratio_arg(aspect_ratio):
         return value
     return ""
 
-def jimeng_append_model_resolution_args(args, payload: CanvasVideoRequest, include_model=False):
-    model_version = jimeng_video_model_version(payload.model)
-    if include_model and model_version:
-        args.append(f"--model_version={model_version}")
-    resolution = jimeng_video_resolution_arg(payload.model, payload.resolution)
-    if resolution:
-        args.append(f"--video_resolution={resolution}")
+def jimeng_video_ratio(aspect_ratio, default="16:9"):
+    value = str(aspect_ratio or "").strip()
+    if not value:
+        return default
+    ratio = jimeng_video_ratio_arg(value)
+    if not ratio:
+        raise HTTPException(status_code=400, detail="即梦视频比例仅支持 1:1、3:4、16:9、4:3、9:16、21:9。")
+    return ratio
+
+def jimeng_append_model_resolution_args(args, payload: CanvasVideoRequest, model_version="", include_model=None):
+    resolved_model = model_version
+    if include_model is True and not resolved_model:
+        resolved_model = jimeng_video_model_version(payload.model)
+    if include_model is not False and resolved_model:
+        args.append(f"--model_version={resolved_model}")
+    args.append(f"--video_resolution={jimeng_video_resolution_arg(resolved_model or payload.model, payload.resolution)}")
+
+def jimeng_multiframe_resolution(resolution):
+    value = str(resolution or "").strip().lower()
+    if not value:
+        return "720p"
+    if value in {"720", "720p"}:
+        return "720p"
+    if value in {"1080", "1080p"}:
+        return "1080p"
+    raise HTTPException(status_code=400, detail="即梦多帧视频只支持 720p 或 1080p。")
 
 def jimeng_video_ref_role(ref):
     role = getattr(ref, "role", "")
@@ -7478,10 +7819,13 @@ async def generate_jimeng_video(payload: CanvasVideoRequest, provider, progress=
     image_refs = [ref for ref in (payload.images or []) if jimeng_video_ref_url(ref)]
     video_refs = [url for url in (payload.videos or []) if str(url or "").strip()]
     audio_refs = [url for url in (payload.audios or []) if str(url or "").strip()][:3]
-    duration = jimeng_video_duration(payload.duration, payload.model)
     temp_paths = []
     try:
         if payload.multimodal or video_refs or audio_refs:
+            if not image_refs and not video_refs:
+                raise HTTPException(status_code=400, detail="即梦全能参考至少需要一张图片或一个视频，音频不能单独生成视频。")
+            model_version = jimeng_video_model_for_command(payload.model, "multimodal2video")
+            duration = jimeng_video_duration(payload.duration, model_version, "multimodal2video")
             image_paths = []
             video_paths = []
             audio_paths = []
@@ -7503,10 +7847,8 @@ async def generate_jimeng_video(payload: CanvasVideoRequest, provider, progress=
                 f"--duration={duration}",
                 f"--poll={jimeng_poll_seconds()}",
             ]
-            ratio = jimeng_video_ratio_arg(payload.aspect_ratio)
-            if ratio:
-                args.append(f"--ratio={ratio}")
-            jimeng_append_model_resolution_args(args, payload, include_model=True)
+            args.append(f"--ratio={jimeng_video_ratio(payload.aspect_ratio)}")
+            jimeng_append_model_resolution_args(args, payload, model_version)
             for image_path in image_paths:
                 args.append(f"--image={jimeng_cli_path_arg(image_path)}")
             for video_path in video_paths:
@@ -7514,9 +7856,13 @@ async def generate_jimeng_video(payload: CanvasVideoRequest, provider, progress=
             for audio_path in audio_paths:
                 args.append(f"--audio={jimeng_cli_path_arg(audio_path)}")
         elif len(image_refs) >= 2:
+            if len(image_refs) > 20:
+                raise HTTPException(status_code=400, detail="即梦多帧视频最多支持 20 张图片。")
             first_frame = next((ref for ref in image_refs if jimeng_video_ref_role(ref) == "first_frame"), None)
             last_frame = next((ref for ref in image_refs if jimeng_video_ref_role(ref) == "last_frame"), None)
             if first_frame and last_frame:
+                model_version = jimeng_video_model_for_command(payload.model, "frames2video")
+                duration = jimeng_video_duration(payload.duration, model_version, "frames2video")
                 first_path, created = await jimeng_prepare_local_media(jimeng_video_ref_url(first_frame), "image")
                 temp_paths.extend(created)
                 last_path, created = await jimeng_prepare_local_media(jimeng_video_ref_url(last_frame), "image")
@@ -7529,7 +7875,7 @@ async def generate_jimeng_video(payload: CanvasVideoRequest, provider, progress=
                     f"--duration={duration}",
                     f"--poll={jimeng_poll_seconds()}",
                 ]
-                jimeng_append_model_resolution_args(args, payload, include_model=True)
+                jimeng_append_model_resolution_args(args, payload, model_version)
             else:
                 image_paths = []
                 for ref in image_refs:
@@ -7539,50 +7885,51 @@ async def generate_jimeng_video(payload: CanvasVideoRequest, provider, progress=
                 args = [
                     "multiframe2video",
                     f"--images={','.join(jimeng_cli_path_arg(path) for path in image_paths)}",
-                    f"--prompt={payload.prompt}",
-                    f"--duration={duration}",
                     f"--poll={jimeng_poll_seconds()}",
                 ]
-                # multiframe2video 不支持 --model_version 或 --video_resolution；
-                # 分辨率和模型由 CLI 根据首张参考图及默认配置处理。
+                # multiframe2video has its own transition arguments and does not
+                # accept model_version. The CLI requires an explicit resolution.
+                args.append(f"--video_resolution={jimeng_multiframe_resolution(payload.resolution)}")
+                segments = max(1, len(image_paths) - 1)
+                segment_duration = jimeng_transition_duration(payload.duration, segments)
+                if len(image_paths) <= 2:
+                    if str(payload.prompt or "").strip():
+                        args.append(f"--prompt={payload.prompt}")
+                    args.append(f"--duration={segment_duration}")
+                else:
+                    for segment_prompt in jimeng_multiframe_transition_prompts(payload.prompt, segments):
+                        args.append(f"--transition-prompt={segment_prompt}")
+                    for _ in range(segments):
+                        args.append(f"--transition-duration={segment_duration}")
         elif image_refs:
+            model_version = jimeng_video_model_for_command(payload.model, "image2video")
+            duration = jimeng_video_duration(payload.duration, model_version, "image2video")
             image_path, created = await jimeng_prepare_local_media(jimeng_video_ref_url(image_refs[0]), "image")
             temp_paths.extend(created)
-            ratio = jimeng_video_ratio_arg(payload.aspect_ratio)
-            if ratio:
-                args = [
-                    "multimodal2video",
-                    f"--image={jimeng_cli_path_arg(image_path)}",
-                    f"--prompt={payload.prompt}",
-                    f"--duration={duration}",
-                    f"--ratio={ratio}",
-                    f"--poll={jimeng_poll_seconds()}",
-                ]
-                jimeng_append_model_resolution_args(args, payload, include_model=True)
-            else:
-                args = [
-                    "image2video",
-                    f"--image={jimeng_cli_path_arg(image_path)}",
-                    f"--prompt={payload.prompt}",
-                    f"--duration={duration}",
-                    f"--poll={jimeng_poll_seconds()}",
-                ]
-                jimeng_append_model_resolution_args(args, payload, include_model=True)
+            args = [
+                "image2video",
+                f"--image={jimeng_cli_path_arg(image_path)}",
+                f"--prompt={payload.prompt}",
+                f"--duration={duration}",
+                f"--poll={jimeng_poll_seconds()}",
+            ]
+            jimeng_append_model_resolution_args(args, payload, model_version)
         else:
+            model_version = jimeng_video_model_for_command(payload.model, "text2video")
+            duration = jimeng_video_duration(payload.duration, model_version, "text2video")
             args = [
                 "text2video",
                 f"--prompt={payload.prompt}",
                 f"--duration={duration}",
-                f"--ratio={payload.aspect_ratio or '16:9'}",
+                f"--ratio={jimeng_video_ratio(payload.aspect_ratio)}",
                 f"--poll={jimeng_poll_seconds()}",
             ]
-            model_version = jimeng_video_model_version(payload.model)
-            if model_version:
-                args.append(f"--model_version={model_version}")
-            resolution = jimeng_video_resolution_arg(payload.model, payload.resolution)
-            if resolution:
-                args.append(f"--video_resolution={resolution}")
-        raw = await run_jimeng_cli(args, timeout=jimeng_poll_seconds() + 180)
+            jimeng_append_model_resolution_args(args, payload, model_version)
+        # Do not hold the canvas request open for the full cloud generation.
+        # A pending result carries submit_id and is resumed by the existing UI poller.
+        submit_poll = jimeng_video_submit_poll_seconds()
+        args = [f"--poll={submit_poll}" if str(arg).startswith("--poll=") else arg for arg in args]
+        raw = await run_jimeng_cli(args, timeout=submit_poll + 180)
         submit_id = jimeng_submit_id(raw)
         if submit_id:
             report_canvas_video_progress(progress, {
@@ -7618,6 +7965,8 @@ IMAGE_TASK_FAILED_STATUSES = {
 
 def image_task_url_for_provider(provider, task_id):
     base_url = (provider.get("base_url") if provider else AI_BASE_URL).rstrip("/")
+    if is_tudou_async_image_mode(provider):
+        return f"{base_url}/tasks/{task_id}" if base_url.endswith("/v1") else f"{base_url}/v1/tasks/{task_id}"
     # 异步生图（openai-video-proxy）模式优先于 apimart 协议判断：
     # 提交走 /v1/videos，轮询必须走 /v1/videos/{id}；否则 protocol=apimart 的平台会错走 /v1/tasks/{id}
     if normalize_image_request_mode((provider or {}).get("image_request_mode")) == "openai-video-proxy":
@@ -7675,9 +8024,10 @@ async def fetch_image_task_payload(client, task_id, provider=None):
 
 async def wait_for_image_task(client, task_id, provider=None, progress=None):
     is_apimart = is_apimart_provider(provider)
-    timeout = APIMART_IMAGE_TASK_TIMEOUT if is_apimart else IMAGE_TASK_TIMEOUT
-    interval = APIMART_IMAGE_POLL_INTERVAL if is_apimart else IMAGE_POLL_INTERVAL
-    initial_delay = APIMART_IMAGE_INITIAL_POLL_DELAY if is_apimart else 0
+    is_tudou_async = is_tudou_async_image_mode(provider)
+    timeout = TUDOU_ASYNC_IMAGE_TASK_TIMEOUT if is_tudou_async else APIMART_IMAGE_TASK_TIMEOUT if is_apimart else IMAGE_TASK_TIMEOUT
+    interval = TUDOU_ASYNC_IMAGE_POLL_INTERVAL if is_tudou_async else APIMART_IMAGE_POLL_INTERVAL if is_apimart else IMAGE_POLL_INTERVAL
+    initial_delay = TUDOU_ASYNC_IMAGE_INITIAL_POLL_DELAY if is_tudou_async else APIMART_IMAGE_INITIAL_POLL_DELAY if is_apimart else 0
     deadline = time.monotonic() + timeout
     last_payload = {}
     while time.monotonic() < deadline:
@@ -12291,6 +12641,8 @@ def gemini_model_name(model):
 
 def gemini_endpoint_url(provider, model):
     model_name = urllib.parse.quote(gemini_model_name(model), safe="")
+    if is_apimart_provider(provider) and not str((provider or {}).get("image_generation_endpoint") or "").strip():
+        return f"https://api.apimart.ai/v1beta/models/{model_name}:generateContent"
     return provider_endpoint_url(provider, "image_generation_endpoint", f"/v1beta/models/{model_name}:generateContent")
 
 def gemini_image_config(size):
@@ -12356,7 +12708,9 @@ async def generate_gemini_provider_image(
             },
         )
         response.raise_for_status()
-        raw = response.json()
+        # APIMart wraps the native Gemini body in {code, data}; unwrap it before
+        # image extraction so candidates[].content.parts[].inlineData is visible.
+        raw = unwrap_apimart_response(response.json()) if is_apimart_provider(provider) else response.json()
         return extract_image(raw), raw
 
 def volcengine_endpoint_url(provider):
@@ -12433,8 +12787,9 @@ def runninghub_api_key(provider=None, use_wallet=False, prefer_wallet=False):
     return api_key
 
 def runninghub_app_headers(json_body=True, use_wallet=False, provider=None):
-    headers = {"Host": "www.runninghub.cn"}
     provider = provider or runninghub_provider()
+    host = urllib.parse.urlsplit(str((provider or {}).get("base_url") or RUNNINGHUB_DEFAULT_BASE_URL)).netloc or "www.runninghub.ai"
+    headers = {"Host": host}
     if provider:
         api_key = runninghub_api_key(provider, use_wallet=use_wallet)
         if api_key:
@@ -12560,6 +12915,22 @@ def runninghub_fail_reason(raw):
     if isinstance(raw, dict) and raw.get("errorCode"):
         return f"RunningHub errorCode={raw.get('errorCode')}"
     return ""
+
+def runninghub_error_detail(message, raw=None, **extra):
+    detail = {"message": str(message or "RunningHub 请求失败")}
+    detail.update({k: v for k, v in extra.items() if v not in (None, "")})
+    if raw is not None:
+        detail["raw"] = raw
+    return detail
+
+def log_runninghub_error(stage, raw=None, **extra):
+    try:
+        payload = {"stage": stage, **{k: v for k, v in extra.items() if v not in (None, "")}}
+        if raw is not None:
+            payload["raw"] = raw
+        print(f"RunningHub error: {json.dumps(payload, ensure_ascii=False)[:4000]}")
+    except Exception:
+        print(f"RunningHub error: {stage}")
 
 def runninghub_infer_workflow_field_type(field_name, field_value):
     key = f"{field_name or ''} {field_value or ''}".lower()
@@ -13731,6 +14102,14 @@ async def generate_ai_image(
         return await generate_volcengine_provider_image(
             prompt, size, model, reference_images, provider, progress, request_attempts
         )
+    if is_tudou_async_image_mode(provider, model):
+        return await generate_tudou_async_image(
+            prompt, size, quality, model, reference_images, provider, aspect_ratio, resolution
+        )
+    if is_tudou_provider(provider) and is_tudou_grok_image_model(model):
+        return await generate_tudou_grok_image(
+            prompt, size, model, reference_images, provider, aspect_ratio
+        )
     is_gpt2 = is_gpt_image_2_model(model)
     # 不对 GPT 尺寸做任何缩小/拦截：用户选什么尺寸就原样发给上游； 
     # 若超过 GPT 的最大像素限制被上游拒绝，再由 friendly_image_error_detail 给出友好的像素上限提示。
@@ -14373,6 +14752,91 @@ def download_output(request: Request, url: str, name: str = "", inline: bool = F
             upstream.close()
 
     return StreamingResponse(stream_remote(), media_type=content_type, headers=headers, status_code=upstream.status_code)
+
+@app.post("/api/smart-canvas/minimax-export")
+async def export_minimax_timeline(payload: MiniMaxTimelineExportRequest):
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise HTTPException(status_code=500, detail="未找到 ffmpeg，无法导出完整剪辑")
+    clips = [clip for clip in (payload.clips or []) if clip.url]
+    if not clips:
+        raise HTTPException(status_code=400, detail="时间轴里还没有可导出的视频")
+    tmpdir = tempfile.mkdtemp(prefix="minimax_timeline_")
+    try:
+        clip_sources = []
+        for clip in clips:
+            src = output_file_from_url(clip.url)
+            if not src:
+                raise HTTPException(status_code=400, detail="完整剪辑导出只支持本地生成素材")
+            clip_sources.append(src)
+        ffprobe = shutil.which("ffprobe")
+        preserve_audio = bool(ffprobe)
+        if ffprobe:
+            for src in clip_sources:
+                probe_cmd = [
+                    ffprobe, "-v", "error", "-select_streams", "a:0",
+                    "-show_entries", "stream=index", "-of", "csv=p=0", src,
+                ]
+                probe = await asyncio.to_thread(subprocess.run, probe_cmd, capture_output=True, text=True, timeout=30)
+                if probe.returncode != 0 or not (probe.stdout or "").strip():
+                    preserve_audio = False
+                    break
+        part_paths = []
+        normalize_video = "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30"
+        for index, (clip, src) in enumerate(zip(clips, clip_sources)):
+            start = max(0.0, float(clip.start or 0))
+            end = float(clip.end or 0)
+            source_duration = max(0.0, float(clip.duration or 0))
+            if end <= start:
+                end = source_duration if source_duration > start else start + 0.1
+            trim_duration = max(0.1, end - start)
+            part_path = os.path.join(tmpdir, f"part_{index:03d}.mp4")
+            if preserve_audio:
+                cmd = [
+                    ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+                    "-ss", f"{start:.3f}", "-t", f"{trim_duration:.3f}", "-i", src,
+                    "-map", "0:v:0", "-map", "0:a:0", "-vf", normalize_video,
+                    "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
+                    "-c:a", "aac", "-ar", "48000", "-ac", "2",
+                    "-movflags", "+faststart", part_path,
+                ]
+            else:
+                cmd = [
+                    ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+                    "-ss", f"{start:.3f}", "-t", f"{trim_duration:.3f}", "-i", src,
+                    "-f", "lavfi", "-t", f"{trim_duration:.3f}", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000",
+                    "-map", "0:v:0", "-map", "1:a:0", "-vf", normalize_video, "-shortest",
+                    "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
+                    "-c:a", "aac", "-ar", "48000", "-ac", "2",
+                    "-movflags", "+faststart", part_path,
+                ]
+            proc = await asyncio.to_thread(subprocess.run, cmd, capture_output=True, text=True, timeout=300)
+            if proc.returncode != 0:
+                raise HTTPException(status_code=500, detail=(proc.stderr or "视频裁剪失败").strip()[:300])
+            part_paths.append(part_path)
+        filename = sanitize_export_filename(payload.filename or "minimax-timeline.mp4", "minimax-timeline.mp4")
+        if not filename.lower().endswith(".mp4"):
+            filename += ".mp4"
+        output_path = output_path_for(filename, "output")
+        if len(part_paths) == 1:
+            shutil.copyfile(part_paths[0], output_path)
+        else:
+            concat_path = os.path.join(tmpdir, "concat.txt")
+            with open(concat_path, "w", encoding="utf-8") as fh:
+                for part in part_paths:
+                    safe_part = part.replace("\\", "/").replace("'", "'\\''")
+                    fh.write(f"file '{safe_part}'\n")
+            cmd = [
+                ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+                "-f", "concat", "-safe", "0", "-i", concat_path,
+                "-c", "copy", "-movflags", "+faststart", output_path,
+            ]
+            proc = await asyncio.to_thread(subprocess.run, cmd, capture_output=True, text=True, timeout=300)
+            if proc.returncode != 0:
+                raise HTTPException(status_code=500, detail=(proc.stderr or "视频拼接失败").strip()[:300])
+        return {"url": output_url_for(filename, "output"), "name": filename, "kind": "video"}
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
 @app.post("/api/upload")
 async def upload_image(files: List[UploadFile] = File(...)):
@@ -15266,15 +15730,17 @@ async def runninghub_submit(payload: RunningHubSubmitRequest):
             response = await client.post(url, headers=runninghub_app_headers(True, payload.useWallet), json=body)
             raw = response.json()
         except Exception as exc:
-            raise HTTPException(status_code=502, detail=f"提交 RunningHub 任务失败：{exc}") from exc
+            raise HTTPException(status_code=502, detail=runninghub_error_detail(f"提交 RunningHub 任务失败：{exc}", endpoint=url, webappId=webapp_id)) from exc
     if response.status_code >= 400:
-        raise HTTPException(status_code=response.status_code, detail=json.dumps(raw, ensure_ascii=False)[:800])
+        log_runninghub_error("submit-http", raw, endpoint=url, webappId=webapp_id, status=response.status_code)
+        raise HTTPException(status_code=response.status_code, detail=runninghub_error_detail(f"RunningHub HTTP {response.status_code}", raw, endpoint=url, webappId=webapp_id))
     if isinstance(raw, dict) and raw.get("code") in (0, "0"):
         task_id = raw.get("data", {}).get("taskId") if isinstance(raw.get("data"), dict) else ""
         if not task_id:
-            raise HTTPException(status_code=502, detail=f"RunningHub 未返回 taskId：{raw}")
+            raise HTTPException(status_code=502, detail=runninghub_error_detail("RunningHub 未返回 taskId", raw, endpoint=url, webappId=webapp_id))
         return {"success": True, "data": {"taskId": task_id, "raw": raw}}
-    raise HTTPException(status_code=400, detail=(raw.get("msg") if isinstance(raw, dict) else "") or f"RunningHub 提交失败：{raw}")
+    log_runninghub_error("submit-rejected", raw, endpoint=url, webappId=webapp_id)
+    raise HTTPException(status_code=400, detail=runninghub_error_detail(runninghub_fail_reason(raw) or "RunningHub 提交失败", raw, endpoint=url, webappId=webapp_id))
 
 @app.post("/api/runninghub/workflow-submit")
 async def runninghub_workflow_submit(payload: RunningHubWorkflowSubmitRequest):
@@ -15302,15 +15768,17 @@ async def runninghub_workflow_submit(payload: RunningHubWorkflowSubmitRequest):
             response = await client.post(url, headers=runninghub_app_headers(True, payload.useWallet), json=body)
             raw = response.json()
         except Exception as exc:
-            raise HTTPException(status_code=502, detail=f"提交 RunningHub 工作流失败：{exc}") from exc
+            raise HTTPException(status_code=502, detail=runninghub_error_detail(f"提交 RunningHub 工作流失败：{exc}", endpoint=url, workflowId=workflow_id)) from exc
     if response.status_code >= 400:
-        raise HTTPException(status_code=response.status_code, detail=json.dumps(raw, ensure_ascii=False)[:800])
+        log_runninghub_error("workflow-submit-http", raw, endpoint=url, workflowId=workflow_id, status=response.status_code)
+        raise HTTPException(status_code=response.status_code, detail=runninghub_error_detail(f"RunningHub HTTP {response.status_code}", raw, endpoint=url, workflowId=workflow_id))
     if isinstance(raw, dict) and raw.get("code") in (0, "0"):
         task_id = raw.get("data", {}).get("taskId") if isinstance(raw.get("data"), dict) else ""
         if not task_id:
-            raise HTTPException(status_code=502, detail=f"RunningHub 工作流未返回 taskId：{raw}")
+            raise HTTPException(status_code=502, detail=runninghub_error_detail("RunningHub 工作流未返回 taskId", raw, endpoint=url, workflowId=workflow_id))
         return {"success": True, "data": {"taskId": task_id, "raw": raw}}
-    raise HTTPException(status_code=400, detail=(raw.get("msg") if isinstance(raw, dict) else "") or f"RunningHub 工作流提交失败：{raw}")
+    log_runninghub_error("workflow-submit-rejected", raw, endpoint=url, workflowId=workflow_id)
+    raise HTTPException(status_code=400, detail=runninghub_error_detail(runninghub_fail_reason(raw) or "RunningHub 工作流提交失败", raw, endpoint=url, workflowId=workflow_id))
 
 @app.get("/api/runninghub/workflow-info")
 async def runninghub_workflow_info(workflowId: str = ""):
@@ -15485,9 +15953,10 @@ async def runninghub_query(taskId: str = "", useWallet: bool = False):
             response = await client.post(url, headers=runninghub_app_headers(True, useWallet), json={"apiKey": api_key, "taskId": task_id})
             raw = response.json()
         except Exception as exc:
-            raise HTTPException(status_code=502, detail=f"查询 RunningHub 任务失败：{exc}") from exc
+            raise HTTPException(status_code=502, detail=runninghub_error_detail(f"查询 RunningHub 任务失败：{exc}", endpoint=url, taskId=task_id)) from exc
         if response.status_code >= 400:
-            raise HTTPException(status_code=response.status_code, detail=json.dumps(raw, ensure_ascii=False)[:800])
+            log_runninghub_error("query-http", raw, endpoint=url, taskId=task_id, status=response.status_code)
+            raise HTTPException(status_code=response.status_code, detail=runninghub_error_detail(f"RunningHub HTTP {response.status_code}", raw, endpoint=url, taskId=task_id))
         code = raw.get("code") if isinstance(raw, dict) else None
         status = "PENDING"
         urls = []
@@ -15508,8 +15977,10 @@ async def runninghub_query(taskId: str = "", useWallet: bool = False):
             status = "QUEUED"
         elif code in (805, "805"):
             status = "FAILED"
+            log_runninghub_error("query-failed", raw, endpoint=url, taskId=task_id, code=code)
         else:
             status = "UNKNOWN"
+            log_runninghub_error("query-unknown", raw, endpoint=url, taskId=task_id, code=code)
         return {"success": True, "data": {"status": status, "urls": urls, "image_items": image_items, "failReason": runninghub_fail_reason(raw), "code": code, "raw": raw}}
 
 @app.post("/api/runninghub/upload-asset")
@@ -16002,6 +16473,9 @@ async def save_providers(payload: List[ApiProviderPayload]):
         for i, p in enumerate(providers):
             p["primary"] = (i == winner)
     save_api_providers(providers)
+    runninghub_provider = next((item for item in providers if item.get("id") == "runninghub"), None)
+    if runninghub_provider:
+        sync_runninghub_provider_workflows_to_static_template(runninghub_provider)
     if env_updates:
         update_env_values(env_updates)
         reload_env_globals()   # 立即将最新 env 值同步回模块全局变量，无需重启
@@ -16447,6 +16921,7 @@ async def probe_async_endpoint(payload: TestConnectionPayload):
     api_key = api_key_from_payload(payload, protocol)
     if not api_key:
         raise HTTPException(status_code=400, detail="请先填写或保存 API Key")
+    is_tudou_async = is_tudou_base_url(base_url)
     if protocol == "volcengine":
         try:
             async with httpx.AsyncClient(timeout=15) as client:
@@ -16496,6 +16971,17 @@ async def probe_async_endpoint(payload: TestConnectionPayload):
                 else:
                     err_msg = str(err).lower()
             # 400 + "invalid task id" → 端点存在，Key 有效
+            if is_tudou_async and sc == 400:
+                # 土豆对不存在的 task_id 可能使用不同的 400 错误字段；只要不是
+                # 401/403，400 已证明请求命中了异步任务端点且认证通过。
+                return {
+                    "ok": True,
+                    "protocol": "openai",
+                    "image_request_mode": "tudou-async",
+                    "status_code": sc,
+                    "message": "土豆 GPT-Image-2 异步任务端点可用，API Key 已通过认证",
+                    "raw": body,
+                }
             if sc == 400 and "invalid task id" in err_msg:
                 return {"ok": True, "protocol": "apimart", "status_code": sc, "message": "APIMart 异步任务端点可用，API Key 已通过认证", "raw": body}
 
@@ -16515,6 +17001,16 @@ async def probe_async_endpoint(payload: TestConnectionPayload):
                 async_probe["message"] = f"/v1/tasks/ 返回 {sc}（意外成功）"
             else:
                 async_probe["message"] = f"/v1/tasks/ 服务端错误 {sc}"
+
+            if is_tudou_async:
+                return {
+                    "ok": sc < 400,
+                    "protocol": "openai",
+                    "image_request_mode": "tudou-async" if sc < 400 else "openai",
+                    "status_code": sc,
+                    "message": async_probe["message"] or "土豆 GPT-Image-2 异步任务端点验证完成",
+                    "raw": body,
+                }
 
             if protocol == "apimart":
                 return {"ok": False, "protocol": "apimart", "status_code": sc, "message": async_probe["message"], "raw": body}
@@ -16791,6 +17287,290 @@ async def build_online_image_result(payload: OnlineImageRequest, progress=None):
 @app.post("/api/online-image")
 async def online_image(payload: OnlineImageRequest):
     return await build_online_image_result(payload)
+
+# Midjourney is intentionally kept outside the generic image-generation flow.
+# APIMart exposes it as a task API with its own action endpoints, which does not
+# match either OpenAI images or Gemini image responses.
+APIMART_MIDJOURNEY_API_ROOT = "https://api.apimart.ai"
+MIDJOURNEY_SPEEDS = {"relax", "fast", "turbo"}
+MIDJOURNEY_ACTION_PATHS = {
+    "upscale": "/v1/midjourney/generations/upscale",
+    "variation": "/v1/midjourney/generations/variation",
+    "low_variation": "/v1/midjourney/generations/low-variation",
+    "high_variation": "/v1/midjourney/generations/high-variation",
+    "reroll": "/v1/midjourney/generations/reroll",
+    "zoom": "/v1/midjourney/generations/zoom",
+    "pan": "/v1/midjourney/generations/pan",
+    "inpaint": "/v1/midjourney/generations/inpaint",
+    "remix_subtle": "/v1/midjourney/generations/remix-subtle",
+    "remix_strong": "/v1/midjourney/generations/remix-strong",
+}
+
+def apimart_midjourney_provider(provider_id: str):
+    provider = get_api_provider_exact(provider_id)
+    if not is_apimart_provider(provider):
+        raise HTTPException(status_code=400, detail="Midjourney 节点仅支持已配置为 APIMart 协议的平台。")
+    # This also validates the configured key, while all MJ requests below keep
+    # using APIMart's official host instead of inheriting a custom image URL.
+    api_headers(provider=provider)
+    return provider
+
+def midjourney_response_data(raw):
+    if not isinstance(raw, dict):
+        return {}
+    data = raw.get("data")
+    if isinstance(data, dict):
+        return data
+    if isinstance(data, list):
+        return next((item for item in data if isinstance(item, dict)), raw)
+    return raw
+
+def midjourney_task_id(raw):
+    data = midjourney_response_data(raw)
+    for key in ("task_id", "taskId", "id"):
+        value = str(data.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+def midjourney_task_status(raw):
+    data = midjourney_response_data(raw)
+    return str(data.get("status") or data.get("task_status") or "").strip().upper()
+
+def midjourney_error_detail(raw, fallback="Midjourney 请求失败"):
+    data = midjourney_response_data(raw)
+    error = data.get("error") if isinstance(data.get("error"), dict) else {}
+    return str(
+        error.get("message")
+        or data.get("message")
+        or data.get("fail_reason")
+        or (raw.get("message") if isinstance(raw, dict) else "")
+        or fallback
+    )
+
+def midjourney_remote_images(raw):
+    data = midjourney_response_data(raw)
+    values = data.get("image_urls") or data.get("imageUrls") or []
+    if isinstance(values, str):
+        values = [values]
+    if not isinstance(values, list):
+        values = []
+    urls = [str(value or "").strip() for value in values if str(value or "").strip()]
+    if not urls:
+        result = data.get("result") if isinstance(data.get("result"), dict) else {}
+        result_images = result.get("images") if isinstance(result.get("images"), list) else []
+        for item in result_images:
+            value = str((item or {}).get("url") if isinstance(item, dict) else item or "").strip()
+            if value:
+                urls.append(value)
+    if not urls:
+        for key in ("image_url", "imageUrl", "grid_image_url", "gridImageUrl"):
+            value = str(data.get(key) or "").strip()
+            if value:
+                urls.append(value)
+    return list(dict.fromkeys(urls))
+
+async def midjourney_reference_urls(reference_images):
+    urls = []
+    for ref in (reference_images or [])[:4]:
+        value = str((ref or {}).get("url") or "").strip()
+        if value.startswith(("http://", "https://", "data:image/")):
+            urls.append(value)
+            continue
+        data_url = reference_to_data_url(ref, max_size=1536)
+        if data_url.startswith("data:image/"):
+            urls.append(data_url)
+    return urls
+
+async def midjourney_modal_mask_url(reference):
+    """Convert this canvas's white edit-mask convention to APIMart's alpha mask.
+    Existing remote masks are treated as already compliant; locally generated
+    `role=mask` images have white editable pixels and are inverted to transparent.
+    """
+    if not reference:
+        return ""
+    ref = reference.dict() if isinstance(reference, AIReference) else dict(reference)
+    value = str(ref.get("url") or "").strip()
+    if value.startswith(("http://", "https://")):
+        return value
+    data_url = reference_to_data_url(ref, max_size=2048)
+    if not data_url.startswith("data:image/"):
+        return ""
+    try:
+        _header, encoded = data_url.split(",", 1)
+        with Image.open(BytesIO(base64.b64decode(encoded))) as image:
+            luminance = ImageOps.exif_transpose(image).convert("L")
+            rgba = Image.new("RGBA", luminance.size, (255, 255, 255, 255))
+            rgba.putalpha(ImageOps.invert(luminance))
+            out = BytesIO()
+            rgba.save(out, format="PNG")
+        return f"data:image/png;base64,{base64.b64encode(out.getvalue()).decode('ascii')}"
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"无法读取 Midjourney 遮罩图片：{exc}") from exc
+
+async def apimart_midjourney_request(provider, path, body):
+    timeout = httpx.Timeout(connect=20.0, read=180.0, write=120.0, pool=20.0)
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+        response = await client.post(
+            f"{APIMART_MIDJOURNEY_API_ROOT}{path}",
+            headers=api_headers(provider=provider),
+            json=body,
+        )
+    try:
+        raw = response.json()
+    except ValueError:
+        raw = {"message": response.text[:500]}
+    if response.status_code >= 400:
+        raise HTTPException(status_code=response.status_code, detail=midjourney_error_detail(raw, f"Midjourney 接口错误（{response.status_code}）"))
+    task_id = midjourney_task_id(raw)
+    if not task_id:
+        raise HTTPException(status_code=502, detail=f"Midjourney 未返回任务 ID：{json.dumps(raw, ensure_ascii=False)[:500]}")
+    return raw, task_id
+
+async def midjourney_result(provider, task_id: str):
+    safe_task_id = str(task_id or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,240}", safe_task_id):
+        raise HTTPException(status_code=400, detail="Midjourney 任务 ID 不合法。")
+    timeout = httpx.Timeout(connect=20.0, read=180.0, write=60.0, pool=20.0)
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+        response = await client.get(
+            f"{APIMART_MIDJOURNEY_API_ROOT}/v1/midjourney/{urllib.parse.quote(safe_task_id, safe='')}",
+            headers=api_headers(provider=provider),
+        )
+    try:
+        raw = response.json()
+    except ValueError:
+        raw = {"message": response.text[:500]}
+    if response.status_code >= 400:
+        raise HTTPException(status_code=response.status_code, detail=midjourney_error_detail(raw, f"查询 Midjourney 任务失败（{response.status_code}）"))
+    status = midjourney_task_status(raw)
+    if status in IMAGE_TASK_FAILED_STATUSES:
+        return {"status": "failed", "task_id": safe_task_id, "error": midjourney_error_detail(raw), "raw": raw}
+    if status not in IMAGE_TASK_SUCCESS_STATUSES:
+        return {"status": "running", "task_id": safe_task_id, "message": "Midjourney 任务仍在生成中", "raw": raw}
+    remote_urls = midjourney_remote_images(raw)
+    if not remote_urls:
+        return {"status": "failed", "task_id": safe_task_id, "error": "Midjourney 任务成功但没有返回图片。", "raw": raw}
+    local_urls, image_items = [], []
+    for remote_url in remote_urls:
+        local_url = await save_ai_image_to_output({"type": "url", "value": remote_url}, prefix="midjourney_")
+        if local_url:
+            local_urls.append(local_url)
+            item = image_output_meta(local_url)
+            item["mj_task_id"] = safe_task_id
+            image_items.append(item)
+    return {
+        "status": "succeeded",
+        "task_id": safe_task_id,
+        "images": local_urls,
+        "image_items": image_items,
+        "provider_id": provider["id"],
+        "provider_name": provider.get("name") or provider["id"],
+        "raw": raw,
+    }
+
+@app.post("/api/midjourney/submit")
+async def submit_midjourney(payload: MidjourneySubmitRequest):
+    provider = apimart_midjourney_provider(payload.provider_id)
+    speed = str(payload.speed or "relax").strip().lower()
+    if speed not in MIDJOURNEY_SPEEDS:
+        raise HTTPException(status_code=400, detail="Midjourney 速度仅支持 relax、fast 或 turbo。")
+    size = str(payload.size or "1:1").strip()
+    if not re.fullmatch(r"\d{1,2}:\d{1,2}", size):
+        raise HTTPException(status_code=400, detail="Midjourney 画幅应为宽:高，例如 16:9。")
+    mode = str(payload.mode or "imagine").strip().lower()
+    if mode not in {"imagine", "blend", "edit"}:
+        raise HTTPException(status_code=400, detail="不支持的 Midjourney 节点模式。")
+    image_urls = await midjourney_reference_urls([ref.dict() for ref in payload.reference_images if ref.url])
+    prompt = str(payload.prompt or "").strip()
+    if mode == "blend":
+        if not 2 <= len(image_urls) <= 4:
+            raise HTTPException(status_code=400, detail="Midjourney 多图融合需要连接 2 到 4 张图片。")
+        body = {"image_urls": image_urls, "size": size, "speed": speed, "metadata": {"source": "infinite-canvas"}}
+        path = "/v1/midjourney/generations/blend"
+    elif mode == "edit":
+        if not prompt:
+            raise HTTPException(status_code=400, detail="Midjourney 图片编辑需要提示词。")
+        if not image_urls:
+            raise HTTPException(status_code=400, detail="Midjourney 图片编辑需要连接至少一张图片。")
+        body = {"prompt": prompt, "image_urls": image_urls, "size": size, "speed": speed, "metadata": {"source": "infinite-canvas"}}
+        path = "/v1/midjourney/generations/edits"
+    else:
+        if not prompt:
+            raise HTTPException(status_code=400, detail="Midjourney 文生图需要提示词。")
+        body = {"prompt": prompt, "size": size, "version": str(payload.version or "6.1").strip()[:24], "speed": speed, "metadata": {"source": "infinite-canvas"}}
+        if image_urls:
+            body["image_urls"] = image_urls
+        path = "/v1/midjourney/generations"
+    raw, task_id = await apimart_midjourney_request(provider, path, body)
+    return {"task_id": task_id, "status": midjourney_task_status(raw) or "queued", "provider_id": provider["id"], "mode": mode, "raw": raw}
+
+@app.post("/api/midjourney/actions")
+async def submit_midjourney_action(payload: MidjourneyActionRequest):
+    provider = apimart_midjourney_provider(payload.provider_id)
+    action = str(payload.action or "").strip().lower()
+    if action not in MIDJOURNEY_ACTION_PATHS:
+        raise HTTPException(status_code=400, detail="不支持的 Midjourney 操作。")
+    task_id = str(payload.task_id or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,240}", task_id):
+        raise HTTPException(status_code=400, detail="Midjourney 任务 ID 不合法。")
+    speed = str(payload.speed or "relax").strip().lower()
+    if speed not in MIDJOURNEY_SPEEDS:
+        raise HTTPException(status_code=400, detail="Midjourney 速度仅支持 relax、fast 或 turbo。")
+    body = {"task_id": task_id, "speed": speed, "metadata": {"source": "infinite-canvas"}}
+    custom_id = str(payload.custom_id or "").strip()
+    if custom_id:
+        body["custom_id"] = custom_id
+    if action in {"upscale", "variation", "low_variation", "high_variation", "remix_subtle", "remix_strong"} and not custom_id:
+        index = int(payload.index or 0)
+        if index not in {1, 2, 3, 4}:
+            raise HTTPException(status_code=400, detail="Midjourney 图片序号应为 1 到 4。")
+        body["index"] = index
+    elif action in {"zoom", "pan"} and int(payload.index or 0) in {1, 2, 3, 4}:
+        body["index"] = int(payload.index)
+    if action == "zoom" and payload.zoom_ratio is not None:
+        zoom_ratio = float(payload.zoom_ratio)
+        if zoom_ratio <= 1 or zoom_ratio > 4:
+            raise HTTPException(status_code=400, detail="Midjourney 缩放比例应大于 1 且不超过 4。")
+        body["zoom_ratio"] = zoom_ratio
+    if action == "pan" and not custom_id:
+        direction = str(payload.direction or "").strip().lower()
+        if direction not in {"left", "right", "up", "down"}:
+            raise HTTPException(status_code=400, detail="Midjourney 平移方向仅支持 left、right、up 或 down。")
+        body["direction"] = direction
+    if action in {"remix_subtle", "remix_strong"}:
+        prompt = str(payload.prompt or "").strip()
+        if prompt:
+            body["prompt"] = prompt
+    raw, new_task_id = await apimart_midjourney_request(provider, MIDJOURNEY_ACTION_PATHS[action], body)
+    return {"task_id": new_task_id, "status": midjourney_task_status(raw) or "queued", "provider_id": provider["id"], "action": action, "raw": raw}
+
+@app.post("/api/midjourney/modal")
+async def submit_midjourney_modal(payload: MidjourneyModalRequest):
+    provider = apimart_midjourney_provider(payload.provider_id)
+    task_id = str(payload.task_id or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,240}", task_id):
+        raise HTTPException(status_code=400, detail="Midjourney 任务 ID 不合法。")
+    speed = str(payload.speed or "relax").strip().lower()
+    if speed not in MIDJOURNEY_SPEEDS:
+        raise HTTPException(status_code=400, detail="Midjourney 速度仅支持 relax、fast 或 turbo。")
+    mask_url = await midjourney_modal_mask_url(payload.mask_image)
+    if not mask_url:
+        raise HTTPException(status_code=400, detail="Midjourney 局部重绘需要连接一个遮罩图片节点。")
+    body = {
+        "task_id": task_id,
+        "prompt": str(payload.prompt or "").strip(),
+        "mask_url": mask_url,
+        "speed": speed,
+        "metadata": {"source": "infinite-canvas"},
+    }
+    raw, submitted_task_id = await apimart_midjourney_request(provider, "/v1/midjourney/generations/modal", body)
+    return {"task_id": submitted_task_id, "status": midjourney_task_status(raw) or "submitted", "provider_id": provider["id"], "raw": raw}
+
+@app.get("/api/midjourney/tasks/{task_id}")
+async def get_midjourney_task(task_id: str, provider_id: str):
+    provider = apimart_midjourney_provider(provider_id)
+    return await midjourney_result(provider, task_id)
 
 @app.post("/api/image-task-query")
 async def query_image_task(payload: ImageTaskQueryRequest):
@@ -18451,6 +19231,9 @@ async def build_canvas_video_result(payload: CanvasVideoRequest, progress=None):
                 for ref_url in payload.videos[:3]:
                     ref_url = str(ref_url or "").strip()
                     if not ref_url:
+                        continue
+                    if looks_like_image_media_url(ref_url):
+                        invalid_videos.append((ref_url, "该地址是图片，不能作为参考视频。请将图片放入图片输入。"))
                         continue
                     normalized_video_url = await upload_video_for_apimart(client, provider, ref_url)
                     if valid_apimart_video_image_input(normalized_video_url):
@@ -20528,7 +21311,16 @@ async def chat(payload: ChatRequest, request: Request, x_user_id: str = Header(d
         model = selected_model(payload.image_model or payload.model, default_model)
         image_size = chat_prompt_size_override(payload.message, payload.size) or payload.size
         try:
-            image_data, raw = await generate_ai_image(payload.message, image_size, payload.quality, model, image_refs, provider["id"])
+            image_data, raw = await generate_ai_image(
+                payload.message,
+                image_size,
+                payload.quality,
+                model,
+                image_refs,
+                provider["id"],
+                payload.aspect_ratio,
+                payload.resolution,
+            )
             local_url = await save_ai_image_to_output(image_data, prefix="chat_")
         except httpx.HTTPStatusError as exc:
             text = exc.response.text or ""
@@ -20674,7 +21466,16 @@ async def chat_agent(payload: ChatRequest, request: Request, x_user_id: str = He
         raw_items = []
         try:
             for item_prompt in prompts:
-                image_data, raw = await generate_ai_image(item_prompt, image_size, payload.quality, model, tool_refs, image_provider["id"])
+                image_data, raw = await generate_ai_image(
+                    item_prompt,
+                    image_size,
+                    payload.quality,
+                    model,
+                    tool_refs,
+                    image_provider["id"],
+                    payload.aspect_ratio,
+                    payload.resolution,
+                )
                 local_urls.append(await save_ai_image_to_output(image_data, prefix="chat_"))
                 raw_items.append(raw)
         except httpx.HTTPStatusError as exc:
@@ -21393,7 +22194,16 @@ def generate(req: GenerateRequest):
                 if "inputs" not in workflow[node_id]:
                     workflow[node_id]["inputs"] = {}
                 for input_name, value in node_inputs.items():
+                    if value is None:
+                        workflow[node_id]["inputs"].pop(input_name, None)
+                        continue
                     workflow[node_id]["inputs"][input_name] = value
+            elif isinstance(node_inputs, dict) and node_inputs.get("class_type") and isinstance(node_inputs.get("inputs"), dict):
+                workflow[str(node_id)] = {
+                    "class_type": str(node_inputs.get("class_type")),
+                    "inputs": node_inputs.get("inputs") or {},
+                    "_meta": node_inputs.get("_meta") if isinstance(node_inputs.get("_meta"), dict) else {"title": str(node_inputs.get("class_type"))},
+                }
 
         p = {"prompt": workflow, "client_id": CLIENT_ID}
         data = json.dumps(p).encode('utf-8')
@@ -21402,7 +22212,7 @@ def generate(req: GenerateRequest):
             prompt_id = json.loads(urllib.request.urlopen(post_req, timeout=10).read())['prompt_id']
         except urllib.error.HTTPError as e:
             error_body = e.read().decode('utf-8')
-            raise Exception(f"HTTP Error {e.code}: {error_body}")
+            raise Exception(comfy_prompt_error_message(e.code, error_body))
 
         history_data = None
         for i in range(COMFYUI_HISTORY_TIMEOUT):
@@ -21862,7 +22672,11 @@ def sync_runninghub_workflow_to_provider(cfg):
         entry["enabled"] = True
     if "thumbnail" not in entry:
         entry["thumbnail"] = ""
-    save_api_providers([normalize_provider(item) for item in providers])
+    normalized_providers = [normalize_provider(item) for item in providers]
+    save_api_providers(normalized_providers)
+    runninghub_provider = next((item for item in normalized_providers if item.get("id") == "runninghub"), None)
+    if runninghub_provider:
+        sync_runninghub_provider_workflows_to_static_template(runninghub_provider)
 
 def remove_runninghub_workflow_from_provider(workflow_id: str):
     key = runninghub_workflow_store_key(workflow_id)
@@ -21895,7 +22709,11 @@ def remove_runninghub_workflow_from_provider(workflow_id: str):
             provider["rh_workflows"] = kept
             changed = True
     if changed:
-        save_api_providers([normalize_provider(item) for item in providers])
+        normalized_providers = [normalize_provider(item) for item in providers]
+        save_api_providers(normalized_providers)
+        runninghub_provider = next((item for item in normalized_providers if item.get("id") == "runninghub"), None)
+        if runninghub_provider:
+            sync_runninghub_provider_workflows_to_static_template(runninghub_provider)
 
 def runninghub_workflow_store_key(workflow_id: str) -> str:
     return str(workflow_id or "").strip()

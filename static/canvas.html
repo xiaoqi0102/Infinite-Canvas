@@ -21,7 +21,7 @@
     <script src="/static/js/theme.js?v=2026.08.05.1783301528"></script>
     <script src="/static/js/touch-mouse.js?v=2026.08.05.1783301528"></script>
     <script src="/static/js/i18n.js?v=2026.08.05.1785378445"></script>
-    <link rel="stylesheet" href="/static/css/canvas.css?v=2026.08.05.1785902655">
+    <link rel="stylesheet" href="/static/css/canvas.css?v=2026.08.13.prompt-editor">
     <link rel="stylesheet" href="/static/css/generation-log-detail.css?v=2026.08.05.1784278641">
     <link rel="stylesheet" href="/static/css/theme.css?v=2026.08.05.1783050005">
 </head>
@@ -196,6 +196,28 @@
                 <div id="promptTemplateBody" class="prompt-template-body"></div>
             </div>
         </div>
+        <div id="promptEditorModal" class="prompt-editor-modal" hidden role="dialog" aria-modal="true" aria-labelledby="promptEditorTitle">
+            <div class="prompt-editor-dialog" onclick="event.stopPropagation()">
+                <div class="prompt-editor-dialog-head">
+                    <div>
+                        <strong id="promptEditorTitle" data-i18n="canvas.promptEditorTitle">查看和修改提示词</strong>
+                        <span data-i18n="canvas.promptEditorHint">支持长文本和 @ 素材引用</span>
+                    </div>
+                    <button id="promptEditorClose" type="button" title="关闭" aria-label="关闭" data-i18n-title="common.close"><i data-lucide="x"></i></button>
+                </div>
+                <div class="prompt-editor-dialog-toolbar">
+                    <span data-i18n="canvas.promptEditorTip">在节点中双击提示词可再次打开此窗口</span>
+                    <div id="promptEditorCounter" class="prompt-counter"></div>
+                </div>
+                <div class="prompt-editor-dialog-body">
+                    <div id="promptEditorInput" class="prompt-rich-input prompt-editor-dialog-input" contenteditable="true" role="textbox" aria-multiline="true" data-placeholder="输入提示词..."></div>
+                </div>
+                <div class="prompt-editor-dialog-actions">
+                    <button id="promptEditorCancel" type="button" class="secondary" data-i18n="common.cancel">取消</button>
+                    <button id="promptEditorSave" type="button" class="primary" data-i18n="common.save">保存</button>
+                </div>
+            </div>
+        </div>
         <div id="logModal" class="log-modal" onclick="closeCanvasLog()">
             <div class="log-panel" onclick="event.stopPropagation()">
                 <div class="log-head">
@@ -358,6 +380,6 @@
     <script src="/static/js/video-api-utils.js?v=2026.08.05.1785909003"></script>
     <script src="/static/js/canvas-align-snap.js?v=2026.08.05.1785205752"></script>
     <script src="/static/js/generation-log-detail.js?v=2026.08.05.1784278641"></script>
-    <script src="/static/js/canvas.js?v=2026.08.05.1785902655"></script>
+    <script src="/static/js/canvas.js?v=2026.08.13.prompt-editor"></script>
 </body>
 </html>

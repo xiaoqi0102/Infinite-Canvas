@@ -6749,6 +6749,12 @@ function renderNode(node){
             openPromptTemplateModal(node.id);
         };
         bindPromptRichEditor(editor, body, node);
+        editor.addEventListener('dblclick', event => {
+            if(event.target.closest('.prompt-mention-token,.prompt-mention-remove')) return;
+            event.preventDefault();
+            event.stopPropagation();
+            openPromptEditorModal(node.id);
+        });
     }
     if(node.type === 'loop') body.appendChild(renderLoopBody(node));
     if(node.type === 'group') {
@@ -7003,7 +7009,7 @@ function refreshOutputNodeContent(node){
 }
 function defaultNodeSize(type){
     if(type === 'image') return {w:260, h:336};
-    if(type === 'prompt') return {w:310, h:0};
+    if(type === 'prompt') return {w:310, h:250};
     if(type === 'loop') return {w:336, h:0};
     if(type === 'llm') return {w:420, h:590};
     if(type === 'generator') return {w:380, h:0};
@@ -7607,7 +7613,7 @@ function ensurePromptMentionPicker(){
 function closeActivePromptMentionPicker(){
     activePromptMentionController?.close?.();
 }
-function bindPromptRichEditor(editor, body, node){
+function bindPromptRichEditor(editor, body, node, options={}){
     if(!editor) return;
     const picker = ensurePromptMentionPicker();
     const state = {open:false, source:'connected', query:'', triggerRange:null, activeIndex:0, libraryId:activeCanvasAssetLibraryId || '', categoryId:''};
@@ -7615,11 +7621,14 @@ function bindPromptRichEditor(editor, body, node){
     const sync = () => {
         refreshPromptMentionTokenLabels(editor);
         const parts = promptEditorParts(editor);
-        node.promptRichText = {version:1, parts};
-        node.text = promptPlainTextFromParts(parts);
-        refreshPromptCounter(body, node.text);
-        scheduleSave();
-        scheduleGeneratorInputSync();
+        if(typeof options.onChange === 'function') options.onChange(parts);
+        else {
+            node.promptRichText = {version:1, parts};
+            node.text = promptPlainTextFromParts(parts);
+            refreshPromptCounter(body, node.text);
+            scheduleSave();
+            scheduleGeneratorInputSync();
+        }
     };
     const close = () => {
         state.open = false;
@@ -7820,6 +7829,73 @@ function bindPromptRichEditor(editor, body, node){
     });
     bindCanvasPreviewImageFallbacks(editor);
 }
+let promptEditorModalNodeId = null;
+let promptEditorModalParts = [];
+function closePromptEditorModal(){
+    const modal = document.getElementById('promptEditorModal');
+    if(!modal || modal.hidden) return;
+    closeActivePromptMentionPicker();
+    hidePromptMentionPreview();
+    modal.hidden = true;
+    document.body.classList.remove('prompt-editor-open');
+    promptEditorModalNodeId = null;
+    promptEditorModalParts = [];
+}
+function openPromptEditorModal(nodeId){
+    const node = nodes.find(item => item.id === nodeId && item.type === 'prompt');
+    const modal = document.getElementById('promptEditorModal');
+    let editor = document.getElementById('promptEditorInput');
+    const counter = document.getElementById('promptEditorCounter');
+    if(!node || !modal || !editor || !counter) return;
+    closeActivePromptMentionPicker();
+    hidePromptMentionPreview();
+    const freshEditor = editor.cloneNode(false);
+    freshEditor.id = 'promptEditorInput';
+    editor.replaceWith(freshEditor);
+    editor = freshEditor;
+    promptEditorModalNodeId = node.id;
+    promptEditorModalParts = promptRichTextPartsForNode(node);
+    editor.innerHTML = promptRichTextHtml(node);
+    editor.dataset.placeholder = tr('canvas.promptPlaceholder');
+    const count = promptTextLength(promptPlainTextFromParts(promptEditorModalParts));
+    counter.className = `prompt-counter ${count > PROMPT_TEXT_MAX_LENGTH ? 'over' : ''}`;
+    counter.innerHTML = `<span>${count.toLocaleString()}</span><span>/ ${PROMPT_TEXT_MAX_LENGTH.toLocaleString()}</span>`;
+    bindPromptRichEditor(editor, modal, node, {
+        onChange(parts){
+            promptEditorModalParts = parts;
+            refreshPromptCounter(modal, promptPlainTextFromParts(parts));
+        }
+    });
+    modal.hidden = false;
+    document.body.classList.add('prompt-editor-open');
+    bindCanvasPreviewImageFallbacks(editor);
+    lucide.createIcons({attrs:{'stroke-width':1.7}});
+    requestAnimationFrame(() => editor.focus());
+}
+function savePromptEditorModal(){
+    const node = nodes.find(item => item.id === promptEditorModalNodeId && item.type === 'prompt');
+    if(!node){ closePromptEditorModal(); return; }
+    const parts = normalizedPromptRichTextParts(promptEditorModalParts);
+    node.promptRichText = {version:1, parts};
+    node.text = promptPlainTextFromParts(parts);
+    closePromptEditorModal();
+    refreshNodes([node.id]);
+    scheduleSave();
+    scheduleGeneratorInputSync();
+}
+document.getElementById('promptEditorModal')?.addEventListener('mousedown', event => {
+    if(event.target === event.currentTarget) closePromptEditorModal();
+});
+document.getElementById('promptEditorClose')?.addEventListener('click', closePromptEditorModal);
+document.getElementById('promptEditorCancel')?.addEventListener('click', closePromptEditorModal);
+document.getElementById('promptEditorSave')?.addEventListener('click', savePromptEditorModal);
+document.addEventListener('keydown', event => {
+    const modal = document.getElementById('promptEditorModal');
+    if(event.key === 'Escape' && modal && !modal.hidden){
+        event.preventDefault();
+        closePromptEditorModal();
+    }
+});
 function promptTextLength(text){
     return Array.from(String(text || '')).length;
 }

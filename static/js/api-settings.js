@@ -2958,7 +2958,8 @@ function currentProviderApiKey(item){
 function normalizeImageRequestMode(value){
     const mode = String(value || '').trim().toLowerCase();
     if(['aicost', 'aicost-images'].includes(mode)) return 'aicost-image';
-    return ['openai', 'openai-json', 'openai-video-proxy', 'openai-responses', 'aicost-image', 'tudou-async'].includes(mode) ? mode : 'openai';
+    if(['qiniu', 'qiniu-images', 'modelink', 'modelink-image'].includes(mode)) return 'qiniu-image';
+    return ['openai', 'openai-json', 'openai-video-proxy', 'openai-responses', 'aicost-image', 'qiniu-image', 'tudou-async'].includes(mode) ? mode : 'openai';
 }
 function normalizeVideoRequestMode(value){
     if(window.StudioVideoApi) return window.StudioVideoApi.normalizeVideoRequestMode(value);
@@ -3018,7 +3019,13 @@ function officialVideoRequestMode(baseUrl){
 }
 function officialImageRequestMode(baseUrl){
     if(isTudouBaseUrl(baseUrl)) return 'tudou-async';
+    if(isQiniuImageBaseUrl(baseUrl)) return 'qiniu-image';
     return isAICostBaseUrl(baseUrl) ? 'aicost-image' : '';
+}
+function isQiniuImageBaseUrl(value){
+    try {
+        return ['api.qnaigc.com', 'api.modelink.ai'].includes(new URL(String(value || '').trim()).hostname.toLowerCase());
+    } catch (_) { return false; }
 }
 function isAICostBaseUrl(value){
     if(window.StudioVideoApi) return window.StudioVideoApi.isAICostBaseUrl(value);
@@ -3062,6 +3069,7 @@ function normalizeImageEditRoute(value){
 function imageRequestModeLabel(mode){
     const normalized = normalizeImageRequestMode(mode);
     if(normalized === 'aicost-image') return tr('api.imageRequestModeAICostLabel') || 'aicost: GPT Image / Gemini';
+    if(normalized === 'qiniu-image') return tr('api.imageRequestModeQiniuLabel') || '七牛：Fal Queue 异步生图';
     if(normalized === 'openai-json') return 'OpenAI JSON';
     if(normalized === 'openai-video-proxy') return 'OpenAI 中转';
     if(normalized === 'openai-responses') return 'OpenAI RS';

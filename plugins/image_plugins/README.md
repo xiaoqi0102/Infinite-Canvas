@@ -1,7 +1,9 @@
 # 图片接口插件
 
-`plugins.image_plugins` 是 Infinite Canvas 的独立图片协议适配层。当前包含
-`aicost-image` 模式，用于隔离 aicost.xyz 与通用 OpenAI/Gemini 图片实现之间的协议差异。
+`plugins.image_plugins` 是 Infinite Canvas 的独立图片协议适配层。当前包含：
+
+- `aicost-image`：隔离 aicost.xyz 与通用 OpenAI/Gemini 图片实现之间的协议差异。
+- `qiniu-image`：适配七牛 Modelink 最新 Fal Queue 异步生图协议。
 
 ## 存在理由
 
@@ -20,6 +22,14 @@ aicost 的 GPT Image 接口同时包含同步结果和异步任务，图片编�
 - 解析 URL、base64、Gemini `inlineData` 和文本中的图片 URL。
 - 轮询 `/v1/images/generations/{task_id}`，并在异常中保留上游任务 ID。
 - 对创建请求执行“结果未知时不重试”策略，避免重复扣费。
+
+七牛插件额外负责：
+
+- 自动识别 `api.qnaigc.com` 和 `api.modelink.ai`。
+- 使用 `Authorization: Key {api_key}` 提交 Fal Queue 任务。
+- 支持 `gemini-3-pro-image-preview`、`gemini-3.1-flash-image-preview` 和 `gpt-image-2`。
+- 使用独立的 `/status` 与结果接口轮询，并解析 `result.images` / `images`。
+- 图片编辑只接收宿主预检、上传后的公网 `image_urls`；插件不读取本地参考图。
 
 ## 非职责
 
@@ -79,6 +89,7 @@ image, raw = await generate_aicost_image(
 image_plugins/
 ├── __init__.py
 ├── aicost.py
+├── qiniu.py
 ├── README.md
 └── DESIGN.md
 ```
@@ -86,3 +97,5 @@ image_plugins/
 设计取舍和安全边界见 [DESIGN.md](DESIGN.md)。
 
 协议测试位于 [tests/test_aicost_image_plugin.py](../../tests/test_aicost_image_plugin.py)。
+七牛协议测试位于 [tests/test_qiniu_image_plugin.py](../../tests/test_qiniu_image_plugin.py)，
+宿主接入测试位于 [tests/test_qiniu_image_integration.py](../../tests/test_qiniu_image_integration.py)。

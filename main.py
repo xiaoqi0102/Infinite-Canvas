@@ -48,9 +48,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from plugins.image_plugins import (
     AICOST_IMAGE_REQUEST_MODE,
     AICostImageProtocolError,
+    QINIU_IMAGE_REQUEST_MODE,
+    QiniuImageProtocolError,
     generate_aicost_image,
+    generate_qiniu_image,
     is_aicost_image_official_provider,
+    is_qiniu_image_official_provider,
     query_aicost_image_task,
+    query_qiniu_image_task,
 )
 from plugins.video_plugins import (
     AICOST_VIDEO_REQUEST_MODE,
@@ -697,6 +702,7 @@ SUPPORTED_IMAGE_REQUEST_MODES = {
     "openai-video-proxy",
     "openai-responses",
     AICOST_IMAGE_REQUEST_MODE,
+    QINIU_IMAGE_REQUEST_MODE,
     "tudou-async",
 }
 SUPPORTED_VIDEO_REQUEST_MODES = {
@@ -1612,6 +1618,8 @@ def normalize_image_request_mode(value):
     mode = str(value or "").strip().lower()
     if mode in {"aicost", "aicost-images"}:
         return AICOST_IMAGE_REQUEST_MODE
+    if mode in {"qiniu", "qiniu-images", "modelink", "modelink-image"}:
+        return QINIU_IMAGE_REQUEST_MODE
     return mode if mode in SUPPORTED_IMAGE_REQUEST_MODES else "openai"
 
 def is_sudashui_official_provider(provider) -> bool:
@@ -3347,6 +3355,7 @@ class MidjourneyModalRequest(BaseModel):
 class ImageTaskQueryRequest(BaseModel):
     provider_id: str = "comfly"
     task_id: str = Field(min_length=1, max_length=240)
+    model: str = ""
 
 CANVAS_TASKS: Dict[str, Dict[str, Any]] = {}
 CANVAS_TASK_LOCK = Lock()
@@ -5932,6 +5941,8 @@ def detect_image_request_mode(base_url="", models=None):
     base = str(base_url or "").strip().lower()
     if is_aicost_image_official_provider({"base_url": base}):
         return AICOST_IMAGE_REQUEST_MODE
+    if is_qiniu_image_official_provider({"base_url": base}):
+        return QINIU_IMAGE_REQUEST_MODE
     if "apihub.agnes-ai.com" in base:
         return "openai-json"
     for model in models or []:
@@ -12034,6 +12045,42 @@ async def preflight_canvas_video_request(
     return CanvasVideoRequest(**payload_data)
 
 
+async def prepare_qiniu_image_references(reference_images) -> List[Dict[str, Any]]:
+    """复用视频素材预检链路，把七牛参考图转换为可公网访问的 image_urls。"""
+    references = []
+    for ref in reference_images or []:
+        ref_data = ref.model_dump() if hasattr(ref, "model_dump") else dict(ref or {})
+        url = str(ref_data.get("url") or "").strip()
+        if url:
+            references.append(ref_data)
+    if len(references) > 11:
+        raise HTTPException(status_code=400, detail="七牛生图最多支持 10 张参考图和 1 张遮罩图")
+    if not references:
+        return []
+    materials = [
+        CanvasVideoMaterialPreflightItem(
+            url=str(ref.get("url") or "").strip(),
+            source_url=str(
+                ref.get("originalLocalUrl")
+                or ref.get("sourceUrl")
+                or ref.get("url")
+                or ""
+            ).strip(),
+            kind="image",
+        )
+        for ref in references
+    ]
+    prepared = await preflight_canvas_video_materials(materials, "auto")
+    result = []
+    for ref, item in zip(references, prepared):
+        next_ref = dict(ref)
+        next_ref["url"] = str(item.get("url") or "").strip()
+        if item.get("refreshed") and not next_ref.get("originalLocalUrl"):
+            next_ref["originalLocalUrl"] = str(item.get("source") or "").strip()
+        result.append(next_ref)
+    return result
+
+
 IMAGE_FORMAT_EXTENSIONS = {
     "PNG": ".png",
     "JPEG": ".jpg",
@@ -14045,6 +14092,26 @@ async def generate_ai_image(
     if is_gemini_cli_provider(provider):
         return await generate_gemini_cli_provider_image(prompt, size, model, reference_images, provider)
     image_request_mode = effective_image_request_mode(provider, model)
+    if image_request_mode == QINIU_IMAGE_REQUEST_MODE:
+        try:
+            prepared_references = await prepare_qiniu_image_references(reference_images or [])
+            return await generate_qiniu_image(
+                {
+                    "prompt": prompt,
+                    "size": size,
+                    "quality": quality,
+                    "model": model,
+                    "reference_images": prepared_references,
+                },
+                base_url=provider.get("base_url") or "https://api.qnaigc.com",
+                headers=api_headers(provider=provider, model=model),
+                request_timeout=httpx.Timeout(connect=20.0, read=300.0, write=120.0, pool=20.0),
+                poll_timeout=3600.0,
+                poll_interval=2.0,
+                progress=progress,
+            )
+        except QiniuImageProtocolError as exc:
+            raise aicost_image_http_exception(exc) from exc
     if image_request_mode == AICOST_IMAGE_REQUEST_MODE:
         try:
             return await generate_aicost_image(
@@ -17555,6 +17622,19 @@ async def get_midjourney_task(task_id: str, provider_id: str):
 async def query_image_task(payload: ImageTaskQueryRequest):
     provider = get_api_provider(payload.provider_id)
     task_id = str(payload.task_id or "").strip()
+    query_model = str(payload.model or "").strip()
+    if not query_model:
+        with CANVAS_TASK_LOCK:
+            for canvas_task in CANVAS_TASKS.values():
+                if not isinstance(canvas_task, dict):
+                    continue
+                if (
+                    str(canvas_task.get("provider_id") or "").strip() == str(payload.provider_id or "").strip()
+                    and canvas_image_upstream_task_id(canvas_task) == task_id
+                ):
+                    query_model = str(canvas_task.get("model") or "").strip()
+                    if query_model:
+                        break
     if provider.get("id") == "modelscope":
         token = modelscope_api_key()
         if not token:
@@ -17638,7 +17718,18 @@ async def query_image_task(payload: ImageTaskQueryRequest):
     timeout = httpx.Timeout(connect=20.0, read=300.0, write=60.0, pool=20.0)
     if provider.get("id") == "modelscope":
         pass
-    elif effective_image_request_mode(provider) == AICOST_IMAGE_REQUEST_MODE:
+    elif effective_image_request_mode(provider, query_model) == QINIU_IMAGE_REQUEST_MODE:
+        try:
+            raw = await query_qiniu_image_task(
+                task_id,
+                model=query_model,
+                base_url=provider.get("base_url") or "https://api.qnaigc.com",
+                headers=api_headers(provider=provider, model=query_model),
+                request_timeout=timeout,
+            )
+        except QiniuImageProtocolError as exc:
+            raise aicost_image_http_exception(exc) from exc
+    elif effective_image_request_mode(provider, query_model) == AICOST_IMAGE_REQUEST_MODE:
         try:
             raw = await query_aicost_image_task(
                 task_id,
@@ -17764,7 +17855,11 @@ async def resume_canvas_image_task_result(task_id: str):
             asyncio.run_coroutine_threadsafe(manager.broadcast_new_image(result), GLOBAL_LOOP)
         result.pop("raw", None)
         return result
-    queried = await query_image_task(ImageTaskQueryRequest(provider_id=provider_id, task_id=upstream_task_id))
+    queried = await query_image_task(ImageTaskQueryRequest(
+        provider_id=provider_id,
+        task_id=upstream_task_id,
+        model=str(task.get("model") or ""),
+    ))
     status = str(queried.get("status") or "").lower()
     if status == "succeeded":
         result = dict(queried)

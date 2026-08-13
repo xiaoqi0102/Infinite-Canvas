@@ -25,6 +25,8 @@
         "api.imageRequestModeTitle": { zh: "图片接口", en: "Image Endpoint" },
         "api.imageRequestModeAICost": { zh: "aicost：GPT Image / Gemini", en: "aicost: GPT Image / Gemini" },
         "api.imageRequestModeAICostLabel": { zh: "aicost：GPT Image / Gemini", en: "aicost: GPT Image / Gemini" },
+        "api.imageRequestModeQiniu": { zh: "七牛：Fal Queue 异步生图", en: "Qiniu: Fal Queue Async Images" },
+        "api.imageRequestModeQiniuLabel": { zh: "七牛：Fal Queue 异步生图", en: "Qiniu: Fal Queue Async Images" },
         "api.videoRequestModeTitle": { zh: "视频接口", en: "Video Endpoint" },
         "api.videoRequestModeVideos": { zh: "视频：videos", en: "Video: videos" },
         "api.videoRequestModeVideo": { zh: "视频：video", en: "Video: video" },

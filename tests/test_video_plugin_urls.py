@@ -424,16 +424,83 @@ class VideoDownloadUrlTests(unittest.IsolatedAsyncioTestCase):
             {
                 "model": "seedance2.0-fast",
                 "prompt": "test",
-                "duration": 5,
+                "seconds": 5,
                 "aspect_ratio": "9:16",
                 "resolution": "720p",
-                "image_urls": ["https://cdn.example.com/reference.png"],
-                "images_base64": [image_data],
-                "audio_urls": ["https://cdn.example.com/reference.mp3"],
-                "audios_base64": [audio_data],
-                "video_urls": ["https://cdn.example.com/reference.mp4"],
+                "images": ["https://cdn.example.com/reference.png", image_data],
+                "audios": ["https://cdn.example.com/reference.mp3", audio_data],
+                "videos": ["https://cdn.example.com/reference.mp4"],
             },
         )
+
+    async def test_aicost_seedance25_and_minimax_h3_fields(self):
+        client = _RecordingClient()
+        await aicost.generate_aicost_video(
+            client,
+            {
+                "model": "seedance2.5-720p", "prompt": "test", "seconds": 30,
+                "images": ["https://cdn.example.com/1.jpg"],
+                "audios": ["https://cdn.example.com/a.mp3"],
+                "videos": ["https://cdn.example.com/v.mp4"],
+            },
+            base_url="https://www.aicost.me", headers={}, progress=None,
+            resolve_local_path=self._local_path, content_type_for_path=self._content_type,
+            public_reference_url=self._public_url, save_video=self._save_video,
+            poll_timeout=1, poll_interval=0,
+        )
+        body = client.post_requests[0][1]["json"]
+        self.assertEqual(body["model"], "seedance2.5-720p")
+        self.assertEqual(body["seconds"], 30)
+        self.assertEqual(body["images"], ["https://cdn.example.com/1.jpg"])
+
+        client = _RecordingClient()
+        await aicost.generate_aicost_video(
+            client,
+            {
+                "model": "minimax-h3", "prompt": "test", "seconds": 8,
+                "reference_images": ["https://cdn.example.com/1.jpg"],
+                "audio_reference": ["https://cdn.example.com/a.mp3"], "audio": True,
+            },
+            base_url="https://www.aicost.me", headers={}, progress=None,
+            resolve_local_path=self._local_path, content_type_for_path=self._content_type,
+            public_reference_url=self._public_url, save_video=self._save_video,
+            poll_timeout=1, poll_interval=0,
+        )
+        body = client.post_requests[0][1]["json"]
+        self.assertEqual(body["model"], "minimax-h3")
+        self.assertEqual(body["reference_images"], ["https://cdn.example.com/1.jpg"])
+        self.assertEqual(body["audio_reference"], ["https://cdn.example.com/a.mp3"])
+        self.assertTrue(body["audio"])
+
+    async def test_aicost_minimax_h3_maps_frame_roles(self):
+        client = _RecordingClient()
+        await aicost.generate_aicost_video(
+            client,
+            {
+                "model": "minimax-h3",
+                "prompt": "transition",
+                "duration": 8,
+                "images": [
+                    {"url": "https://cdn.example.com/start.jpg", "role": "first_frame"},
+                    {"url": "https://cdn.example.com/end.jpg", "role": "last_frame"},
+                ],
+                "generate_audio": True,
+            },
+            base_url="https://www.aicost.me",
+            headers={},
+            progress=None,
+            resolve_local_path=self._local_path,
+            content_type_for_path=self._content_type,
+            public_reference_url=self._public_url,
+            save_video=self._save_video,
+            poll_timeout=1,
+            poll_interval=0,
+        )
+        body = client.post_requests[0][1]["json"]
+        self.assertEqual(body["start_frame"], "https://cdn.example.com/start.jpg")
+        self.assertEqual(body["end_frame"], "https://cdn.example.com/end.jpg")
+        self.assertNotIn("reference_images", body)
+        self.assertTrue(body["audio"])
 
     async def test_aicost_saves_only_first_video_url_alias(self):
         saved = []

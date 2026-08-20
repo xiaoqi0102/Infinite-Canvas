@@ -1,4 +1,4 @@
-"""aicost.xyz 图片模型协议适配。
+"""aicost.me 图片模型协议适配。
 
 本模块封装 GPT Image 与 Gemini 图片接口。宿主负责提供本地素材路径解析，
 插件负责请求构造、直连上游、响应归一化与异步任务轮询。
@@ -19,7 +19,12 @@ import httpx
 
 
 AICOST_IMAGE_REQUEST_MODE = "aicost-image"
-AICOST_IMAGE_OFFICIAL_HOSTNAMES = {"aicost.xyz", "www.aicost.xyz"}
+AICOST_IMAGE_OFFICIAL_HOSTNAMES = {
+    "aicost.me",
+    "www.aicost.me",
+    "aicost.xyz",
+    "www.aicost.xyz",
+}
 
 _GPT_IMAGE_MODELS = {"gpt-image-2"}
 _GEMINI_IMAGE_MODELS = {

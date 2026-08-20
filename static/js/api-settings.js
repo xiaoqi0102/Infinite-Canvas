@@ -3029,7 +3029,7 @@ function isQiniuImageBaseUrl(value){
 }
 function isAICostBaseUrl(value){
     if(window.StudioVideoApi) return window.StudioVideoApi.isAICostBaseUrl(value);
-    const officialHostnames = new Set(['aicost.xyz', 'www.aicost.xyz']);
+    const officialHostnames = new Set(['aicost.me', 'www.aicost.me', 'aicost.xyz', 'www.aicost.xyz']);
     const text = String(value || '').trim();
     try { return officialHostnames.has(new URL(text).hostname.toLowerCase()); }
     catch (_) {}
@@ -3068,8 +3068,8 @@ function normalizeImageEditRoute(value){
 }
 function imageRequestModeLabel(mode){
     const normalized = normalizeImageRequestMode(mode);
-    if(normalized === 'aicost-image') return tr('api.imageRequestModeAICostLabel') || 'aicost: GPT Image / Gemini';
-    if(normalized === 'qiniu-image') return tr('api.imageRequestModeQiniuLabel') || '七牛：Fal Queue 异步生图';
+    if(normalized === 'aicost-image') return tr('api.imageRequestModeAICostLabel') || '图片：aicost GPT Image / Gemini';
+    if(normalized === 'qiniu-image') return tr('api.imageRequestModeQiniuLabel') || '图片：七牛 Fal Queue 异步生图';
     if(normalized === 'openai-json') return 'OpenAI JSON';
     if(normalized === 'openai-video-proxy') return 'OpenAI 中转';
     if(normalized === 'openai-responses') return 'OpenAI RS';

@@ -1,4 +1,4 @@
-"""aicost.xyz 视频模型协议适配。
+"""aicost.me 视频模型协议适配。
 
 本模块封装 aicost 的 Seedance、Grok 1.5 Preview 与通用视频协议。
 宿主只负责提供素材路径解析、进度持久化和视频落盘回调。
@@ -31,7 +31,7 @@ from .common import (
 
 
 AICOST_VIDEO_REQUEST_MODE = "aicost-video"
-AICOST_OFFICIAL_HOSTNAMES = {"aicost.xyz", "www.aicost.xyz"}
+AICOST_OFFICIAL_HOSTNAMES = {"aicost.me", "www.aicost.me", "aicost.xyz", "www.aicost.xyz"}
 
 _GROK_SIZE_BY_RATIO = {
     "16:9": "1280x720",
@@ -95,6 +95,8 @@ def _model_family(model: Any) -> str:
     value = str(model or "").strip().lower()
     if "grok" in value:
         return "grok"
+    if value.startswith("minimax-h3") or value.startswith("hailuo-03"):
+        return "minimax-h3"
     if "seedance" in value:
         return "seedance"
     return "generic"
@@ -105,11 +107,36 @@ def _request_images(request: Mapping[str, Any]) -> List[Dict[str, Any]]:
     for item in request.get("images") or []:
         if isinstance(item, Mapping) and str(item.get("url") or "").strip():
             result.append(dict(item))
+        elif isinstance(item, str) and item.strip():
+            result.append({"url": item.strip()})
     return result
 
 
 def _string_list(values: Any) -> List[str]:
+    if isinstance(values, str):
+        return [values.strip()] if values.strip() else []
     return [str(value).strip() for value in (values or []) if str(value or "").strip()]
+
+
+def _request_media_values(request: Mapping[str, Any], plural: str, singular: str) -> List[str]:
+    values = _string_list(request.get(plural))
+    value = str(request.get(singular) or "").strip()
+    if value:
+        values.insert(0, value)
+    return list(dict.fromkeys(values))
+
+
+def _request_seconds(request: Mapping[str, Any], model: str, minimum: int, maximum: int) -> int:
+    raw = request.get("seconds")
+    if raw in (None, ""):
+        raw = request.get("duration")
+    try:
+        seconds = int(raw)
+    except Exception as exc:
+        raise AICostProtocolError(400, f"{model} 视频时长无效") from exc
+    if seconds < minimum or seconds > maximum:
+        raise AICostProtocolError(400, f"{model} 视频时长仅支持 {minimum}-{maximum} 秒")
+    return seconds
 
 
 def _duration(value: Any, allowed: Sequence[int], model: str) -> int:
@@ -233,19 +260,20 @@ async def _build_seedance_submission(
     public_reference_url: PublicReferenceUrl,
 ) -> _Submission:
     images = _request_images(request)
-    videos = _string_list(request.get("videos"))
-    audios = _string_list(request.get("audios"))
-    duration = _duration(request.get("duration"), tuple(range(4, 16)), model)
-    resolution = str(request.get("resolution") or "720p").strip().lower()
-    max_images = 9
-    max_audios = 3
-    max_videos = 3
+    videos = _request_media_values(request, "videos", "video")
+    audios = _request_media_values(request, "audios", "audio")
+    is_seedance_25 = model.lower().startswith("seedance2.5")
+    seconds = _request_seconds(request, model, 1 if is_seedance_25 else 4, 30 if is_seedance_25 else 15)
+    resolution = str(request.get("resolution") or "720p").strip()
+    max_images = 30 if is_seedance_25 else 9
+    max_audios = 10 if is_seedance_25 else 3
+    max_videos = 10 if is_seedance_25 else 3
     if len(images) > max_images or len(audios) > max_audios or len(videos) > max_videos:
         raise AICostProtocolError(400, f"{model} 素材数量超限：最多 {max_images} 张图片、{max_audios} 个音频、{max_videos} 个视频")
     body: Dict[str, Any] = {
         "model": model,
         "prompt": str(request.get("prompt") or ""),
-        "duration": duration,
+        "seconds": seconds,
         "aspect_ratio": str(request.get("aspect_ratio") or "16:9").strip() or "16:9",
         "resolution": resolution,
     }
@@ -266,19 +294,94 @@ async def _build_seedance_submission(
             audio_data.append(await _media_data_url(client, source, "音频", resolve_local_path, content_type_for_path))
     video_urls: List[str] = []
     for source in videos:
+        if source.startswith("data:"):
+            video_urls.append(await _media_data_url(client, source, "视频", resolve_local_path, content_type_for_path))
+            continue
         value = source if _is_public_url(source) else str(await public_reference_url(source) or "").strip()
         if not _is_public_url(value):
             raise AICostProtocolError(400, "Seedance 参考视频必须能转换为公网 HTTP/HTTPS URL")
         video_urls.append(value)
-    for key, values in (
-        ("image_urls", image_urls),
-        ("images_base64", image_data),
-        ("audio_urls", audio_urls),
-        ("audios_base64", audio_data),
-        ("video_urls", video_urls),
-    ):
+    for key, values in (("images", image_urls + image_data), ("audios", audio_urls + audio_data), ("videos", video_urls)):
         if values:
             body[key] = values
+    return _Submission("/v1/videos", body)
+
+
+async def _public_or_data_media(
+    client: httpx.AsyncClient,
+    value: str,
+    kind: str,
+    resolve_local_path: ResolveLocalPath,
+    content_type_for_path: ContentTypeForPath,
+) -> str:
+    source = str(value or "").strip()
+    return source if _is_public_url(source) else await _media_data_url(
+        client, source, kind, resolve_local_path, content_type_for_path
+    )
+
+
+async def _build_minimax_h3_submission(
+    client: httpx.AsyncClient,
+    request: Mapping[str, Any],
+    model: str,
+    resolve_local_path: ResolveLocalPath,
+    content_type_for_path: ContentTypeForPath,
+) -> _Submission:
+    images = _request_images(request)
+    reference_values = _string_list(request.get("reference_images"))
+    role_start_frame = ""
+    role_end_frame = ""
+    for item in images:
+        source = str(item.get("url") or "").strip()
+        role = str(item.get("role") or "").strip().lower()
+        if role in {"first_frame", "start_frame"} and not role_start_frame:
+            role_start_frame = source
+        elif role in {"last_frame", "end_frame"} and not role_end_frame:
+            role_end_frame = source
+        else:
+            reference_values.append(source)
+    reference_values = list(dict.fromkeys(value for value in reference_values if value))
+    start_frame = str(request.get("start_frame") or role_start_frame).strip()
+    end_frame = str(request.get("end_frame") or role_end_frame).strip()
+    audio_values = _string_list(request.get("audio_reference") or request.get("audio_references"))
+    if request.get("audio") is not True:
+        audio_values.extend(_request_media_values(request, "audios", "audio"))
+    audio_values = list(dict.fromkeys(audio_values))
+    if request.get("videos") or request.get("video"):
+        raise AICostProtocolError(400, f"{model} 不支持参考视频")
+    if reference_values and (start_frame or end_frame):
+        raise AICostProtocolError(400, f"{model} 普通参考图不能与首尾帧同时使用")
+    if audio_values and not reference_values:
+        raise AICostProtocolError(400, f"{model} 音频参考必须搭配普通参考图")
+    if len(reference_values) > 5 or len(audio_values) > 3:
+        raise AICostProtocolError(400, f"{model} 素材数量超限：最多 5 张参考图、3 个音频")
+    body: Dict[str, Any] = {
+        "model": model,
+        "prompt": str(request.get("prompt") or ""),
+        "seconds": _request_seconds(request, model, 5, 15),
+        "aspect_ratio": str(request.get("aspect_ratio") or "16:9").strip() or "16:9",
+        "resolution": str(request.get("resolution") or "1440P").strip() or "1440P",
+    }
+    for key in ("size",):
+        value = str(request.get(key) or "").strip()
+        if value:
+            body[key] = value
+    if reference_values:
+        body["reference_images"] = [
+            await _public_or_data_media(client, value, "图片", resolve_local_path, content_type_for_path)
+            for value in reference_values
+        ]
+    if audio_values:
+        body["audio_reference"] = [
+            await _public_or_data_media(client, value, "音频", resolve_local_path, content_type_for_path)
+            for value in audio_values
+        ]
+    if start_frame:
+        body["start_frame"] = await _public_or_data_media(client, start_frame, "图片", resolve_local_path, content_type_for_path)
+    if end_frame:
+        body["end_frame"] = await _public_or_data_media(client, end_frame, "图片", resolve_local_path, content_type_for_path)
+    if request.get("audio") is True or request.get("generate_audio") is True:
+        body["audio"] = True
     return _Submission("/v1/videos", body)
 
 
@@ -325,6 +428,8 @@ async def _build_submission(
     family = _model_family(model)
     if family == "grok":
         return model, await _build_grok_submission(client, request, model, resolve_local_path, content_type_for_path)
+    if family == "minimax-h3":
+        return model, await _build_minimax_h3_submission(client, request, model, resolve_local_path, content_type_for_path)
     return model, await _build_seedance_submission(client, request, model, resolve_local_path, content_type_for_path, public_reference_url)
 
 

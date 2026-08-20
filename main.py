@@ -3321,6 +3321,8 @@ class OnlineImageRequest(BaseModel):
     provider_id: str = "comfly"
     model: str = ""
     size: str = "1024x1024"
+    aspect_ratio: str = ""
+    resolution: str = ""
     quality: str = "auto"
     n: int = 1
     reference_images: List[AIReference] = []
@@ -14079,10 +14081,14 @@ async def generate_ai_image(
     model,
     reference_images=None,
     provider_id="comfly",
+    aspect_ratio="",
+    resolution="",
     progress=None,
     request_attempts=None,
 ):
     provider = get_api_provider(provider_id)
+    if is_tudou_provider(provider):
+        model = tudou_image_model_for_request(model)
     if provider["id"] == "modelscope":
         return await generate_modelscope_provider_image(
             prompt, size, model, reference_images, provider, progress, request_attempts
@@ -17276,6 +17282,8 @@ async def build_online_image_result(payload: OnlineImageRequest, progress=None):
             model,
             image_refs,
             provider["id"],
+            payload.aspect_ratio,
+            payload.resolution,
             progress,
             request_attempts,
         )

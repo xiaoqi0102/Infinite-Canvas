@@ -130,6 +130,16 @@ class AICostImageUrlTests(AICostImageTestCase):
             )
         )
         self.assertTrue(
+            is_aicost_image_official_provider(
+                {"base_url": "https://www.aicost.me/v1"}
+            )
+        )
+        self.assertTrue(
+            is_aicost_image_official_provider(
+                {"base_url": "https://aicost.me"}
+            )
+        )
+        self.assertTrue(
             is_aicost_image_official_provider({"base_url": "https://aicost.xyz"})
         )
         self.assertFalse(
@@ -157,6 +167,21 @@ class AICostImageUrlTests(AICostImageTestCase):
                     base_url=base_url,
                 )
                 self.assertEqual(client.calls[0]["url"], expected)
+
+    async def test_generation_uses_aicost_me_base_url(self):
+        base_url = "https://www.aicost.me/v1"
+        endpoint = f"{base_url}/images/generations"
+        client = _RecordingClient(
+            [_response("POST", endpoint, 200, {"data": [{"b64_json": PNG_BASE64}]})]
+        )
+
+        await self._generate(
+            {"model": "gpt-image-2", "prompt": "测试新域名", "size": "1024x1024"},
+            client,
+            base_url=base_url,
+        )
+
+        self.assertEqual(client.calls[0]["url"], endpoint)
 
     async def test_query_url_quotes_task_id_as_one_path_segment(self):
         expected = "https://www.aicost.xyz/v1/images/generations/task%2Fid"

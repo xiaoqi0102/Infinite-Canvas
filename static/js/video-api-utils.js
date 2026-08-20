@@ -21,7 +21,7 @@
     const MEGABYAI_OFFICIAL_HOSTNAME_SET = new Set(MEGABYAI_OFFICIAL_HOSTNAMES);
     const MEAI_OFFICIAL_HOSTNAMES = Object.freeze(['api.meai.cloud']);
     const MEAI_OFFICIAL_HOSTNAME_SET = new Set(MEAI_OFFICIAL_HOSTNAMES);
-    const AICOST_OFFICIAL_HOSTNAME_SET = new Set(['aicost.xyz', 'www.aicost.xyz']);
+    const AICOST_OFFICIAL_HOSTNAME_SET = new Set(['aicost.me', 'www.aicost.me', 'aicost.xyz', 'www.aicost.xyz']);
     const GEEKNOW_OFFICIAL_HOSTNAMES = Object.freeze(['geeknow.ai', 'api.geeknow.ai']);
     const GEEKNOW_OFFICIAL_HOSTNAME_SET = new Set(GEEKNOW_OFFICIAL_HOSTNAMES);
     const RESOLUTION_TOKEN_RE = /(?:^|[^a-z0-9])(480p|720p|1080p|2160p|1k|2k|4k|8k)(?=$|[^a-z0-9])/gi;
@@ -245,6 +245,24 @@
 
     function aicostModelProfile(model){
         const value = String(model || '').trim().toLowerCase();
+        if(value.startsWith('minimax-h3') || value.startsWith('hailuo-03')){
+            return {
+                durations:null, minDuration:5, maxDuration:15, defaultDuration:8,
+                aspectRatios:['21:9', '16:9', '4:3', '1:1', '3:4', '9:16'], defaultAspectRatio:'16:9',
+                resolutions:['1440P'], defaultResolution:'1440P',
+                maxImageReferences:5, maxVideoReferences:0, maxAudioReferences:3,
+                supportsVideoReferences:false, supportsAudioReferences:true, supportsFrameRoles:true,
+            };
+        }
+        if(value.startsWith('seedance2.5')){
+            return {
+                durations:null, minDuration:1, maxDuration:30, defaultDuration:6,
+                aspectRatios:['16:9', '9:16', '1:1'], defaultAspectRatio:'16:9',
+                resolutions:['480p', '720p', '1080p', '1k', '2k'], defaultResolution:'720p',
+                maxImageReferences:30, maxVideoReferences:10, maxAudioReferences:10,
+                supportsVideoReferences:true, supportsAudioReferences:true, supportsFrameRoles:false,
+            };
+        }
         if(value.includes('grok')){
             const fixedResolution = value.includes('1080p') ? '1080p' : value.includes('480p') ? '480p' : '';
             return {
@@ -332,8 +350,8 @@
             isMeAi: meai,
             isGeekNow: geeknow,
             isAICost: aicost,
-            submitPath: pluginProfile.submitPath || ((megabyai || meai || geeknow) ? '/v1/videos' : mode === MODES.VIDEOS ? '/v1/videos/generations' : '/v1/video/generations'),
-            taskPathPrefix: pluginProfile.taskPathPrefix || ((megabyai || meai || geeknow) ? '/v1/videos/' : mode === MODES.VIDEOS ? '/v1/videos/generations/' : '/v1/video/generations/'),
+            submitPath: pluginProfile.submitPath || ((megabyai || meai || geeknow || aicost) ? '/v1/videos' : mode === MODES.VIDEOS ? '/v1/videos/generations' : '/v1/video/generations'),
+            taskPathPrefix: pluginProfile.taskPathPrefix || ((megabyai || meai || geeknow || aicost) ? '/v1/videos/' : mode === MODES.VIDEOS ? '/v1/videos/generations/' : '/v1/video/generations/'),
             durations: sudashui ? SUDASHUI_DURATIONS : megabyai ? MEGABYAI_DURATIONS : (pluginProfile.durations || null),
             minDuration: (sudashui || megabyai) ? 4 : (pluginProfile.minDuration ?? null),
             maxDuration: (sudashui || megabyai) ? 15 : (pluginProfile.maxDuration ?? null),

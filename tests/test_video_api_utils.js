@@ -39,4 +39,31 @@ assert.deepEqual(meaiProfile.resolutions, ['720p', '1080p']);
 assert.equal(meaiProfile.supportsFrameRoles, true);
 assert.equal(meaiProfile.supportsAdvancedOptions, false);
 
+const aicostSeedance25 = api.videoProtocolProfile(
+    {base_url:'https://www.aicost.me'},
+    'seedance2.5-720p',
+    '',
+);
+assert.equal(aicostSeedance25.mode, api.MODES.AICOST);
+assert.equal(aicostSeedance25.submitPath, '/v1/videos');
+assert.equal(aicostSeedance25.taskPathPrefix, '/v1/videos/');
+assert.equal(aicostSeedance25.minDuration, 1);
+assert.equal(aicostSeedance25.maxDuration, 30);
+assert.equal(aicostSeedance25.maxImageReferences, 30);
+assert.equal(aicostSeedance25.maxVideoReferences, 10);
+assert.equal(aicostSeedance25.maxAudioReferences, 10);
+
+const aicostH3 = api.videoProtocolProfile(
+    {video_request_mode:api.MODES.AICOST},
+    'minimax-h3',
+    '',
+);
+assert.deepEqual(aicostH3.aspectRatios, ['21:9', '16:9', '4:3', '1:1', '3:4', '9:16']);
+assert.deepEqual(aicostH3.resolutions, ['1440P']);
+assert.equal(aicostH3.supportsFrameRoles, true);
+assert.deepEqual(
+    api.videoProtocolReferenceIssue(aicostH3, {video:1}),
+    {code:'unsupported', kind:'video', count:0},
+);
+
 console.log('video api utils ok');

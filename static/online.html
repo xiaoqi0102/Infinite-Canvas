@@ -16,14 +16,14 @@
             } catch(e) {}
         })();
     </script>
-    <script src="/static/vendor/js/tailwindcss-cdn.js?v=2026.08.05.1783050005"></script>
-    <script src="/static/vendor/js/lucide.js?v=2026.08.05.1783050005"></script>
-    <script src="/static/js/theme.js?v=2026.08.05.1783301528"></script>
-    <script src="/static/js/i18n.js?v=2026.08.05.1785378445"></script>
-    <script src="/static/js/image-preview.js?v=2026.08.05.1783050005"></script>
-    <script src="/static/js/history-bulk-manager.js?v=2026.08.05.1783050005"></script>
+    <script src="/static/vendor/js/tailwindcss-cdn.js?v=2026.08.20.1783050005"></script>
+    <script src="/static/vendor/js/lucide.js?v=2026.08.20.1783050005"></script>
+    <script src="/static/js/theme.js?v=2026.08.20.1783301528"></script>
+    <script src="/static/js/i18n.js?v=2026.08.20.1787197956"></script>
+    <script src="/static/js/image-preview.js?v=2026.08.20.1783050005"></script>
+    <script src="/static/js/history-bulk-manager.js?v=2026.08.20.1783050005"></script>
     <style>
-        @import url('/static/vendor/css/fonts.css?v=2026.08.05.1783050005');
+        @import url('/static/vendor/css/fonts.css?v=2026.08.20.1783050005');
         :root { --accent:#111827; --bg:#f9fafb; --card:#fff; --easing:cubic-bezier(0.4,0,0.2,1); }
         body { background:var(--bg); font-family:'Inter',-apple-system,sans-serif; color:var(--accent); -webkit-font-smoothing:antialiased; }
         .container-box { max-width:1280px; margin:0 auto; padding:0 40px; margin-top:50px; }
@@ -63,7 +63,7 @@
         .gallery-lightbox { background:rgba(255,255,255,.99); backdrop-filter:blur(22px) saturate(1.05); }
         @keyframes fadeIn { from{opacity:0} to{opacity:1} }
     </style>
-    <link rel="stylesheet" href="/static/css/theme.css?v=2026.08.05.1783050005">
+    <link rel="stylesheet" href="/static/css/theme.css?v=2026.08.20.1783050005">
     <style>
         html:not(.studio-theme-dark) body:not(.studio-theme-dark) #lightbox.gallery-lightbox {
             background: rgba(255,255,255,.99) !important;
@@ -271,7 +271,7 @@
             square: [
                 ['1024x1024', '1k'],
                 ['2048x2048', '2k'],
-                ['3840x2160', '4k']
+                ['2880x2880', '4k']
             ],
             portrait: [
                 ['1024x1536', '1k'],
@@ -622,7 +622,15 @@
             const btn = document.getElementById('genBtn'), loader = document.getElementById('loader'), placeholder = document.getElementById('placeholder'), out = document.getElementById('outputImg'), dl = document.getElementById('downloadBtn');
             btn.disabled = true; placeholder.classList.add('hidden'); out.classList.add('hidden'); dl.classList.add('hidden'); loader.classList.remove('hidden');
             try {
-                const reqBody = { prompt, provider_id:provider, model:selectedModel, size:currentSize(), n:outputCount, reference_images:Object.values(refs).filter(Boolean) };
+                const reqBody = {
+                    prompt,
+                    provider_id:provider,
+                    model:selectedModel,
+                    size:currentSize(),
+                    resolution:['1k','2k','4k'].includes(resolution) ? resolution : '',
+                    n:outputCount,
+                    reference_images:Object.values(refs).filter(Boolean)
+                };
                 if(QUALITY_PROTOCOLS.has(providerProtocol(provider))) reqBody.quality = quality;
                 const result = await fetch('/api/online-image', {
                     method:'POST', headers:{'Content-Type':'application/json'},

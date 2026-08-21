@@ -132,6 +132,31 @@ class QiniuImagePayloadTests(QiniuImageTestCase):
             "num_images": 1,
         })
 
+    async def test_gpt_two_k_and_four_k_use_explicit_dimensions(self):
+        for size, expected in (
+            ("2048x2048", {"width": 2048, "height": 2048}),
+            ("3840x2160", {"width": 3840, "height": 2160}),
+            ("4096x4096", {"width": 2880, "height": 2880}),
+        ):
+            submit = "https://api.qnaigc.com/queue/openai/gpt-image-2"
+            status = f"{submit}/requests/gpt-size/status"
+            client = _RecordingClient([
+                _response("POST", submit, 200, {"status": "IN_QUEUE", "request_id": "gpt-size"}),
+                _response(
+                    "GET",
+                    status,
+                    200,
+                    {"status": "COMPLETED", "result": {"images": [{"url": "https://cdn.example.com/gpt.png"}]}},
+                ),
+            ])
+
+            with self.subTest(size=size):
+                await self._generate(
+                    {"model": "gpt-image-2", "prompt": "海报", "size": size},
+                    client,
+                )
+                self.assertEqual(client.calls[0]["json"]["image_size"], expected)
+
     async def test_gemini_generation_maps_size_to_ratio_and_resolution(self):
         submit = "https://api.qnaigc.com/queue/fal-ai/gemini-3-pro-image-preview"
         status = f"{submit}/requests/gemini-1/status"
@@ -172,6 +197,31 @@ class QiniuImagePayloadTests(QiniuImageTestCase):
 
         await self._generate(
             {"model": "gemini-3.1-flash-image-preview", "prompt": "4K", "size": "3840x2160"},
+            client,
+        )
+
+        self.assertEqual(client.calls[0]["json"]["resolution"], "4K")
+
+    async def test_gemini_explicit_resolution_overrides_size_heuristic(self):
+        submit = "https://api.qnaigc.com/queue/fal-ai/gemini-3-pro-image-preview"
+        status = f"{submit}/requests/gemini-explicit/status"
+        client = _RecordingClient([
+            _response("POST", submit, 200, {"status": "IN_QUEUE", "request_id": "gemini-explicit"}),
+            _response(
+                "GET",
+                status,
+                200,
+                {"status": "COMPLETED", "result": {"images": [{"url": "https://cdn.example.com/explicit.png"}]}},
+            ),
+        ])
+
+        await self._generate(
+            {
+                "model": "gemini-3-pro-image-preview",
+                "prompt": "显式 4K",
+                "size": "1024x1024",
+                "resolution": "4k",
+            },
             client,
         )
 

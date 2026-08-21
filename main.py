@@ -14109,6 +14109,8 @@ async def generate_ai_image(
                 {
                     "prompt": prompt,
                     "size": size,
+                    "aspect_ratio": aspect_ratio,
+                    "resolution": resolution,
                     "quality": quality,
                     "model": model,
                     "reference_images": prepared_references,

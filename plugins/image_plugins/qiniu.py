@@ -10,7 +10,6 @@ import asyncio
 import re
 import time
 import urllib.parse
-from fractions import Fraction
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import httpx
@@ -152,17 +151,23 @@ def _gemini_resolution(request: Mapping[str, Any], width: int, height: int, mode
 
 
 def _gpt_image_size(width: int, height: int) -> Any:
-    ratio = Fraction(width, height).limit_denominator(32)
+    # Fal presets are fixed pixel sizes, not scalable aspect-ratio aliases.
     presets = {
-        (1, 1): "square",
-        (3, 4): "portrait_4_3",
-        (9, 16): "portrait_16_9",
-        (4, 3): "landscape_4_3",
-        (16, 9): "landscape_16_9",
+        (1024, 1024): "square",
+        (768, 1024): "portrait_4_3",
+        (864, 1536): "portrait_16_9",
+        (1024, 768): "landscape_4_3",
+        (1536, 864): "landscape_16_9",
     }
-    preset = presets.get((ratio.numerator, ratio.denominator))
+    preset = presets.get((width, height))
     if preset:
         return preset
+    # The shared canvas still uses 4096x4096 for its generic 4K square
+    # option.  GPT Image 2's custom-size contract caps the square at
+    # 2880x2880 (8,294,400 pixels), so normalize that legacy value to the
+    # largest supported square instead of rejecting the request.
+    if (width, height) == (4096, 4096):
+        return {"width": 2880, "height": 2880}
     pixels = width * height
     if max(width, height) > 3840 or max(width / height, height / width) > 3:
         raise QiniuImageProtocolError(400, "七牛 GPT Image 2 尺寸最大边不能超过 3840，且长宽比不能超过 3:1")

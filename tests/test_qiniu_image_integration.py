@@ -40,17 +40,22 @@ class QiniuImageIntegrationTests(unittest.IsolatedAsyncioTestCase):
         ):
             image, _ = await main.generate_ai_image(
                 "修改背景",
-                "1024x1024",
+                "2048x2048",
                 "high",
                 "gpt-image-2",
                 refs,
                 "qiniu-test",
+                "1:1",
+                "2k",
             )
 
         self.assertEqual(image["value"], "https://cdn.example.com/result.png")
         preflight.assert_awaited_once_with(refs)
         request = generate.await_args.args[0]
         self.assertEqual(request["reference_images"], prepared)
+        self.assertEqual(request["size"], "2048x2048")
+        self.assertEqual(request["aspect_ratio"], "1:1")
+        self.assertEqual(request["resolution"], "2k")
         self.assertEqual(generate.await_args.kwargs["base_url"], "https://api.qnaigc.com")
 
     async def test_prepare_references_reuses_video_material_preflight(self):

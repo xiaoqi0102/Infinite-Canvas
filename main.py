@@ -3326,6 +3326,8 @@ class OnlineImageRequest(BaseModel):
     quality: str = "auto"
     n: int = 1
     reference_images: List[AIReference] = []
+    # Backward-compatible alias used by older clients and task-log replays.
+    references: List[AIReference] = []
 
 class MidjourneySubmitRequest(BaseModel):
     provider_id: str = ""
@@ -6067,6 +6069,8 @@ async def generate_tudou_async_image(prompt, size, quality, model, reference_ima
         "quality": str(quality or "").strip().lower() if str(quality or "").strip().lower() in {"low", "medium", "high"} else "medium",
     }
     images = await tudou_async_reference_images(reference_images)
+    if reference_images and not images:
+        raise HTTPException(status_code=400, detail="土豆 GPT-Image-2 参考图无法读取：请确认本地图片仍存在，或使用有效的公网图片 URL / data:image URL。")
     if images:
         body["images"] = images
     endpoint = provider_endpoint_url(provider, "image_generation_endpoint", "/v1/images/generations/async")
@@ -17269,7 +17273,10 @@ async def build_online_image_result(payload: OnlineImageRequest, progress=None):
     default_model = (provider.get("image_models") or [IMAGE_MODEL])[0]
     model = selected_model(payload.model, default_model)
     request_size = snap_size_to_multiple(payload.size, 16)
-    refs = [ref.dict() for ref in payload.reference_images if ref.url]
+    source_references = list(payload.reference_images or [])
+    if payload.references:
+        source_references.extend(payload.references)
+    refs = [ref.dict() for ref in source_references if ref.url]
     image_refs = image_references(refs)
     count = max(1, min(8, int(payload.n or 1)))
     request_attempts = []
@@ -17817,6 +17824,9 @@ async def query_image_task(payload: ImageTaskQueryRequest):
     }
 
 def canvas_image_request_meta(payload: "OnlineImageRequest"):
+    references = list(payload.reference_images or [])
+    if payload.references:
+        references.extend(payload.references)
     return {
         "provider_id": payload.provider_id,
         "model": payload.model,
@@ -17824,7 +17834,7 @@ def canvas_image_request_meta(payload: "OnlineImageRequest"):
         "size": payload.size,
         "quality": payload.quality,
         "n": max(1, min(8, int(payload.n or 1))),
-        "reference_image_count": len([ref for ref in payload.reference_images if ref.url]),
+        "reference_image_count": len([ref for ref in references if ref.url]),
     }
 
 
